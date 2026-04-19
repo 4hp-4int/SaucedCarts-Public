@@ -1,0 +1,179 @@
+[img]https://pz-mod-images.us-southeast-1.linodeobjects.com/carts-radio-header.gif[/img]
+
+[h1]ATTENTION SHOPPERS![/h1]
+
+[b][i]Introducing the REVOLUTIONARY new way to haul your apocalypse haul![/i][/b]
+
+[hr][/hr]
+
+[i]"The Cart That Won't Let You Down!"[/i]
+
+Are YOU tired of making seventeen trips between the Gigamart and your safehouse? Does your back ache from lugging canned goods across Muldraugh? Have you ever wished you could push an entire aisle's worth of supplies home in ONE trip?
+
+[b]WELL WISH NO MORE, FRIEND![/b]
+
+SaucedCarts brings you the [b]GENUINE SHOPPING CART EXPERIENCE[/b] — now with that special Build 42 flavor! Push, haul, and transport like it's 1993 again!
+
+[img]https://pz-mod-images.us-southeast-1.linodeobjects.com/carts-radio-features.gif[/img]
+
+[hr][/hr]
+
+[h1]QUALITY YOU CAN TRUST[/h1]
+
+Unlike those [i]other[/i] cart mods that fall apart faster than a Spiffo's franchise, SaucedCarts is built DIFFERENT:
+
+[list]
+[*] [b]NO DUPLICATION BUGS![/b] — Our patented Single-Item Technology means your cart stays YOUR cart. No mysterious twins. No phantom copies. Just one honest cart.
+
+[*] [b]MULTIPLAYER CERTIFIED![/b] — Host a server for 100 of your closest friends! Every cart syncs perfectly. What YOU see is what THEY see. That's the SaucedCarts guarantee!
+
+[*] [b]COMBAT READY![/b] — Zombie got the jump on you? Simply AIM and your cart DROPS INSTANTLY! No fumbling, no menus, no getting chomped while you figure out how to fight back!
+
+[*] [b]SMOOTH AS BUTTER![/b] — Event-driven engineering means your framerate stays CRISPY. No lag. No stutter. Just pure cart-pushing bliss.
+[/list]
+
+[hr][/hr]
+
+[h1]FEATURES GALORE![/h1]
+
+[b]FIND 'EM IN THE WILD![/b]
+These beauties spawn naturally in grocery stores, department stores, warehouses, and parking lots across Knox County. It's a big, beautiful shopping cart! The pioneers used to push these babies for miles. And they're in great shape!
+
+[i]WARNING: SaucedCarts Shopping Carts and Cart Derivatives only spawn in previously unexplored areas.[/i]
+
+[b]WATCH 'EM WEAR![/b]
+Distance-based durability means your cart degrades the MORE you push it — not just from picking it up! Push 11,000 tiles and she's done for. That's REALISTIC, folks!
+
+[b]FIX 'EM UP![/b]
+Low on condition? Grab some scrap metal and get to work! Higher Maintenance skill = better repairs = longer cart life! It's called PROGRESSION, baby!
+
+[b]SEE 'EM FILL![/b]
+Empty cart? Empty model. Half-full cart? Half-full model. STUFFED cart? You bet your bottom dollar that cart LOOKS stuffed! Dynamic visuals that update in REAL TIME!
+
+[b]STORE 'EM SMART![/b]
+Carts go on the GROUND, in your HANDS, or in your VEHICLE. That's IT! No stuffing shopping carts into backpacks here — we're not ANIMALS!
+
+[b]CRAFT YOUR OWN![/b]
+Can't find one? BUILD one! Welding 3 and some elbow grease gets you rolling in no time!
+
+[hr][/hr]
+
+[img]https://pz-mod-images.us-southeast-1.linodeobjects.com/carts-header-flashlight.gif[/img]
+
+[b]THE FLASHLIGHT UPGRADE![/b]
+Mount any flashlight on your cart! Press [b]F[/b] to toggle!
+Hands-free illumination for those midnight Gigamart runs!
+
+[list]
+[*] [b]EASY INSTALL![/b] — Grab a flashlight, add some duct tape or twine, DONE!
+[*] [b]BATTERY SWAP![/b] — Pop batteries in and out via context menu!
+[*] [b]ALWAYS READY![/b] — Works while pushing, looting, or running for your life!
+[*] [b]MULTIPLAYER SYNCED![/b] — Other players see your light toggle in real-time!
+[/list]
+
+[i]Installation requires: Flashlight + (Duct Tape OR Cable Ties OR Adhesive Tape x2 OR Rope x2 OR Twine x2)[/i]
+
+[img]https://pz-mod-images.us-southeast-1.linodeobjects.com/carts-specs.gif[/img]
+
+[hr][/hr]
+
+[h1]FULLY CUSTOMIZABLE![/h1]
+
+Server admins and sandbox enthusiasts rejoice! Adjust EVERYTHING:
+[list]
+[*] Spawn rates (0-500%)
+[*] Capacity multiplier
+[*] Durability multiplier
+[*] Repair effectiveness
+[*] Max carts per building
+[*] And MORE!
+[/list]
+
+[hr][/hr]
+
+[img]https://pz-mod-images.us-southeast-1.linodeobjects.com/carts-header-modders.gif[/img]
+
+Got a wheelbarrow model burning a hole in your hard drive? A custom hand truck design? SaucedCarts features a [b]COMPLETE ADDON API[/b].
+
+[code]
+SaucedCarts.registerCart("YourMod.YourCart", {
+    name = "Your Fancy Cart",
+    capacity = 40,
+    spawnRooms = {{ room = "warehouse", chance = 30 }},
+})
+[/code]
+
+That's IT! Your cart automatically gets world spawning, durability, repairs, visual states, and full MP sync. We did the HARD work so YOU don't have to! But don't be FOOLED friends, the fine folks here at SaucedCarts are LAZY, we built this API so YOU can do the hard work, just like Uncle Sam intended!
+
+[hr][/hr]
+
+[h1]THE SAUCEDCARTS PROMISE[/h1]
+
+[quote]
+[i]"SaucedCarts is not liable for any injury which occurs whilst in possession of a SaucedCart Shopping Cart or Cart Derivatives."[/i]
+[/quote]
+
+[list]
+[*] Server-authoritative state management
+[*] Graceful failure on edge cases
+[*] Self-correcting visual sync
+[*] Memory-bounded spawn queues
+[*] Exploit-resistant container restrictions
+[/list]
+
+[hr][/hr]
+
+[h1]WHAT'S IN THE BOX?[/h1]
+
+[b]Build 42.13.1+ REQUIRED[/b]
+
+[list]
+[*] Shopping Cart (craftable & world spawning)
+[*] Full animation set (idle, walk, run, sprint)
+[*] Custom fill-state models
+[*] Complete documentation
+[*] Addon development template
+[/list]
+
+[hr][/hr]
+
+[h1]FREQUENTLY ASKED[/h1]
+
+[b]Q: Does this work in multiplayer?[/b]
+A: ABSOLUTELY! Built from the ground up for dedicated servers. Every system is server-authoritative.
+
+[b]Q: Will this break my save?[/b]
+A: Nope! Migration system handles version updates automatically. Your carts are SAFE.
+
+[b]Q: Can I put a cart inside another cart?[/b]
+A: Nice try, wise guy. NO.
+
+[b]Q: What if an addon I'm using gets removed?[/b]
+A: Orphaned carts are detected automatically! You'll get a notification and can recover your items. We THOUGHT of everything!
+
+[hr][/hr]
+
+[h1]GET ROLLING TODAY![/h1]
+
+Subscribe now and experience the FUTURE of zombie apocalypse logistics!
+
+[i]SaucedCarts — Because your back deserves a break.[/i]
+
+[hr][/hr]
+
+[b]Compatible with:[/b] Build 42.13.1+
+[b]Languages:[/b] English
+[b]Multiplayer:[/b] YES (Designed for it!)
+[b]Client/Server:[/b] Required on BOTH
+
+[hr][/hr]
+
+[i]"I pushed a cart from Louisville to Riverside. It still works. 10/10." — Satisfied Customer[/i]
+
+[i]"Finally, a cart mod that doesn't turn my server into a duplicate item factory." — Server Admin[/i]
+
+By subscribing to SaucedCarts you acknowledge that: (a) shopping carts are for PUSHING, not for riding down hills into hordes; (b) any items lost to cart degradation are between you and your Maintenance skill; (c) we are not liable for marriages ruined by arguments over who gets to push the cart; (d) the pioneers thing was a joke, please do not attempt to ride a shopping cart across Knox County; (e) if you somehow manage to duplicate items, no you didn't, no we won't, and no that's not ours; (f) this mod is provided "as-is" with no warranty expressed or implied, but honestly it's better than that.
+
+SaucedCarts is not responsible for: zombie-related cart losses, server admins who set durability to 1%, the emotional bond you will form with your cart, or the crushing grief when it finally breaks.
+
+All carts are tested on survivors who knew what they were signing up for.

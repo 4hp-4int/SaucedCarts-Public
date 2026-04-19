@@ -1,0 +1,46 @@
+# ============================================================================
+# SaucedCarts .gitignore
+# ============================================================================
+# Public repo — entries below KEEP internal dev artefacts out of public
+# history. If the corresponding directories ever reappear locally during
+# development, git won't track them.
+# ============================================================================
+
+# --- Internal dev docs (public/private separation) ---
+internal/
+dev-wip/
+docs/archive/
+CLAUDE.md
+SaucedCarts.zbsproj
+
+# --- Personal dev tooling (lives in the monorepo, not per-mod) ---
+scripts/
+tools/
+
+# --- Claude Code / editor tooling ---
+.claude/
+.mcp.json
+.vscode/
+.idea/
+
+# --- Local symlinks / dev-machine dependencies ---
+.umbrella/
+.umbrella
+
+# --- Build output / decompiled source / packages ---
+output/
+mod-packages/
+*.zip
+
+# --- OS / editor noise ---
+Thumbs.db
+.DS_Store
+*.swp
+*.swo
+*~
+nul
+
+# --- Logs + local overrides ---
+*.log
+*.local
+*.local.*

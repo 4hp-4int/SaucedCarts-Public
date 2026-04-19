@@ -1,0 +1,27 @@
+name: PZ Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout SaucedCarts
+        uses: actions/checkout@v4
+
+      - name: Run pz-test-kit
+        uses: 4hp-4int/pz-test-kit@main
+        with:
+          # SaucedCarts repo root is the mod root — pz-test.lua lives here.
+          mod-root: ${{ github.workspace }}
+
+      - name: Upload JUnit XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pz-test-results
+          path: pz-test-results.xml

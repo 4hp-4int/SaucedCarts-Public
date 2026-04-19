@@ -1,0 +1,113 @@
+VERSION = 1,
+
+option SaucedCarts.EnableMod
+{
+    type = boolean,
+    default = true,
+    page = SaucedCarts,
+    translation = SaucedCarts_EnableMod,
+}
+
+option SaucedCarts.SpawnRate
+{
+    type = integer,
+    min = 0,
+    max = 500,
+    default = 100,
+    page = SaucedCarts,
+    translation = SaucedCarts_SpawnRate,
+}
+
+option SaucedCarts.CapacityMultiplier
+{
+    type = integer,
+    min = 25,
+    max = 400,
+    default = 100,
+    page = SaucedCarts,
+    translation = SaucedCarts_CapacityMultiplier,
+}
+
+option SaucedCarts.DurabilityMultiplier
+{
+    type = integer,
+    min = 25,
+    max = 400,
+    default = 100,
+    page = SaucedCarts,
+    translation = SaucedCarts_DurabilityMultiplier,
+}
+
+option SaucedCarts.MaxCartsPerBuilding
+{
+    type = integer,
+    min = 1,
+    max = 5,
+    default = 1,
+    page = SaucedCarts,
+    translation = SaucedCarts_MaxCartsPerBuilding,
+}
+
+option SaucedCarts.WeightReduction
+{
+    type = integer,
+    min = 0,
+    max = 99,
+    default = 95,
+    page = SaucedCarts,
+    translation = SaucedCarts_WeightReduction,
+}
+
+option SaucedCarts.SpeedPenaltyMultiplier
+{
+    type = integer,
+    min = 0,
+    max = 200,
+    default = 100,
+    page = SaucedCarts,
+    translation = SaucedCarts_SpeedPenaltyMultiplier,
+}
+
+option SaucedCarts.RepairAmountMultiplier
+{
+    type = integer,
+    min = 25,
+    max = 400,
+    default = 100,
+    page = SaucedCarts,
+    translation = SaucedCarts_RepairAmountMultiplier,
+}
+
+option SaucedCarts.RepairTimeMultiplier
+{
+    type = integer,
+    min = 25,
+    max = 400,
+    default = 100,
+    page = SaucedCarts,
+    translation = SaucedCarts_RepairTimeMultiplier,
+}
+
+option SaucedCarts.MaintenanceSkillBonus
+{
+    type = boolean,
+    default = true,
+    page = SaucedCarts,
+    translation = SaucedCarts_MaintenanceSkillBonus,
+}
+
+option SaucedCarts.EnableDebugLogs
+{
+    type = boolean,
+    default = false,
+    page = SaucedCarts,
+    translation = SaucedCarts_EnableDebugLogs,
+}
+
+option SaucedCarts.StrictShopOnly
+{
+    type = boolean,
+    default = false,
+    page = SaucedCarts,
+    translation = SaucedCarts_StrictShopOnly,
+}
