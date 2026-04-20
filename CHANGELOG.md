@@ -2,76 +2,55 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.4 — 2026-04-19 (Hotfix)
+
+### Bug Fixes
+
+**Cart transfers on dedicated MP — only inv→ground-cart worked**
+The v2.1.3 `CartTransferInterceptor` only matched on destination container. Three of the four cart-involved transfer cases silently fell through to vanilla's `TransactionManager.isConsistent`, which rejects them on dedicated servers because Java-internal `getEffectiveCapacity` bypasses our Lua capacity override. Symptom: progress bar completes, item stays in place. Rewrote the classifier as direction-neutral — matches ANY transfer where source OR destination is a cart's inner container, in-hand or on-ground. All four directions now route through the custom `ISCartTransferAction` which bypasses `TransactionManager` entirely and delegates to vanilla `ISTransferAction:transferItem` (keeps unequip, worn-item removal, `OnClothingUpdated` model refresh, radio / candle / lantern swaps intact).
+
+- `player inv → ground cart`: worked → still works
+- `ground cart → player inv`: broken → fixed
+- `player inv → in-hand cart`: broken → fixed
+- `in-hand cart → player inv`: broken → fixed
+
+### Back-compat
+
+- The old `ISCartDepositAction` symbol remains as an alias to `ISCartTransferAction` so any integration that referenced it directly keeps working.
+- The old `depositToGroundCart` server command is aliased to the new `cartTransfer` handler so a client loaded before this update can still complete their in-flight transfer mid-session.
+- `SaucedCarts.performCartDeposit(player, item, cart)` kept as a thin wrapper around `SaucedCarts.performCartTransfer(player, item, src, dst)`.
+
+### Dev Tooling
+
+Tests now cover the full 4-way cart transfer matrix (ground/in-hand × source/dest) plus drop-to-floor and floor-to-cart pickup paths (broadcast counts, worldItem lifecycle, 5-arg `AddWorldInventoryItem` contract). Previous test file only asserted on destContainer — the exact coverage gap that let the v2.1.3 bug ship. 50/50 offline tests pass; regression simulations (reverting the classifier to v2.1.3-style dest-only match; reverting to the 4-arg `AddWorldInventoryItem` form) each cause their expected tests to fail.
+
+### Backward Compatibility
+
+Save-safe. No ModData schema changes. Safe to upgrade mid-save.
+
+---
+
 ## v2.1.3 — 2026-04-19
 
 ### Bug Fixes
 
 **Crafting on dedicated MP servers**
-Players could not craft the Shopping Cart on dedicated servers — the
-action would animate on the client but never complete. Root cause was
-the recipe living in `module SaucedCarts` instead of `module Base`:
-vanilla's `NetTimedAction.parse` on the server looks up the recipe by
-full name and returned null, so `ISHandcraftAction.lua:400` threw
-`attempted index: isCanWalk of non-table: null` and silently cancelled
-the action. Moved the recipe to `module Base` (and removed
-`imports {Base}` from the items file to avoid a module-import cycle
-that would have infinite-recursed PZ's `ScriptBucket.get`).
+Players could not craft the Shopping Cart on dedicated servers — the action would animate on the client but never complete. Root cause was the recipe living in `module SaucedCarts` instead of `module Base`: vanilla's `NetTimedAction.parse` on the server looks up the recipe by full name and returned null, so `ISHandcraftAction.lua:400` threw `attempted index: isCanWalk of non-table: null` and silently cancelled the action. Moved the recipe to `module Base` (and removed `imports {Base}` from the items file to avoid a module-import cycle that would have infinite-recursed PZ's `ScriptBucket.get`).
 
 **Ground-cart duplication on MP**
-Pushing a cart while entering a vehicle could produce two copies of the
-cart on the ground, contents duplicated. Vanilla's `forceDropHeavyItems`
-has no precondition guard — when the hand ref is stale (cart already on
-the ground, or already removed from inventory), it calls
-`AddWorldInventoryItem` on the stale reference and spawns a second
-world object. Added `ForceDropGuard` that wraps the vanilla function
-and clears stale hand refs before vanilla runs. Bug is engine-level and
-affects every path that touches heavy items (`ISEnterVehicle`,
-`ISEquipWeaponAction`, `ISEquipHeavyItem`, `ISGrabCorpseAction`); the
-guard covers the whole class.
+Pushing a cart while entering a vehicle could produce two copies of the cart on the ground, contents duplicated. Vanilla's `forceDropHeavyItems` has no precondition guard — when the hand ref is stale (cart already on the ground, or already removed from inventory), it calls `AddWorldInventoryItem` on the stale reference and spawns a second world object. Added `ForceDropGuard` that wraps the vanilla function and clears stale hand refs before vanilla runs. Bug is engine-level and affects every path that touches heavy items (`ISEnterVehicle`, `ISEquipWeaponAction`, `ISEquipHeavyItem`, `ISGrabCorpseAction`); the guard covers the whole class.
 
 **Capacity / item transfer on MP ground carts**
-Items could not be transferred into a cart on the ground beyond ~50kg
-on dedicated servers, even when the cart's displayed capacity was
-higher. Root cause: vanilla's `TransactionManager.isConsistent` on the
-server uses Java-internal `getEffectiveCapacity`, which bypasses our
-Lua override and hits PZ's hardcoded 50-cap. Added
-`CartTransferInterceptor` + `ISCartDepositAction`: narrowly intercepts
-`ISInventoryTransferAction` ONLY when the destination is a SaucedCarts
-cart whose inner container is NOT parented to an `IsoGameCharacter`
-(ground carts, vehicle-storage carts). In-hand transfers and non-cart
-transfers continue through vanilla unchanged. The custom action
-bypasses `TransactionManager` and delegates to vanilla
-`ISTransferAction:transferItem` so all the edge cases (clothing
-unequip, worn-item removal, `OnClothingUpdated` fire for model refresh,
-radio / candle / lantern item swaps) keep working.
+Items could not be transferred into a cart on the ground beyond ~50kg on dedicated servers, even when the cart's displayed capacity was higher. Root cause: vanilla's `TransactionManager.isConsistent` on the server uses Java-internal `getEffectiveCapacity`, which bypasses our Lua override and hits PZ's hardcoded 50-cap. Added `CartTransferInterceptor` + `ISCartDepositAction`: narrowly intercepts `ISInventoryTransferAction` ONLY when the destination is a SaucedCarts cart whose inner container is NOT parented to an `IsoGameCharacter` (ground carts, vehicle-storage carts). In-hand transfers and non-cart transfers continue through vanilla unchanged. The custom action bypasses `TransactionManager` and delegates to vanilla `ISTransferAction:transferItem` so all the edge cases (clothing unequip, worn-item removal, `OnClothingUpdated` fire for model refresh, radio / candle / lantern item swaps) keep working.
 
 **Spawn locations**
-Carts were spawning in weird places — apartments, chicken coops,
-parking lots adjacent to residential buildings. The old default list
-had several phantom room names (`supermarket`, `mall`, `parkinglot`,
-`electronicsstore` [typo — vanilla spells it `electronicstore`]) that
-have no distribution entry in PZ's vanilla `Distributions.lua`. Those
-registrations silently never fired on vanilla maps. Replaced the
-default list with 34 vanilla-verified room names and added a
-building-signature filter that uses PZ's own
-`BuildingDef.isResidential()` and `IsoGridSquare:getBuilding()` —
-rejects residential buildings (apartments + houses, which have
-bedrooms) and purely-outdoor squares. Addon authors opt out per-entry
-via flags (see **New Features** below).
+Carts were spawning in weird places — apartments, chicken coops, parking lots adjacent to residential buildings. The old default list had several phantom room names (`supermarket`, `mall`, `parkinglot`, `electronicsstore` [typo — vanilla spells it `electronicstore`]) that have no distribution entry in PZ's vanilla `Distributions.lua`. Those registrations silently never fired on vanilla maps. Replaced the default list with 34 vanilla-verified room names and added a building-signature filter that uses PZ's own `BuildingDef.isResidential()` and `IsoGridSquare:getBuilding()` — rejects residential buildings (apartments + houses, which have bedrooms) and purely-outdoor squares. Addon authors opt out per-entry via flags (see **New Features** below).
 
 **ForceDropGuard init on dedicated server**
-The guard relied on `OnGameStart`, which does not fire on dedicated
-server for mod Lua. Fixed by also hooking `OnServerStarted` AND doing a
-load-time install when classes are available. Install is idempotent
-(double-firing is a no-op). Initialization is now logged at info level
-so the fact that the guard installed is visible in the server DebugLog
-without debug flags.
+The guard relied on `OnGameStart`, which does not fire on dedicated server for mod Lua. Fixed by also hooking `OnServerStarted` AND doing a load-time install when classes are available. Install is idempotent (double-firing is a no-op). Initialization is now logged at info level so the fact that the guard installed is visible in the server DebugLog without debug flags.
 
 **Capacity display/deposit asymmetry**
-Inner/outer `getCapacity` Lua overrides were not installed on dedicated
-servers because of the `OnGameStart` issue above. Same fix
-(`OnServerStarted` + load-time install) applies. Carts in hand and on
-the ground now show consistent capacity server-side.
+Inner/outer `getCapacity` Lua overrides were not installed on dedicated servers because of the `OnGameStart` issue above. Same fix (`OnServerStarted` + load-time install) applies. Carts in hand and on the ground now show consistent capacity server-side.
 
 ### New Features (Addon Authors)
 
@@ -92,11 +71,7 @@ spawnRooms = {
 - `allowOutdoor` — bypass the "requires indoor building" check
 - `skipFrameworkFilters` — bypass ALL framework filters
 
-The base ShoppingCart uses none of these flags — it ships with the safe
-defaults. Existing addon carts that didn't set flags now inherit the
-new filters. If one of your spawns stops firing after this update,
-adding `allowResidential = true` / `allowOutdoor = true` to the
-relevant entry restores prior behaviour.
+The base ShoppingCart uses none of these flags — it ships with the safe defaults. Existing addon carts that didn't set flags now inherit the new filters. If one of your spawns stops firing after this update, adding `allowResidential = true` / `allowOutdoor = true` to the relevant entry restores prior behaviour.
 
 **Vanilla room discovery API**
 
@@ -106,9 +81,7 @@ SaucedCarts.isVanillaRoom("supermarket")   -- false (phantom)
 SaucedCarts.getPhantomSpawnRooms()         -- { <phantom names> }
 ```
 
-Wraps PZ's `ItemPickerJava.hasDistributionForRoom` — authoritative for
-"does this room name exist in vanilla". Use before shipping an addon to
-confirm `spawnRooms` entries match vanilla maps.
+Wraps PZ's `ItemPickerJava.hasDistributionForRoom` — authoritative for "does this room name exist in vanilla". Use before shipping an addon to confirm `spawnRooms` entries match vanilla maps.
 
 **Debug commands**
 
@@ -124,17 +97,11 @@ Server admin console:
 
 **Optional `StrictShopOnly` sandbox**
 
-Default OFF. When on, requires `BuildingDef.isShop() == true` in
-addition to the existing residential / outdoor filters. For servers
-that want tighter control over cart distribution.
+Default OFF. When on, requires `BuildingDef.isShop() == true` in addition to the existing residential / outdoor filters. For servers that want tighter control over cart distribution.
 
 ### Dev Tooling
 
-- Offline test harness via pz-test-kit. 35 tests running on PZ's actual
-  Kahlua VM — force-drop guard, dual-VM MP sync, spawn filter, cart
-  deposit interception. All tests exercise real vanilla PZ Lua
-  (`ISTransferAction`, `ISBaseTimedAction`) via pz-test-kit's
-  `vanilla_requires` mechanism — no mock drift.
+- Offline test harness via pz-test-kit. 35 tests running on PZ's actual Kahlua VM — force-drop guard, dual-VM MP sync, spawn filter, cart deposit interception. All tests exercise real vanilla PZ Lua (`ISTransferAction`, `ISBaseTimedAction`) via pz-test-kit's `vanilla_requires` mechanism — no mock drift.
 - GitHub Actions CI workflow runs the full test suite on every push.
 
 ### Known-Harmless Warnings
@@ -142,14 +109,11 @@ that want tighter control over cart distribution.
 These appear on server startup and are NOT bugs in this mod:
 - `ModelScript.checkMesh > no such mesh "weapons/2handed/ShoppingCart_PZ|ShoppingCart"`
 
-Vanilla's fbx mesh-name verification flags this but the model still
-loads and renders. Will be addressed in a future release.
+Vanilla's fbx mesh-name verification flags this but the model still loads and renders. Will be addressed in a future release.
 
 ### Backward Compatibility
 
-Save-safe. ModData schema unchanged. Existing carts keep their
-durability, content, and pickup state across the update. No ModData
-migration needed.
+Save-safe. ModData schema unchanged. Existing carts keep their durability, content, and pickup state across the update. No ModData migration needed.
 
 ---
 
@@ -157,48 +121,25 @@ migration needed.
 
 ### Bug Fixes
 
-- Cart capacity was limited to ~42 instead of the displayed 50. The
-  capacity override only activated when the sandbox multiplier exceeded
-  100%. At default settings, Java's internal cap (50 minus cart weight
-  = 42) blocked item transfers even though the UI showed the correct
-  capacity. Fixed — override now runs for all carts.
-- Carts on the ground couldn't be filled past ~40 capacity. PZ's
-  per-tile floor weight limit was treating items going into a cart as
-  loose items on the ground. Items inside a cart container are not on
-  the floor — the floor weight check is now skipped for cart
-  containers.
-- Weight reduction showed 95 when sandbox was set to 100. The old
-  `WeightReductionMultiplier` setting multiplied the base 95% value
-  instead of setting the weight reduction directly. Renamed to
-  `WeightReduction` — now an absolute percentage (95 means items weigh
-  5% of normal). Capped at 99.
-- Changing sandbox capacity mid-game had no effect on existing carts.
-  Cart capacity was frozen at creation time. The capacity system now
-  reads the live sandbox setting dynamically. Admin changes the
-  multiplier, all carts update immediately.
-- Recipe display showed raw ID instead of name. Added translation file
-  for crafting UI.
+- Cart capacity was limited to ~42 instead of the displayed 50. The capacity override only activated when the sandbox multiplier exceeded 100%. At default settings, Java's internal cap (50 minus cart weight = 42) blocked item transfers even though the UI showed the correct capacity. Fixed — override now runs for all carts.
+- Carts on the ground couldn't be filled past ~40 capacity. PZ's per-tile floor weight limit was treating items going into a cart as loose items on the ground. Items inside a cart container are not on the floor — the floor weight check is now skipped for cart containers.
+- Weight reduction showed 95 when sandbox was set to 100. The old `WeightReductionMultiplier` setting multiplied the base 95% value instead of setting the weight reduction directly. Renamed to `WeightReduction` — now an absolute percentage (95 means items weigh 5% of normal). Capped at 99.
+- Changing sandbox capacity mid-game had no effect on existing carts. Cart capacity was frozen at creation time. The capacity system now reads the live sandbox setting dynamically. Admin changes the multiplier, all carts update immediately.
+- Recipe display showed raw ID instead of name. Added translation file for crafting UI.
 
 ### Sandbox Changes
 
-- `WeightReductionMultiplier` renamed to `WeightReduction`. Existing
-  saves with the old setting fall back gracefully. Default changed
-  from 100 to 95.
+- `WeightReductionMultiplier` renamed to `WeightReduction`. Existing saves with the old setting fall back gracefully. Default changed from 100 to 95.
 
 ### Compatibility
 
-- Guns of 93 crashes when picking up carts (AttachmentAdjust tries to
-  call weapon methods on a cart item). Root cause is an operator
-  precedence error in Guns93's instanceof guard — bug report filed
-  with the Guns93 developer.
+- Guns of 93 crashes when picking up carts (AttachmentAdjust tries to call weapon methods on a cart item). Root cause is an operator precedence error in Guns93's instanceof guard — bug report filed with the Guns93 developer.
 
 ---
 
 ## v2.0.0 — Initial B42 release
 
-Clean rewrite of the cart system for Project Zomboid Build 42. Fixes
-the duplication, equip, and MP desync bugs from the pre-existing
-ZuperCarts family.
+Clean rewrite of the cart system for Project Zomboid Build 42. Fixes the duplication, equip, and MP desync bugs from the pre-existing ZuperCarts family.
 
 Features at launch:
 - ShoppingCart with durability system (distance-based degradation)

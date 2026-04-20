@@ -28,9 +28,12 @@ return {
     },
 
     -- Preload SaucedCarts namespace so tests can inspect it without each
-    -- file re-requiring.
+    -- file re-requiring. CartData defines SaucedCarts.registerCart /
+    -- getCartData / CartTypes — tests for capacity / durability / pickup
+    -- need a registered cart type to exercise lookup paths.
     preload = {
         "SaucedCarts/Core",
+        "SaucedCarts/CartData",
     },
 
     -- Sandbox defaults (mirror media/sandbox-options.txt).

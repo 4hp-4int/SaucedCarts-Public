@@ -421,6 +421,17 @@ end
 
 SaucedCarts.CapacityOverride = CapacityOverride
 
+-- ============================================================================
+-- TEST HOOKS
+-- ============================================================================
+-- Expose internal pure helpers for offline tests. Underscore prefix signals
+-- "do not call from production code" — production callers go through the
+-- metatable overrides installed in initCapacityOverride.
+CapacityOverride._computeEffectiveCapacity = computeEffectiveCapacity
+CapacityOverride._floatingPointCorrection  = floatingPointCorrection
+CapacityOverride._getCartRawCapacity       = getCartRawCapacity
+CapacityOverride._rawCapKey                = RAW_CAP_KEY
+
 SaucedCarts.debug("CapacityOverride module loaded")
 
 return CapacityOverride

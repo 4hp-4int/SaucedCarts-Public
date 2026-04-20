@@ -1,0 +1,35 @@
+SaucedCarts v2.1.4 - Hotfix Changelog
+=====================================
+
+BUG FIX
+-------
+
+Cart transfers on dedicated MP - only inv->ground-cart worked
+The v2.1.3 CartTransferInterceptor only matched on destination container. Three of the four cart-involved transfer cases silently fell through to vanilla's TransactionManager.isConsistent, which rejects them on dedicated servers because Java-internal getEffectiveCapacity bypasses our Lua capacity override. Symptom: progress bar completes, item stays in place.
+
+Rewrote the classifier as direction-neutral - matches ANY transfer where source OR destination is a cart's inner container, in-hand or on-ground. All four directions now route through the custom ISCartTransferAction which bypasses TransactionManager entirely and delegates to vanilla ISTransferAction:transferItem (keeps unequip, worn-item removal, OnClothingUpdated model refresh, radio / candle / lantern swaps intact).
+
+- player inv      -> ground cart        worked -> still works
+- ground cart     -> player inv         broken -> fixed
+- player inv      -> in-hand cart       broken -> fixed
+- in-hand cart    -> player inv         broken -> fixed
+
+
+BACK-COMPAT
+-----------
+
+- The old ISCartDepositAction symbol remains as an alias to ISCartTransferAction so any integration that referenced it directly keeps working.
+- The old depositToGroundCart server command is aliased to the new cartTransfer handler so a client loaded before this update can still complete their in-flight transfer mid-session.
+- SaucedCarts.performCartDeposit(player, item, cart) kept as a thin wrapper around SaucedCarts.performCartTransfer(player, item, src, dst).
+
+
+DEV TOOLING
+-----------
+
+Tests now cover the full 4-way cart transfer matrix (ground/in-hand x source/dest) plus drop-to-floor and floor-to-cart pickup paths (broadcast counts, worldItem lifecycle, 5-arg AddWorldInventoryItem contract). Previous test file only asserted on destContainer - the exact coverage gap that let the v2.1.3 bug ship. 50/50 offline tests pass; regression simulations (reverting the classifier to v2.1.3-style dest-only match; reverting to the 4-arg AddWorldInventoryItem form) each cause their expected tests to fail.
+
+
+BACKWARD COMPATIBILITY
+----------------------
+
+Save-safe. No ModData schema changes. Safe to upgrade mid-save.

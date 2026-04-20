@@ -381,6 +381,41 @@ local function initDropActionHook()
         return
     end
 
+    -- Wrap isValid to bypass vanilla's 50kg floor-weight gate for carts.
+    -- Vanilla's check (`ground + item:getUnequippedWeight() > 50 -> invalid`)
+    -- treats a loaded cart as indistinguishable from "loose items on the
+    -- floor" — so a cart full of rescue-run loot is rejected the moment
+    -- the user presses V / selects Drop, and the action queue clears as
+    -- "bugged". Carts are wheeled containers, not pile-of-loose-items;
+    -- the floor cap shouldn't apply. Same class of carve-out as the
+    -- container-restriction fix that stopped the floor cap from rejecting
+    -- items going INTO a ground cart.
+    local originalIsValid = ISDropWorldItemAction.isValid
+    if originalIsValid then
+        ISDropWorldItemAction.isValid = function(self)
+            local isCart = false
+            pcall(function()
+                isCart = self.item and SaucedCarts.safeIsCart(self.item)
+            end)
+            if not isCart then
+                return originalIsValid(self)
+            end
+
+            local playerSq = self.character and self.character:getCurrentSquare()
+            if self.isPlaceItem and playerSq ~= nil
+                and (not self.sq:isAdjacentTo(playerSq) or self.sq:isBlockedTo(playerSq)) then
+                return false
+            end
+
+            local inv = self.character:getInventory()
+            if not inv then return false end
+            if isClient() and self.item then
+                return inv:containsID(self.item:getID())
+            end
+            return inv:contains(self.item)
+        end
+    end
+
     ISDropWorldItemAction.complete = function(self)
         -- Check if dropping a SaucedCarts cart
         local isCart = false
@@ -548,6 +583,9 @@ end
 
 -- Export for debug access
 SaucedCarts.ContainerRestrictions = ContainerRestrictions
+
+-- Test hooks (exposed for pz-test-kit — not part of the public API).
+SaucedCarts.ContainerRestrictions.initDropActionHook = initDropActionHook
 
 SaucedCarts.debug("ContainerRestrictions module loaded")
 
