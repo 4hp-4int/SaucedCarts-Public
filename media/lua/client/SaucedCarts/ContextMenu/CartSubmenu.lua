@@ -15,6 +15,9 @@ require "SaucedCarts/Core"
 local RepairMenu = require "SaucedCarts/ContextMenu/RepairMenu"
 local FlashlightMenu = require "SaucedCarts/ContextMenu/FlashlightMenu"
 
+require "SaucedCarts/TimedActions/ISCartLoadCorpseAction"
+require "SaucedCarts/CorpseStorage"
+
 ---@class SaucedCartsCartSubmenu
 local CartSubmenu = {}
 
@@ -152,6 +155,54 @@ function CartSubmenu.addCartOptionsSubmenu(context, playerObj, cart, cartName, i
 
     -- 3. Flashlight submenu
     FlashlightMenu.buildFlashlightSubmenu(submenu, playerObj, cart, isWorldCart)
+
+    -- 3.5. Load dragged corpse into cart (only when player is grappling one)
+    local corpseFeatureOn = SaucedCarts.CorpseStorage
+        and SaucedCarts.CorpseStorage.isEnabled
+        and SaucedCarts.CorpseStorage.isEnabled()
+    if corpseFeatureOn and playerObj.isDraggingCorpse and playerObj:isDraggingCorpse() then
+        local loadText = getTextOrFallback("UI_SaucedCarts_LoadCorpse", "Load Corpse into Cart")
+        local loadOpt = submenu:addOption(loadText, playerObj, function(player, theCart)
+            -- Re-check gate at click-time (MP: another player may have
+            -- filled the cart between menu-build and click).
+            local w = 20.0
+            if IsoGameCharacter and IsoGameCharacter.getWeightAsCorpse then
+                local okw, ww = pcall(function() return IsoGameCharacter.getWeightAsCorpse() end)
+                if okw and type(ww) == "number" then w = ww end
+            end
+            local ok2, reason2 = SaucedCarts.CorpseStorage.canLoadCorpseIntoCart(theCart, w)
+            if not ok2 then
+                if HaloTextHelper then
+                    local txtKey = (reason2 == "cart full")
+                        and "UI_SaucedCarts_LoadBlocked_cart_full"
+                        or  "UI_SaucedCarts_LoadBlocked_fallback"
+                    HaloTextHelper.addBadText(player, getText(txtKey))
+                end
+                return
+            end
+            ISTimedActionQueue.add(ISCartLoadCorpseAction:new(player, theCart))
+        end, cart)
+        local loadTex = cart.getTexture and cart:getTexture()
+        if loadTex then loadOpt.iconTexture = loadTex end
+
+        -- Weight gate: use vanilla static IsoGameCharacter.getWeightAsCorpse
+        -- (20kg in B42). Server re-checks authoritatively.
+        local weight = 20.0
+        if IsoGameCharacter and IsoGameCharacter.getWeightAsCorpse then
+            local ok, w = pcall(function() return IsoGameCharacter.getWeightAsCorpse() end)
+            if ok and type(w) == "number" then weight = w end
+        end
+        local gateOk, reason = SaucedCarts.CorpseStorage.canLoadCorpseIntoCart(cart, weight)
+        if not gateOk then
+            loadOpt.notAvailable = true
+            local tt = ISWorldObjectContextMenu.addToolTip()
+            tt:setVisible(false)
+            tt.description = "<RGB:1,0.5,0.5>" ..
+                getText("UI_SaucedCarts_LoadCorpseBlocked") ..
+                " (" .. tostring(reason) .. ")"
+            loadOpt.toolTip = tt
+        end
+    end
 
     -- 4. Fire event for addon extensions
     -- Addons can hook this to add their own upgrade submenus

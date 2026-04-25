@@ -2,6 +2,34 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.5 — 2026-04-20 (MP transfer fixes)
+
+### Bug Fixes
+
+**Container ↔ cart transfers on dedicated MP — duplication / silent no-op**
+`ISCartTransferAction.classifySide` had no branch for world containers (shelves, freezers, counters, barbecues, wardrobes) bound to `IsoObject`s on tiles. They collapsed to `"inv"` and the server resolved `playerInv` as the non-cart endpoint — so a transfer between a cart and a shelf silently used the player's main inventory instead. Symptoms: source unchanged + cart gets a copy (duplication, with `container already has id` log spam), or transfer animates but item doesn't move. Three-part fix: new `"world"` kind in `classifySide` (serializes tile coords + container type via `getSourceGrid()`), new `"world"` branch in `resolveSide` (iterates the tile's objects matching by container type), defensive fallback for pre-v2.1.5 clients via `item:getContainer()` plus an idempotence guard for "Take All" duplicate sends.
+
+**Cart → equipped bag deposited into main inv instead of the bag**
+`classifySide` also had no branch for containers whose `containingItem` is a non-cart `InventoryItem` (equipped backpacks, satchels, holsters, bag-in-bag). They fell through to `"inv"` so the server resolved `playerInv`. Two-part fix: new `"bag"` kind in `classifySide` (serializes the containing item's ID), new `"bag"` branch in `resolveSide` with recursive lookup that finds the bag by ID anywhere in the player's inventory tree.
+
+**Internal: findItemNearPlayer reachability**
+The pre-existing in-hand cart scan was placed after the gated `psq` check — so if the player had no current square, items in in-hand carts were unreachable. Refactored to use the new `findInventoryItemRecursive` helper as the first lookup, removing the dependency.
+
+### Known Limitation
+
+Pre-v2.1.5 clients that classify equipped bags as `"inv"` and send `destKind="inv"` for cart → bag transfers cannot be recovered server-side. Item lands in main inventory instead of the bag (same as v2.1.4 behaviour). Only fully-restarted v2.1.5 clients use the new `"bag"` classifier — reconnecting alone doesn't reload Lua.
+
+### Dev Tooling
+
+- 5 new offline regression tests for `"world"` kind + 5 for `"bag"` kind. 158/158 tests passing.
+- 1000-iteration property-based fuzzer alternates new/old client classifier per iteration, verifies conservation + uniqueness + moved invariants.
+- `pz-test-kit/shell` live stress probe drives 60+ real `handleCartTransfer` invocations against a running dedicated server using actual PZ objects (not mocks): 0 invariant violations.
+- Decompiled-source-verified writeup of PZ item transmit semantics in `pz-dev-tools/knowledge/pz-item-transmit-semantics.md` (cross-cutting; covers `AddItem` vs `SynchSpawn`, `sendAddItemToContainer` wire format, container-routing rules).
+
+### Backward Compatibility
+
+Save-safe. No ModData schema changes. Safe to upgrade mid-save. Old `depositToGroundCart` server command and `ISCartDepositAction` symbol both still aliased.
+
 ## v2.1.4 — 2026-04-19 (Hotfix)
 
 ### Bug Fixes

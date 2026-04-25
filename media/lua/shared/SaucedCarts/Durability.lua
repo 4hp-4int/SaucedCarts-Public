@@ -115,25 +115,50 @@ function SaucedCarts.Durability.dropContentsAndDestroy(cart, player, square)
         return false
     end
 
-    -- Drop all items to ground - cart is being destroyed, so we don't need
-    -- to sync container removal - just add items to world with auto-transmit
+    -- Drop all items to ground. Two paths:
+    --   - Corpse items: route through performCartTransfer so they
+    --     materialize as real IsoDeadBody via its floor-drop corpse
+    --     branch (loadCorpseFromByteData + addCorpse + sendCorpse).
+    --     Otherwise broken-cart corpses would drop as un-grabbable
+    --     Base.CorpseMale items with no respawn path.
+    --   - Non-corpse items: the original AddWorldInventoryItem path
+    --     (auto-transmit) — no benefit from performCartTransfer and it'd
+    --     need additional test stubbing for ISTransferAction deps.
+    -- M1 (2026-04-24): added corpse routing so broken carts containing
+    -- bodies behave correctly after the corpse-storage feature landed.
     if container then
         local items = container:getItems()
         local itemCount = items:size()
         local droppedCount = 0
-
         -- Iterate backwards since we're removing
         for i = itemCount - 1, 0, -1 do
             local item = items:get(i)
-            container:DoRemoveItem(item)  -- Local removal only, no sync needed
-            -- 5th param = true for auto-transmit in MP
-            square:AddWorldInventoryItem(item, 0.5, 0.5, 0, true)
-            droppedCount = droppedCount + 1
+            if item then
+                local isCorpse = SaucedCarts.CorpseStorage
+                    and SaucedCarts.CorpseStorage.isCorpseItem
+                    and SaucedCarts.CorpseStorage.isCorpseItem(item)
+                if isCorpse and player then
+                    pcall(function()
+                        SaucedCarts.performCartTransfer(player, item, container, nil, square, nil)
+                    end)
+                else
+                    container:DoRemoveItem(item)
+                    square:AddWorldInventoryItem(item, 0.5, 0.5, 0, true)
+                end
+                droppedCount = droppedCount + 1
+            end
         end
-
         if droppedCount > 0 then
             SaucedCarts.debug(function() return "Dropped " .. droppedCount .. " items from broken cart" end)
         end
+    end
+
+    -- Defensive final reconcile. Per-item drops already cleared counts,
+    -- but the onCartBroke event listener also calls reconcile(cart, nil);
+    -- we do it here too in case the caller fires dropContentsAndDestroy
+    -- without the associated onCartBroke event (idempotent anyway).
+    if SaucedCarts.CorpseStorage and SaucedCarts.CorpseStorage.reconcile then
+        pcall(function() SaucedCarts.CorpseStorage.reconcile(cart, nil) end)
     end
 
     -- Drop salvage materials (scrap metal, wire, etc.)

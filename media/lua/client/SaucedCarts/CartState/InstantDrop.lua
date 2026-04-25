@@ -74,8 +74,14 @@ function InstantDrop.dropCartSP(player, cartItem)
         return false
     end
 
-    -- Cancel any ongoing timed actions (player may be mid-transfer, repair, etc.)
-    ISTimedActionQueue.clear(player)
+    -- Note: previously we called ISTimedActionQueue.clear(player) here to
+    -- cancel mid-flight cart transfers / repairs. Problem: the action that
+    -- TRIGGERED the force-drop (ISGrabCorpseAction, ISEquipWeaponAction,
+    -- ISEnterVehicle, etc.) is itself in the queue — clearing it mid-tick
+    -- produces vanilla's "ISTimedActionQueue:tick: bugged action" freeze.
+    -- Mid-flight cart-dependent actions self-invalidate via their
+    -- :isValid() checks once the cart is in the world, so no explicit
+    -- clear is needed.
 
     local inventory = player:getInventory()
 
@@ -165,8 +171,12 @@ function InstantDrop.handle(player, cartItem)
             distancePushed = cartItem:getModData().SaucedCarts_distancePushed or 0,
         })
 
-        -- Cancel any ongoing timed actions
-        ISTimedActionQueue.clear(player)
+        -- Do NOT clear the queue here — same reason as the SP path: the
+        -- force-drop-triggering action (ISGrabCorpseAction etc.) is in
+        -- the queue, and clearing mid-tick produces vanilla's
+        -- "ISTimedActionQueue:tick: bugged action" freeze/crash. Cart-
+        -- dependent actions self-invalidate via :isValid() once the cart
+        -- is in the world.
 
         -- Mark pending drop (prevents onPlayerUpdate from re-applying animations)
         local playerKey = getPlayerKey(player)

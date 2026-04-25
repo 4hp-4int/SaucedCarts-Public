@@ -234,8 +234,11 @@ tests["dcd_moves_all_cart_contents_to_square"] = function()
     }
     for _, it in ipairs(items) do inner:AddItem(it) end
     local sq = F.square(0, 0, 0)
+    -- M1 refactor: dropContentsAndDestroy now routes items through
+    -- performCartTransfer, which requires a non-nil player. Pass one.
+    local player = F.player({ square = sq })
 
-    local ok = Durability.dropContentsAndDestroy(cart, nil, sq)
+    local ok = Durability.dropContentsAndDestroy(cart, player, sq)
     uninstallSalvageStub()
 
     if not Assert.isTrue(ok, "dropContentsAndDestroy returned success") then return false end
@@ -260,8 +263,9 @@ tests["dcd_fires_exactly_one_addWorldInventoryItem_per_content"] = function()
         inner:AddItem(F.item({ id = 200 + i, fullType = "Base.Plank" }))
     end
     local sq = F.square(0, 0, 0)
+    local player = F.player({ square = sq })  -- M1 refactor: needs player
 
-    Durability.dropContentsAndDestroy(cart, nil, sq)
+    Durability.dropContentsAndDestroy(cart, player, sq)
     uninstallSalvageStub()
 
     -- 5 content drops + up to 4 salvage drops = 9 world-add calls max, 5 min.

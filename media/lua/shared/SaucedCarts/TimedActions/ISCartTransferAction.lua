@@ -31,6 +31,61 @@ require "TimedActions/ISBaseTimedAction"
 require "SaucedCarts/Core"
 
 ISCartTransferAction = ISBaseTimedAction:derive("ISCartTransferAction")
+
+-- ============================================================================
+-- classifySide: serialise one side of a cart transfer for the server
+-- ============================================================================
+-- Pulled out of :perform() so offline tests can cover it directly without
+-- constructing a full timed action + stage. Returns six values:
+--   (kind, cartId, sqX, sqY, sqZ, containerType)
+-- where kind is one of:
+--   "floor"  — world square (needs coords)
+--   "cart"   — cart's inner container (needs cartId)
+--   "world"  — a non-cart world container bound to an IsoObject on a tile
+--              (needs coords + containerType so the server can locate the
+--              right container among the multiple objects on that tile)
+--   "bag"    — inner container of a non-cart InventoryItem (equipped
+--              backpack, satchel, holster, etc.). Serialized as the
+--              containing item's ID in the cartId slot; server looks up
+--              the item recursively in the player's inventory.
+--   "inv"    — player's main inventory (the default catchall; server uses
+--              this as a fallback but will also apply the defensive
+--              item:getContainer() check for pre-v2.1.5 clients)
+function ISCartTransferAction.classifySide(container, fallbackCartItem)
+    if not container or not container.getType then
+        return "inv", nil, nil, nil, nil, nil
+    end
+    local dtype = container:getType()
+    if dtype == "floor" then
+        local sqX, sqY, sqZ
+        local sq = container.getParent and container:getParent()
+        if sq and sq.getX then sqX, sqY, sqZ = sq:getX(), sq:getY(), sq:getZ() end
+        return "floor", nil, sqX, sqY, sqZ, nil
+    end
+    local ci = container.getContainingItem and container:getContainingItem()
+    if ci then
+        if SaucedCarts.safeIsCart(ci) then
+            return "cart", ci:getID(), nil, nil, nil, nil
+        end
+        -- Non-cart InventoryItem parent: equipped bag / satchel / holster /
+        -- backpack-in-backpack. Pre-bag-fix these fell through to "inv",
+        -- making the server resolve the player's main inventory — so a
+        -- transfer from a ground cart into an equipped bag would deposit
+        -- into main inv instead of the bag.
+        return "bag", ci:getID(), nil, nil, nil, nil
+    end
+    -- World container — bound to an IsoObject on a specific square. Before
+    -- v2.1.5, world containers collapsed to "inv" and the server resolveSide
+    -- returned the player's inventory instead — so a transfer between a
+    -- cart and a shelf silently used the player's main inventory as the
+    -- non-cart endpoint, producing dupes and "container already has id"
+    -- errors downstream.
+    local sg = container.getSourceGrid and container:getSourceGrid()
+    if sg and sg.getX then
+        return "world", nil, sg:getX(), sg:getY(), sg:getZ(), dtype
+    end
+    return "inv", nil, nil, nil, nil, nil
+end
 ISCartTransferAction.Type = "ISCartTransferAction"
 
 function ISCartTransferAction:isValid()
@@ -93,34 +148,10 @@ function ISCartTransferAction:perform()
         end
     end
 
-    -- Classify both sides of the transfer so the server can rebuild the
-    -- correct ItemContainer references. On server side we can't re-use
-    -- the client's ItemContainer refs (especially for the floor ItemContainer,
-    -- which is a per-player Lua-side object the server has never seen).
-    --
-    -- "floor" — square-backed, needs coords
-    -- "cart"  — cart's inner container, needs the cart item ID
-    -- "inv"   — player's main inventory (default)
-    local function classifySide(container, fallbackCartItem)
-        if not container or not container.getType then
-            return "inv", nil, nil, nil, nil
-        end
-        local dtype = container:getType()
-        if dtype == "floor" then
-            local sqX, sqY, sqZ
-            local sq = container.getParent and container:getParent()
-            if sq and sq.getX then sqX, sqY, sqZ = sq:getX(), sq:getY(), sq:getZ() end
-            return "floor", nil, sqX, sqY, sqZ
-        end
-        local ci = container.getContainingItem and container:getContainingItem()
-        if ci and SaucedCarts.safeIsCart(ci) then
-            return "cart", ci:getID(), nil, nil, nil
-        end
-        return "inv", nil, nil, nil, nil
-    end
-
-    local srcKind, srcCartId, srcSqX, srcSqY, srcSqZ = classifySide(self.srcContainer, cartItem)
-    local destKind, destCartId, destSqX, destSqY, destSqZ = classifySide(self.destContainer, cartItem)
+    local srcKind, srcCartId, srcSqX, srcSqY, srcSqZ, srcContType =
+        ISCartTransferAction.classifySide(self.srcContainer, cartItem)
+    local destKind, destCartId, destSqX, destSqY, destSqZ, destContType =
+        ISCartTransferAction.classifySide(self.destContainer, cartItem)
 
     -- Fill in player's current square when either side is a floor with no
     -- direct square reference (defensive — should rarely trigger).
@@ -144,9 +175,11 @@ function ISCartTransferAction:perform()
                 srcKind = srcKind,
                 srcCartId = srcCartId,
                 srcSqX = srcSqX, srcSqY = srcSqY, srcSqZ = srcSqZ,
+                srcContType = srcContType,       -- v2.1.5: world-container type
                 destKind = destKind,
                 destCartId = destCartId,
                 destSqX = destSqX, destSqY = destSqY, destSqZ = destSqZ,
+                destContType = destContType,     -- v2.1.5: world-container type
             })
         else
             if SaucedCarts.performCartTransfer then

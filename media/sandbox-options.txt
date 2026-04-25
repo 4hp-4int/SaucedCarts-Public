@@ -8,6 +8,22 @@ option SaucedCarts.EnableMod
     translation = SaucedCarts_EnableMod,
 }
 
+option SaucedCarts.EnableCorpseStorage
+{
+    type = boolean,
+    default = true,
+    page = SaucedCarts,
+    translation = SaucedCarts_EnableCorpseStorage,
+}
+
+option SaucedCarts.EnableCorpseStink
+{
+    type = boolean,
+    default = true,
+    page = SaucedCarts,
+    translation = SaucedCarts_EnableCorpseStink,
+}
+
 option SaucedCarts.SpawnRate
 {
     type = integer,

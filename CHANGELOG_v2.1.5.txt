@@ -1,0 +1,205 @@
+SaucedCarts v2.1.5 - Container & Bag Transfer Fixes
+Released: 2026-04-21
+====================================================
+
+SUMMARY
+-------
+
+Fixes two duplication vectors in cart transfers on dedicated MP, both rooted
+in the same underlying issue: classifySide in ISCartTransferAction had no
+branch for non-cart, non-floor containers. World containers (shelves,
+freezers, counters, barbecues, wardrobes) and equipped bags (backpacks,
+satchels, holsters, bag-in-bag) both collapsed to the "inv" catch-all, which
+caused the server to resolve the player's main inventory as the non-cart
+endpoint. With the wrong srcContainer, DoRemoveItem became a no-op (the item
+wasn't in main inventory), AddItem to the cart succeeded, and the item ended
+up in both the source container AND the cart - a clean duplication.
+
+
+BUG FIXES
+---------
+
+1. Container <-> cart transfers dupe on dedicated MP (world containers)
+
+   Symptom: transferring between a cart and a shelf, freezer, counter, or
+   any other world container on a tile either silently no-op'd or duplicated
+   the moved item with "container already has id" log spam on clients.
+
+   Root cause: ISCartTransferAction.classifySide had no branch for world
+   containers bound to IsoObjects on tiles. They fell through to "inv". The
+   server's resolveSide then returned playerInv for both sides, producing
+   a transfer where the real source was ignored.
+
+   Fix (three parts):
+   - classifySide: new "world" kind. Serializes tile coords via
+     container.getSourceGrid() + container:getType() so the server can
+     locate the right container among multiple objects on that tile.
+   - resolveSide (in handleCartTransfer): new "world" branch. Iterates the
+     tile's objects and matches by container type.
+   - Defensive fallback for pre-v2.1.5 clients (direction="in" only):
+     if item:getContainer() disagrees with what the client claimed, the
+     server uses the item's actual container. Hidden behind an idempotence
+     guard so "Take All" duplicate sends no-op cleanly.
+
+
+2. Cart -> equipped bag deposits into main inventory instead of the bag
+
+   Symptom: user report "transferring from the cart on the ground into an
+   equipped bag puts it into your parent inventory instead of the bag."
+   The secondary symptom on pre-v2.1.5 clients was full duplication -
+   the friend-reported "Cart got all my backpack items, but they also
+   stayed in my backpack. I could then take it out (not to backpack) and
+   had 2 items" - because bag sources were classified as "inv" with no
+   recovery on the server.
+
+   Root cause: classifySide had no branch for containers whose
+   containingItem is a non-cart InventoryItem (equipped backpacks,
+   satchels, holsters, bag-in-bag). They collapsed to "inv".
+
+   Fix (two parts):
+   - classifySide: new "bag" kind. Serializes the containing item's ID.
+   - resolveSide: new "bag" branch with recursive lookup. Finds the bag
+     by ID anywhere in the player's inventory tree, covering bag-in-bag
+     nesting.
+
+
+3. Internal: findItemNearPlayer reachability
+
+   The pre-existing in-hand cart scan was placed after the gated psq check,
+   so if the player had no current square, items in in-hand carts were
+   unreachable. Refactored to use the new findInventoryItemRecursive helper
+   as the first lookup path, removing the dependency on the player's world
+   position.
+
+
+TEST COVERAGE
+-------------
+
+Offline (pz-test-kit): 158 tests, 158 passing (~1.3s)
+- OfflineCartDepositTests: 50 tests
+  - 10 classifyTransfer direction-matrix tests
+  - 4 performCartTransfer integration tests + 2 drop-to-floor regression
+    guards (5-arg AddWorldInventoryItem, single-broadcast contract)
+  - 4 pickup-from-floor guards (transmitRemoveItemFromSquare, worldItem
+    lifecycle, item:setWorldItem(nil) clearance)
+  - 5 v2.1.5 world-kind regression guards (classifySide returns "world",
+    resolveSide matches by containerType, findItemNearPlayer world sweep)
+  - 5 v2.1.5 bag-kind guards (classifySide returns "bag", recursive lookup
+    direct + nested, handleCartTransfer cart<->bag both directions)
+  - 1 defensive-fallback test (handleCartTransfer recovers when client
+    sends wrong srcKind)
+  - 1 idempotence test (duplicate send no-ops, never reaches
+    performCartTransfer)
+  - 20-case malformed-args gauntlet (nil/empty/missing args, bogus kinds,
+    cross-player IDs, absurd/negative/string values)
+  - 1000-iteration property-based fuzzer alternating new/old client per
+    iteration with conservation + uniqueness + moved invariants
+
+Live probes (pz-shell against running dedicated server, v2.1.5 deployed):
+- probe-bag-dupe.lua: bag -> cart with srcKind="bag" (new client): OK,
+  preTotal=17 postTotal=17, no dupe. Also tests srcKind="inv" (pre-v2.1.5
+  client) path: OK, defensive fallback recovers. Also tests duplicate-send
+  idempotence: OK, cart size stable.
+- probe-cart-to-bag.lua: cart -> bag with destKind="bag" (new client):
+  OK, lands in bag. cart -> bag with destKind="inv" (pre-v2.1.5 client,
+  known limitation): conservation holds, no dupe, lands in main inventory.
+- probe-double-perform.lua: simulates server-side ISCartTransferAction
+  perform else-branch firing after the cmd handler already moved the item
+  (MP timed actions run on both VMs). Conservation holds across both
+  paths. Vanilla ISTransferAction:transferItem's "src doesn't contain
+  item" early return + Java AddItem idempotence prevent the dupe.
+- probe-antiprobe.lua: simulates v2.1.4 buggy behavior by feeding
+  performCartTransfer the wrong srcContainer (playerInv instead of the
+  bag). Correctly reproduces the dupe: preTotal=5 postTotal=6,
+  inBag=true inCart=true. Proves the probes are sensitive to the real
+  bug class - they PASS only because v2.1.5's guards are in place.
+
+
+KNOWN LIMITATION
+----------------
+
+Pre-v2.1.5 clients that classify equipped bags as "inv" and send
+destKind="inv" for cart -> bag transfers cannot be recovered server-side.
+The item lands in main inventory instead of the bag. Same behavior as
+v2.1.4 - not a regression, just not fixed for that direction. No
+duplication occurs; the item just lands in the wrong drawer. Only
+fully-restarted v2.1.5 clients use the new "bag" classifier.
+
+Workaround for players: fully quit PZ to desktop (not just disconnect)
+and relaunch. Reconnecting alone doesn't reload Lua - PZ loads the Lua
+VM once at process start.
+
+
+BACKWARD COMPATIBILITY
+----------------------
+
+Save-safe. No ModData schema changes. Safe to upgrade mid-save.
+
+Command and symbol aliases preserved for in-flight sessions:
+- depositToGroundCart server command is still aliased to the new
+  cartTransfer handler for any connected client that was loaded before
+  the update.
+- ISCartDepositAction symbol is still aliased to ISCartTransferAction
+  for any integration that imported the old name directly.
+
+
+ARCHITECTURE NOTES
+------------------
+
+Full transfer cycle (for MP dedi, direction="in", player bag -> cart):
+
+1. Client intercepts ISInventoryTransferAction.new. The wrapper runs
+   classifyTransfer(src, dest) - direction-neutral matching, catches any
+   transfer where either side is a SaucedCarts cart. Returns an
+   ISCartTransferAction instead of vanilla's ISInventoryTransferAction.
+
+2. Client's :perform() fires. Calls classifySide on both sides to produce
+   {kind, cartId/bagId, sqX/Y/Z, containerType} tuples the server can
+   rebuild. Sends cartTransfer to the server via
+   SaucedCarts.Network.sendToServer.
+
+3. Server's cartTransfer handler (handleCartTransfer):
+   a. findCartNearPlayer: locates the cart in player inv or within 3
+      tiles on the ground.
+   b. findItemNearPlayer: recursive inventory sweep + ground items + world
+      containers on nearby tiles.
+   c. resolveSide rebuilds real ItemContainer references from the client's
+      tuples.
+   d. Defensive fallback: if item:getContainer() disagrees with the
+      resolved srcContainer, use the truth. If the item's already in dest,
+      no-op (idempotence).
+   e. Calls performCartTransfer.
+
+4. performCartTransfer picks one of four branches by endpoint shape:
+   - floor -> container: transmitRemoveItemFromSquare + worldItem
+     lifecycle (removeFromWorld/removeFromSquare/setSquare(nil)) +
+     AddItem + sendAddItemToContainer broadcast.
+   - container -> floor: DoRemoveItem + sendRemoveItemFromContainer +
+     5-arg AddWorldInventoryItem(..., transmit=false) + manual
+     transmitCompleteItemToClients (avoids the double-broadcast dupe
+     fixed mid-v2.1.4).
+   - container <-> container: hasRoomFor guard + vanilla
+     ISTransferAction:transferItem + sendAddItemToContainer broadcast.
+
+5. In MP, the dedi's own copy of ISCartTransferAction:perform() also
+   fires its else-branch (isServer()), calling performCartTransfer a
+   second time with the action's captured srcContainer/destContainer.
+   Whichever path runs first completes the move. The loser's call hits
+   vanilla ISTransferAction:transferItem's "src doesn't contain item"
+   early return. Java AddItem is idempotent on duplicate IDs. No dupe
+   from the double-perform race. Proven by probe-double-perform.lua.
+
+
+SHIP CHECKLIST
+--------------
+
+[x] Offline tests: 158/158 green
+[x] Live probe: new-client bag -> cart clean
+[x] Live probe: old-client srcKind="inv" defensive fallback catches friend's bug
+[x] Live probe: idempotence on duplicate sends
+[x] Live probe: cart -> bag both directions
+[x] Live probe: double-perform race
+[x] Anti-probe proves probes detect real dupes (sensitivity check)
+[x] Version bumped to 2.1.5 in mod.info + Core.lua
+[x] CHANGELOG.md updated
+[x] Deployed to %USERPROFILE%\Zomboid\Workshop\SaucedCarts for Steam uploader

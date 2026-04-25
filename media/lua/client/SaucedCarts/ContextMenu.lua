@@ -205,7 +205,7 @@ local function onFillWorldObjectContextMenu(player, context, worldObjects, test)
                 if not processedCarts[cartId] then
                     processedCarts[cartId] = true
                     local cartData = SaucedCarts.getCartData(item)
-                    local cartName = cartData and cartData.name or "Cart"
+                    local cartName = SaucedCarts.getCartDisplayName(item)
                     table.insert(cartOptions, {
                         item = item,
                         worldObj = obj,
@@ -240,7 +240,7 @@ local function onFillWorldObjectContextMenu(player, context, worldObjects, test)
                                     if not processedCarts[cartId] then
                                         processedCarts[cartId] = true
                                         local cartData = SaucedCarts.getCartData(item)
-                                        local cartName = cartData and cartData.name or "Cart"
+                                        local cartName = SaucedCarts.getCartDisplayName(item)
                                         table.insert(cartOptions, {
                                             item = item,
                                             worldObj = obj,
@@ -264,6 +264,67 @@ local function onFillWorldObjectContextMenu(player, context, worldObjects, test)
             local item = obj:getItem()
             if item and FlashlightMenu.isInstallableFlashlight(item) then
                 FlashlightMenu.addInstallOnCartOption(context, playerObj, item)
+            end
+        end
+    end
+
+    -- Top-level grapple-load entry: player is actively dragging a corpse,
+    -- mirrors vanilla's addOptionOnTop "Drop Corpse Into Container". Vanilla
+    -- skips our cart because its container type isn't in the hardcoded
+    -- canHumanCorpseFit allowlist, so we add our own entry here.
+    local corpseFeatureOn = SaucedCarts.CorpseStorage
+        and SaucedCarts.CorpseStorage.isEnabled
+        and SaucedCarts.CorpseStorage.isEnabled()
+    if corpseFeatureOn and playerObj.isDraggingCorpse and playerObj:isDraggingCorpse() and #cartOptions > 0 then
+        require "SaucedCarts/TimedActions/ISCartLoadCorpseAction"
+        require "SaucedCarts/CorpseStorage"
+
+        -- Resolve the corpse weight once; same for every cart candidate.
+        -- IsoGameCharacter.getWeightAsCorpse() is a static Java method
+        -- returning the base corpse weight (20kg in B42). Prefer it over
+        -- any per-instance fallback since grapple targets (IsoZombie etc.)
+        -- may not expose a per-character weight.
+        local weight = 20.0
+        if IsoGameCharacter and IsoGameCharacter.getWeightAsCorpse then
+            local ok, w = pcall(function() return IsoGameCharacter.getWeightAsCorpse() end)
+            if ok and type(w) == "number" then weight = w end
+        end
+
+        for _, opt in ipairs(cartOptions) do
+            local gateOk, reason = SaucedCarts.CorpseStorage.canLoadCorpseIntoCart(opt.item, weight)
+            local label = getText("UI_SaucedCarts_LoadCorpseInto", opt.cartName)
+            local tOpt = context:addOptionOnTop(label, playerObj, function(p, cart)
+                -- Re-check gate at click-time; another player may have
+                -- filled the cart between menu-build and click. Halo the
+                -- user if so rather than starting a doomed animation.
+                local w = 20.0
+                if IsoGameCharacter and IsoGameCharacter.getWeightAsCorpse then
+                    local okw, ww = pcall(function() return IsoGameCharacter.getWeightAsCorpse() end)
+                    if okw and type(ww) == "number" then w = ww end
+                end
+                local ok2, reason2 = SaucedCarts.CorpseStorage.canLoadCorpseIntoCart(cart, w)
+                if not ok2 then
+                    if HaloTextHelper then
+                        local txtKey = (reason2 == "cart full")
+                            and "UI_SaucedCarts_LoadBlocked_cart_full"
+                            or  "UI_SaucedCarts_LoadBlocked_fallback"
+                        HaloTextHelper.addBadText(p, getText(txtKey))
+                    end
+                    return
+                end
+                ISTimedActionQueue.add(ISCartLoadCorpseAction:new(p, cart))
+            end, opt.item)
+            local tex = opt.item.getTexture and opt.item:getTexture()
+            if tex then tOpt.iconTexture = tex end
+
+            if not gateOk then
+                tOpt.notAvailable = true
+                local tt = ISWorldObjectContextMenu.addToolTip()
+                tt:setVisible(false)
+                tt.description = "<RGB:1,0.5,0.5>" ..
+                    getText("UI_SaucedCarts_LoadCorpseBlocked") ..
+                    " (" .. tostring(reason) .. ")"
+                tOpt.toolTip = tt
             end
         end
     end
@@ -354,7 +415,7 @@ local function onFillInventoryObjectContextMenu(player, context, items)
                 context:removeOptionByName("Unequip")
 
                 local cartData = SaucedCarts.getCartData(item)
-                local cartName = cartData and cartData.name or "Cart"
+                local cartName = SaucedCarts.getCartDisplayName(item)
                 local isEquipped = primary and (primary:getID() == cartId) or false
                 local inPlayerInv = isInPlayerInventory(playerObj, item)
 
@@ -401,7 +462,7 @@ local function onFillInventoryObjectContextMenu(player, context, items)
     -- Add options for equipped carts ONLY if the equipped cart was clicked
     if primary and SaucedCarts.isCart(primary) and processedCarts[primary:getID()] then
         local cartData = SaucedCarts.getCartData(primary)
-        local cartName = cartData and cartData.name or "Cart"
+        local cartName = SaucedCarts.getCartDisplayName(primary)
         -- Equipped cart: no push handler (already equipped), no worldObj
         CartSubmenu.addCartOptionsSubmenu(context, playerObj, primary, cartName, false, nil, nil, nil)
     end

@@ -12,8 +12,10 @@ if isServer() and not isClient() then return end
 
 require "SaucedCarts/Core"
 require "SaucedCarts/CartData"
+require "SaucedCarts/CorpseStorage"
 require "SaucedCarts/TimedActions/ISCartPickupAction"
 require "SaucedCarts/TimedActions/ISCartEquipAction"
+require "SaucedCarts/TimedActions/ISCartLoadCorpseAction"
 require "TimedActions/ISDropWorldItemAction"
 
 ---@class SaucedCartsHotkeys
@@ -156,6 +158,59 @@ local function onKeyStartPressed(key)
     -- Check if currently holding a cart
     local primary = player:getPrimaryHandItem()
     local holdingCart = primary and SaucedCarts.isCart(primary)
+    local draggingCorpse = player.isDraggingCorpse and player:isDraggingCorpse()
+
+    -- Gate corpse-load behavior behind the sandbox option. If disabled,
+    -- pressing V while dragging just falls through to the normal
+    -- equip/drop logic below (equip/drop take over since the player
+    -- could, in principle, do both at once).
+    local corpseFeatureOn = SaucedCarts.CorpseStorage
+        and SaucedCarts.CorpseStorage.isEnabled
+        and SaucedCarts.CorpseStorage.isEnabled()
+    if not corpseFeatureOn then draggingCorpse = false end
+
+    -- Priority 0: dragging a corpse → load into the most-available cart.
+    -- Takes precedence over drop/equip: the grapple is a committed state
+    -- and the user pressing V while in it almost certainly means "put
+    -- this thing into a cart", not "drop my cart" or "equip a new one".
+    if draggingCorpse then
+        -- Pick the best available cart: held primary > nearest ground > inv
+        local cart
+        if holdingCart then
+            cart = primary
+        else
+            local _, groundItem = findNearestGroundCart(player)
+            cart = groundItem or findInventoryCart(player)
+        end
+        if not cart then
+            if HaloTextHelper then
+                HaloTextHelper.addBadText(player, getText("UI_SaucedCarts_LoadNoCart"))
+            end
+            return
+        end
+
+        -- Re-run the weight gate so a full cart doesn't start an action
+        -- that the server will only reject at perform time.
+        local weight = 20.0
+        if IsoGameCharacter and IsoGameCharacter.getWeightAsCorpse then
+            local ok, w = pcall(function() return IsoGameCharacter.getWeightAsCorpse() end)
+            if ok and type(w) == "number" then weight = w end
+        end
+        local gateOk, reason = SaucedCarts.CorpseStorage.canLoadCorpseIntoCart(cart, weight)
+        if not gateOk then
+            if HaloTextHelper then
+                local key = (reason == "cart full")
+                    and "UI_SaucedCarts_LoadBlocked_cart_full"
+                    or  "UI_SaucedCarts_LoadBlocked_fallback"
+                HaloTextHelper.addBadText(player, getText(key))
+            end
+            return
+        end
+
+        ISTimedActionQueue.add(ISCartLoadCorpseAction:new(player, cart))
+        SaucedCarts.debug("Hotkey: queued load-corpse action")
+        return
+    end
 
     if holdingCart then
         -- DROP: Player is holding a cart, drop it

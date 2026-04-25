@@ -115,11 +115,12 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
             if item.setWorldItem          then item:setWorldItem(nil)       end
         end
         if item.setJobDelta then item:setJobDelta(0.0) end
-        if destContainer.setDrawDirty then destContainer:setDrawDirty(true) end
         destContainer:AddItem(item)
         if isServer() and type(sendAddItemToContainer) == "function" then
             sendAddItemToContainer(destContainer, item)
         end
+        -- Mark dirty AFTER the mutation so the inventory panel repaints.
+        if destContainer.setDrawDirty then destContainer:setDrawDirty(true) end
         SaucedCarts.debug(function() return string.format(
             "performCartTransfer: picked up item %d from ground into container type=%s",
             item:getID(), tostring(destContainer:getType())
@@ -130,12 +131,195 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
     -- === DEST = ground (cart → floor) ===
     -- Drop item onto the world square. Mirrors vanilla's floor-drop branch.
     if dropSquare then
+        -- Idempotence guard (MP double-perform protection).
+        -- ISCartTransferAction is a shared timed action: the dedi runs
+        -- performCartTransfer twice per cart→floor drop — once via its own
+        -- :perform else-branch, once via the cartTransfer network command.
+        -- handleCartTransfer's existing idempotence check (destContainer +
+        -- item.getContainer() == destContainer) is SKIPPED for floor drops
+        -- because destContainer is nil. Without this guard, corpse items
+        -- would call loadCorpseFromByteData + sendCorpse twice → V11 dupe
+        -- (two IsoDeadBody materialized, two AddCorpseToMapPackets).
+        if srcContainer and srcContainer.contains
+            and not srcContainer:contains(item) then
+            SaucedCarts.debug(function()
+                return "performCartTransfer: item " .. tostring(item:getID())
+                    .. " already moved from src, no-op (idempotent)"
+            end)
+            return true
+        end
+
         if srcContainer and srcContainer.DoRemoveItem then
             srcContainer:DoRemoveItem(item)
             if isServer() and type(sendRemoveItemFromContainer) == "function" then
                 sendRemoveItemFromContainer(srcContainer, item)
             end
+            -- Inventory panel refresh on the source side.
+            if srcContainer.setDrawDirty then srcContainer:setDrawDirty(true) end
         end
+
+        -- Special case: corpse items (Base.CorpseMale/Female/Animal) carry a
+        -- full IsoDeadBody state in their byteData buffer. Dropping them as
+        -- a plain world inventory item leaves them un-grabbable (no
+        -- IsoDeadBody exists on the square). Materialize via vanilla's
+        -- loadCorpseFromByteData and register via addCorpse — same path the
+        -- AddCorpseToMapPacket uses on receive.
+        -- Sandbox-gated: when CorpseStorage is off the item drops as a
+        -- regular world inventory item (vanilla behavior).
+        local corpseFeatureOn = SaucedCarts.CorpseStorage
+            and SaucedCarts.CorpseStorage.isEnabled
+            and SaucedCarts.CorpseStorage.isEnabled()
+        if corpseFeatureOn
+            and SaucedCarts.CorpseStorage.isCorpseItem
+            and SaucedCarts.CorpseStorage.isCorpseItem(item)
+            and item.loadCorpseFromByteData then
+            -- Rot short-circuit: if the stored corpse's effective age is
+            -- past vanilla's full-removal threshold, vanilla's updateBodies
+            -- would have despawned it already. Match that — drop the item
+            -- silently without rematerializing. Reconcile pulls the cart
+            -- count down via the regular spill path.
+            local removalAt
+            local skeletonAt
+            if SaucedCarts.CorpseStorage._getRotThresholds then
+                skeletonAt, removalAt = SaucedCarts.CorpseStorage._getRotThresholds()
+            end
+            local age = SaucedCarts.CorpseStorage.effectiveAge
+                and SaucedCarts.CorpseStorage.effectiveAge(item) or 0
+            SaucedCarts.log(function() return string.format(
+                "performCartTransfer/corpse-unload: itemId=%s age=%.2fh skeletonAt=%s removalAt=%s",
+                tostring(item:getID()), age,
+                tostring(skeletonAt), tostring(removalAt)
+            ) end)
+            if removalAt and age >= removalAt then
+                local srcCart = containerToCart(srcContainer)
+                if srcCart and SaucedCarts.CorpseStorage.reconcile then
+                    pcall(function()
+                        SaucedCarts.CorpseStorage.reconcile(srcCart,
+                            SaucedCarts.CorpseStorage.cartTargetSquare(srcCart, player))
+                    end)
+                    if SaucedCarts.CorpseStorage.publishCartStink then
+                        pcall(function()
+                            SaucedCarts.CorpseStorage.publishCartStink(srcCart, player)
+                        end)
+                    end
+                end
+                if not isServer() and HaloTextHelper and player then
+                    pcall(function()
+                        HaloTextHelper.addBadText(player,
+                            getText("UI_SaucedCarts_CorpseDecomposed"))
+                    end)
+                end
+                SaucedCarts.log(function() return string.format(
+                    "performCartTransfer: corpse age=%.1fh past removalAt=%.1fh — silent drop",
+                    age, removalAt
+                ) end)
+                return true
+            end
+            local t0 = getTimestampMs and getTimestampMs() or 0
+            local okLoad, body = pcall(function()
+                return item:loadCorpseFromByteData(dropSquare)
+            end)
+            local t1 = getTimestampMs and getTimestampMs() or 0
+            if okLoad and body and dropSquare.addCorpse then
+                -- Restore vanilla's rot clock from stamped deathTime so
+                -- updateBodies resumes at the correct rot stage rather than
+                -- treating the rematerialized body as freshly-dead.
+                if SaucedCarts.CorpseStorage.restoreDeathTime then
+                    SaucedCarts.CorpseStorage.restoreDeathTime(item, body)
+                end
+                pcall(function() dropSquare:addCorpse(body, false) end)
+                -- H1 reconcile: the cart just lost a corpse. Cart may
+                -- still be equipped / grounded elsewhere; resolve its
+                -- current square and apply the delta. The body we just
+                -- materialized is already on the tile via addCorpse, so
+                -- that tile's CorpseCount is already correctly updated
+                -- by vanilla.
+                local srcCart = containerToCart(srcContainer)
+                if srcCart and SaucedCarts.CorpseStorage
+                    and SaucedCarts.CorpseStorage.reconcile then
+                    pcall(function()
+                        SaucedCarts.CorpseStorage.reconcile(srcCart,
+                            SaucedCarts.CorpseStorage.cartTargetSquare(srcCart, player))
+                    end)
+                    if SaucedCarts.CorpseStorage.publishCartStink then
+                        pcall(function()
+                            SaucedCarts.CorpseStorage.publishCartStink(srcCart, player)
+                        end)
+                    end
+                end
+                -- MP: addCorpse alone doesn't broadcast to remote clients —
+                -- IsoDeadBody.addToWorld only updates local CorpseCount +
+                -- ObjectIDManager. Vanilla relies on sendCorpse (Lua-
+                -- exposed wrapper around GameServer.sendCorpse, see
+                -- LuaManager.java:3381) to fire AddCorpseToMapPacket to
+                -- all clients. Without this call, dedi unload leaves
+                -- other clients with no visible body. Safe in SP — the
+                -- Lua wrapper early-returns when GameServer.server is
+                -- false, so no-op in SP / client-only contexts.
+                if isServer() and type(sendCorpse) == "function" then
+                    pcall(function() sendCorpse(body) end)
+                end
+                local t2 = getTimestampMs and getTimestampMs() or 0
+                SaucedCarts.log(function() return string.format(
+                    "performCartTransfer: materialized corpse at (%d,%d,%d) " ..
+                    "loadBytes=%dms addCorpse=%dms total=%dms",
+                    dropSquare:getX(), dropSquare:getY(), dropSquare:getZ(),
+                    t1 - t0, t2 - t1, t2 - t0
+                ) end)
+                return true
+            end
+            -- H2 (2026-04-24): primary materialization failed (corrupted
+            -- byteData, Java-internal exception). Try vanilla's secondary
+            -- fallback: createAndStoreDefaultDeadBody synthesizes a random
+            -- default body via the standard IsoDeadBody constructor path.
+            -- User loses the original body's clothing/inventory but gets a
+            -- grabbable corpse instead of a soft-bricked CorpseMale item.
+            if item.createAndStoreDefaultDeadBody then
+                local okFallback, fallbackBody = pcall(function()
+                    return item:createAndStoreDefaultDeadBody(dropSquare)
+                end)
+                if okFallback and fallbackBody and dropSquare.addCorpse then
+                    pcall(function() dropSquare:addCorpse(fallbackBody, false) end)
+                    if isServer() and type(sendCorpse) == "function" then
+                        pcall(function() sendCorpse(fallbackBody) end)
+                    end
+                    local srcCart = containerToCart(srcContainer)
+                    if srcCart and SaucedCarts.CorpseStorage
+                        and SaucedCarts.CorpseStorage.reconcile then
+                        pcall(function()
+                            SaucedCarts.CorpseStorage.reconcile(srcCart,
+                                SaucedCarts.CorpseStorage.cartTargetSquare(srcCart, player))
+                        end)
+                        if SaucedCarts.CorpseStorage.publishCartStink then
+                            pcall(function()
+                                SaucedCarts.CorpseStorage.publishCartStink(srcCart, player)
+                            end)
+                        end
+                    end
+                    SaucedCarts.log("performCartTransfer: corpse byteData was bad; spawned default fallback body")
+                    return true
+                end
+            end
+
+            -- Both primary and fallback failed. Put the item BACK in the
+            -- cart so the player doesn't lose it to a void or end up with
+            -- a soft-bricked corpse item on the ground. Halo-text the user
+            -- so the failure is visible (server-side handler doesn't have
+            -- HaloTextHelper, so we only halo on client).
+            SaucedCarts.error("performCartTransfer: corpse materialization failed in BOTH paths; returning item to cart")
+            if srcContainer and srcContainer.AddItem then
+                pcall(function() srcContainer:AddItem(item) end)
+                if srcContainer.setDrawDirty then srcContainer:setDrawDirty(true) end
+            end
+            if isClient() and HaloTextHelper and player and HaloTextHelper.addBadText then
+                pcall(function()
+                    HaloTextHelper.addBadText(player,
+                        getText("UI_SaucedCarts_CorpseDataCorrupted") or "Corpse data corrupted; returned to cart")
+                end)
+            end
+            return false
+        end
+
         local dx, dy, dz = 0.5, 0.5, 0.0
         if ISTransferAction.GetDropItemOffset then
             dx, dy, dz = ISTransferAction.GetDropItemOffset(player, dropSquare, item)
@@ -175,6 +359,15 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
     if isServer() and type(sendAddItemToContainer) == "function" then
         sendAddItemToContainer(destContainer, item)
     end
+
+    -- Mark both containers dirty so the inventory panel repaints on its
+    -- next tick. Without this, SP (and client-authoritative MP) transfers
+    -- to an equipped cart leave the UI showing stale item lists + weight
+    -- until the panel is closed/reopened. Vanilla ISInventoryTransfer
+    -- relies on internal dirty flags set inside TransactionManager which
+    -- we deliberately skip, so we do it manually here.
+    if srcContainer.setDrawDirty  then srcContainer:setDrawDirty(true)  end
+    if destContainer.setDrawDirty then destContainer:setDrawDirty(true) end
 
     SaucedCarts.debug(function() return string.format(
         "performCartTransfer: moved item %d from container type=%s -> type=%s",
@@ -240,6 +433,33 @@ local function findCartNearPlayer(player, cartId, radius)
     return nil
 end
 
+--- Find an InventoryItem by ID in a container, recursing into any nested
+--- inner containers (e.g., a backpack inside a backpack). Used to resolve a
+--- bag the client references by ID when it could be at any depth in the
+--- player's inventory tree.
+---@param container ItemContainer|nil
+---@param itemId number
+---@return InventoryItem|nil
+local function findInventoryItemRecursive(container, itemId)
+    if not container then return nil end
+    local direct = container.getItemById and container:getItemById(itemId)
+    if direct then return direct end
+    local items = container.getItems and container:getItems()
+    if items then
+        for i = 0, items:size() - 1 do
+            local it = items:get(i)
+            if it and it.getItemContainer then
+                local inner = it:getItemContainer()
+                if inner then
+                    local found = findInventoryItemRecursive(inner, itemId)
+                    if found then return found end
+                end
+            end
+        end
+    end
+    return nil
+end
+
 --- Find any item by ID starting from the player's reachable surfaces — their
 --- own inventory first, then nearby floor squares, then nearby carts' inner
 --- containers (needed for `direction="out"` where the item lives inside a
@@ -252,10 +472,31 @@ local function findItemNearPlayer(player, itemId, radius)
     radius = radius or 3
     if not player then return nil end
 
+    -- Recurse through the player's inventory tree — covers main inv + any
+    -- nested bags (equipped backpack, satchel, bag-in-bag). Pre-fix this was
+    -- a flat getItemById which missed items inside bags.
     local inv = player:getInventory()
-    if inv and inv.getItemById then
-        local it = inv:getItemById(itemId)
-        if it then return it end
+    local it = findInventoryItemRecursive(inv, itemId)
+    if it then return it end
+
+    -- Check in-hand carts explicitly — the recursive helper above traverses
+    -- every item in inv and its nested containers, which technically also
+    -- covers carts-in-inv. Keeping this branch here for readability and to
+    -- match the ground-cart symmetry below.
+    if inv then
+        local allItems = inv:getItems()
+        if allItems then
+            for i = 0, allItems:size() - 1 do
+                local itIn = allItems:get(i)
+                if itIn and SaucedCarts.safeIsCart(itIn) and itIn.getItemContainer then
+                    local innerCont = itIn:getItemContainer()
+                    if innerCont and innerCont.getItemById then
+                        local inside = innerCont:getItemById(itemId)
+                        if inside then return inside end
+                    end
+                end
+            end
+        end
     end
 
     local psq = player:getCurrentSquare()
@@ -288,17 +529,24 @@ local function findItemNearPlayer(player, itemId, radius)
         end
     end
 
-    -- Also check in-hand carts' inner containers for the item (direction=out).
-    if inv then
-        local allItems = inv:getItems()
-        if allItems then
-            for i = 0, allItems:size() - 1 do
-                local it = allItems:get(i)
-                if it and SaucedCarts.safeIsCart(it) and it.getItemContainer then
-                    local innerCont = it:getItemContainer()
-                    if innerCont and innerCont.getItemById then
-                        local inside = innerCont:getItemById(itemId)
-                        if inside then return inside end
+    -- v2.1.5: scan world containers (shelves / freezers / barbecues / etc.)
+    -- on nearby squares. Required for the "container-cart" transfer case —
+    -- without this, the item lookup fails before we ever reach resolveSide.
+    -- getObjects() returns tile objects; getWorldObjects() above returns
+    -- dropped InventoryItems — both need scanning for different reasons.
+    for dy = -radius, radius do
+        for dx = -radius, radius do
+            local sq = getCell():getGridSquare(psq:getX() + dx, psq:getY() + dy, psq:getZ())
+            if sq then
+                local tileObjs = sq:getObjects()
+                if tileObjs then
+                    for i = 0, tileObjs:size() - 1 do
+                        local obj = tileObjs:get(i)
+                        local cont = obj and obj.getContainer and obj:getContainer()
+                        if cont and cont.getItemById then
+                            local inside = cont:getItemById(itemId)
+                            if inside then return inside end
+                        end
                     end
                 end
             end
@@ -340,7 +588,7 @@ local function handleCartTransfer(player, args)
     -- case, the container is the floor ItemContainer on the player's
     -- square and the square is what vanilla ISTransferAction needs to
     -- do a proper world drop / world pickup.
-    local function resolveSide(kind, cartId, sqX, sqY, sqZ, isSrc)
+    local function resolveSide(kind, cartId, sqX, sqY, sqZ, containerType, isSrc)
         if kind == "floor" then
             local sq = nil
             if sqX and sqY and sqZ then
@@ -355,6 +603,46 @@ local function handleCartTransfer(player, args)
                 return c:getItemContainer(), nil
             end
         end
+        -- Bag kind — inner container of a non-cart InventoryItem in the
+        -- player's inventory (equipped backpack, satchel, holster, etc.).
+        -- cartId is reused as the containing-item's ID. Recurse because the
+        -- bag may live nested inside another bag.
+        if kind == "bag" and cartId then
+            local bagItem = findInventoryItemRecursive(player:getInventory(), cartId)
+            if bagItem and bagItem.getItemContainer then
+                local c = bagItem:getItemContainer()
+                if c then return c, nil end
+            end
+            SaucedCarts.debug(function() return string.format(
+                "resolveSide: bag item %s not found in player inv; falling back to playerInv",
+                tostring(cartId)) end)
+        end
+        -- v2.1.5: world container — the client told us this side is a shelf /
+        -- freezer / barbecue / etc. bound to an IsoObject on a specific tile.
+        -- Iterate the square's objects and match the container by type. For
+        -- most tiles this is unambiguous (one "shelves" per shelf tile, one
+        -- "freezer" per freezer tile, etc.); for multi-container tiles
+        -- (wardrobes) first-match is correct for v1 since the user-visible
+        -- transfer only operates on one container at a time anyway.
+        if kind == "world" and sqX and sqY and sqZ and containerType then
+            local sq = getCell() and getCell():getGridSquare(sqX, sqY, sqZ)
+            if sq then
+                local objs = sq:getObjects()
+                if objs then
+                    for i = 0, objs:size() - 1 do
+                        local obj = objs:get(i)
+                        local cont = obj and obj.getContainer and obj:getContainer()
+                        if cont and cont.getType and cont:getType() == containerType then
+                            return cont, nil
+                        end
+                    end
+                end
+            end
+            SaucedCarts.debug(function() return string.format(
+                "resolveSide: world container (%s) not found at (%s,%s,%s); falling back to playerInv",
+                tostring(containerType), tostring(sqX), tostring(sqY), tostring(sqZ)
+            ) end)
+        end
         return playerInv, nil
     end
 
@@ -364,13 +652,66 @@ local function handleCartTransfer(player, args)
     if args.direction == "out" then
         srcContainer = cartContainer
         destContainer, dropSquare = resolveSide(
-            args.destKind, args.destCartId, args.destSqX, args.destSqY, args.destSqZ, false
+            args.destKind, args.destCartId,
+            args.destSqX, args.destSqY, args.destSqZ,
+            args.destContType, false
         )
     else
         srcContainer, srcSquare = resolveSide(
-            args.srcKind, args.srcCartId, args.srcSqX, args.srcSqY, args.srcSqZ, true
+            args.srcKind, args.srcCartId,
+            args.srcSqX, args.srcSqY, args.srcSqZ,
+            args.srcContType, true
         )
         destContainer = cartContainer
+    end
+
+    -- DEFENSIVE: handle old clients (pre-v2.1.5) that classify world
+    -- containers as "inv" and send srcKind=inv for an item that's actually
+    -- sitting in a shelf/freezer/etc. The bad srcContainer would cause
+    -- performCartTransfer to run DoRemoveItem on the player's inventory
+    -- (where the item isn't), so the source item never gets removed —
+    -- visible as duplication: source keeps the item AND the cart gets a
+    -- copy.
+    --
+    -- Recover by consulting the item's actual container. If it disagrees
+    -- with what the client told us, use the real one.
+    --
+    -- IDEMPOTENCE: "Take All" UI batches + client retries can fire the
+    -- same cartTransfer multiple times for the same itemId. After the
+    -- first one succeeds, the item lives in destContainer; subsequent
+    -- calls would see realSrc == destContainer and run performCartTransfer
+    -- with src==dest, broadcasting a spurious remove+add cycle that hits
+    -- clients with "container already has id" (Java AddItem rejecting the
+    -- re-add). No-op in that case.
+    if args.direction ~= "out" and srcContainer and item.getContainer then
+        local realSrc = item:getContainer()
+        if realSrc and realSrc == destContainer then
+            SaucedCarts.debug(function() return string.format(
+                "cartTransfer: item %s already in destination cart; no-op (duplicate send)",
+                tostring(args.itemId)) end)
+            return
+        end
+        if realSrc and realSrc ~= srcContainer then
+            SaucedCarts.debug(function() return string.format(
+                "cartTransfer: client claimed srcKind=%s (%s), but item lives in %s — using real container",
+                tostring(args.srcKind), tostring(srcContainer:getType()),
+                tostring(realSrc.getType and realSrc:getType() or "?"))
+            end)
+            srcContainer = realSrc
+        end
+    end
+    -- Symmetric idempotence for "out": if item is already in dest (another
+    -- container we unloaded to), no-op. For "out" there's no reliable
+    -- src recovery path since item:getContainer() can't help us pick a
+    -- destination; just bail on duplicates.
+    if args.direction == "out" and destContainer and item.getContainer then
+        local realCont = item:getContainer()
+        if realCont and realCont == destContainer then
+            SaucedCarts.debug(function() return string.format(
+                "cartTransfer (out): item %s already in destination; no-op",
+                tostring(args.itemId)) end)
+            return
+        end
     end
 
     SaucedCarts.performCartTransfer(
@@ -439,6 +780,8 @@ SaucedCarts.CartTransferInterceptor = {
     classifyTransfer = classifyTransfer,
     findCartNearPlayer = findCartNearPlayer,
     findItemNearPlayer = findItemNearPlayer,
+    findInventoryItemRecursive = findInventoryItemRecursive,
+    handleCartTransfer = handleCartTransfer,
     isInstalled = function() return interceptionInstalled end,
 }
 

@@ -4,6 +4,12 @@ Sandbox_EN = {
     Sandbox_SaucedCarts_EnableMod = "Enable Mod",
     Sandbox_SaucedCarts_EnableMod_tooltip = "Enable or disable the SaucedCarts mod.",
 
+    Sandbox_SaucedCarts_EnableCorpseStorage = "Enable Corpse Storage",
+    Sandbox_SaucedCarts_EnableCorpseStorage_tooltip = "Allow loading and unloading corpses to/from carts via the grapple-drag flow and the right-click 'Load into Cart' menu. Disable if it conflicts with another mod that handles body storage, or if you don't want the feature.",
+
+    Sandbox_SaucedCarts_EnableCorpseStink = "Cart Corpse Stink (MP)",
+    Sandbox_SaucedCarts_EnableCorpseStink_tooltip = "Carts of corpses contribute to vanilla's corpse-sickness and flies-buzz registries on every nearby player, so anyone standing next to a loaded cart smells (and sickens from) the bodies inside. Disable to keep carts as pure transport without the sickness mechanic. No effect when Corpse Storage is disabled.",
+
     Sandbox_SaucedCarts_SpawnRate = "Spawn Rate",
     Sandbox_SaucedCarts_SpawnRate_tooltip = "How often carts spawn in the world. 100 = default, 0 = no spawns, 200 = double spawns.",
 

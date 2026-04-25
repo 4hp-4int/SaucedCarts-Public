@@ -159,10 +159,12 @@ SaucedCarts.Network.registerServerHandler("requestInstantDrop", function(player,
         return
     end
 
-    -- Cancel any server-side timed actions (Build 42: actions run on server)
-    if ISTimedActionQueue then
-        ISTimedActionQueue.clear(player)
-    end
+    -- Note: previously we cleared the server-side action queue here. That
+    -- caused "ISTimedActionQueue:tick: bugged action" crashes because the
+    -- force-drop-triggering action (ISGrabCorpseAction etc.) is in the
+    -- queue mid-tick — clearing it leaves the tick holding a null action.
+    -- Cart-dependent actions self-invalidate via :isValid() once the cart
+    -- enters the world, so no explicit clear is needed.
 
     -- Find cart in player inventory by ID
     local cart = player:getInventory():getItemById(args.cartId)

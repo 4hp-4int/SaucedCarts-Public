@@ -288,12 +288,11 @@ local function findUpgradeableCarts(playerObj, includeEquipped)
         if primary and SaucedCarts.isCart(primary) then
             local canInstall, _ = SaucedCarts.Upgrades.canInstallFlashlight(primary)
             if canInstall then
-                local cartData = SaucedCarts.getCartData(primary)
                 table.insert(carts, {
                     item = primary,
                     isEquipped = true,
                     worldObj = nil,
-                    name = cartData and cartData.name or "Cart",
+                    name = SaucedCarts.getCartDisplayName(primary),
                 })
             end
         end
@@ -322,7 +321,6 @@ local function findUpgradeableCarts(playerObj, includeEquipped)
                                     seen[cartId] = true
                                     local canInstall, _ = SaucedCarts.Upgrades.canInstallFlashlight(item)
                                     if canInstall then
-                                        local cartData = SaucedCarts.getCartData(item)
                                         table.insert(carts, {
                                             item = item,
                                             isEquipped = false,
@@ -330,7 +328,7 @@ local function findUpgradeableCarts(playerObj, includeEquipped)
                                             squareX = square:getX(),
                                             squareY = square:getY(),
                                             squareZ = square:getZ(),
-                                            name = cartData and cartData.name or "Cart",
+                                            name = SaucedCarts.getCartDisplayName(item),
                                         })
                                     end
                                 end

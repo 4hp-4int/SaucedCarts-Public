@@ -33,7 +33,7 @@
 SaucedCarts = SaucedCarts or {}
 
 -- Version info
-SaucedCarts.VERSION = "2.1.4"
+SaucedCarts.VERSION = "2.1.5"
 SaucedCarts.MOD_ID = "SaucedCarts"
 SaucedCarts.API_VERSION = 1  -- Increment on breaking API changes (field renames, removed fields, signature changes)
 
@@ -116,9 +116,16 @@ end
 -- Export for external fast-path checks (e.g., WorldSpawning bulk operations)
 SaucedCarts.isDebugEnabled = isDebugEnabled
 
---- Log a message with mod prefix
----@param message string|any The message to log
-function SaucedCarts.log(message)
+--- Log a message with mod prefix. Accepts a string OR a zero-arg function
+--- (for lazy evaluation of expensive string builds) — matches .debug().
+---@param messageOrFn string|function|any The message, or function returning message
+function SaucedCarts.log(messageOrFn)
+    local message
+    if type(messageOrFn) == "function" then
+        message = messageOrFn()
+    else
+        message = messageOrFn
+    end
     print("[SaucedCarts] " .. tostring(message))
 end
 
@@ -345,6 +352,24 @@ end
 -- ============================================================================
 -- CART INFO UTILITIES
 -- ============================================================================
+
+--- Get the cart's user-facing display name.
+--- Returns the CUSTOM name if the player has renamed the item via vanilla's
+--- rename UI (stored on item:getName()); falls back to the registered
+--- CartType name; falls back to "Cart". Prefer this over reading
+--- cartData.name directly so the context menu and notifications show
+--- "Cartman" after a rename instead of the generic "Shopping Cart".
+---@param cart InventoryItem|nil
+---@return string
+function SaucedCarts.getCartDisplayName(cart)
+    if cart and cart.getName then
+        local ok, n = pcall(function() return cart:getName() end)
+        if ok and n and n ~= "" then return n end
+    end
+    local cartData = cart and SaucedCarts.getCartData and SaucedCarts.getCartData(cart)
+    if cartData and cartData.name then return cartData.name end
+    return "Cart"
+end
 
 --- Get the cart's current fill percentage (0-100)
 --- When player is provided, accounts for Organized/Disorganized trait bonuses
@@ -628,6 +653,22 @@ require "SaucedCarts/Diagnostics"
 -- SaucedCarts cart NOT parented to an IsoGameCharacter. Every other
 -- transfer path (including in-hand cart deposit) still uses vanilla.
 require "SaucedCarts/CartTransferInterceptor"
+
+-- Generic per-attribute sync framework — collapses the per-feature
+-- ad-hoc network handlers / server registry / late-joiner replay we kept
+-- rewriting (cart visual, ghost cleanup, stink, etc.). MUST load before
+-- any module that calls Sync.register.
+require "SaucedCarts/Sync"
+
+-- Load corpse storage pipeline — custom action + server handler for
+-- loading a dragged corpse (via getGrapplingTarget) into a cart container.
+-- Bypasses vanilla canHumanCorpseFit's 19-string allowlist.
+require "SaucedCarts/CorpseStorage"
+
+-- Hook ISGrabCorpseItem so right-click "Grab" on cart-stored corpses
+-- runs our rot short-circuit (silent drop past removalAt). Must load
+-- AFTER CorpseStorage — references CorpseStorage helpers at call time.
+require "SaucedCarts/GrabCorpseInterceptor"
 
 SaucedCarts.debug("Core module loaded (v" .. SaucedCarts.VERSION .. ")")
 
