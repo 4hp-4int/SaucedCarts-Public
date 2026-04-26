@@ -36,10 +36,18 @@ return {
         "SaucedCarts/CartData",
     },
 
-    -- Sandbox defaults (mirror media/sandbox-options.txt).
+    -- Sandbox defaults — mostly mirror media/sandbox-options.txt, but the
+    -- BETA corpse-storage + stink toggles ship to the live Workshop with
+    -- default=false (they're flagged [BETA] in the UI for opt-in testing).
+    -- Force them ON in the offline test environment so the storage / rot /
+    -- Sync code paths stay covered by the 200+ offline tests; without
+    -- this override every CorpseStorage.isEnabled() returns false and the
+    -- handler short-circuits.
     sandbox = {
         SaucedCarts = {
             EnableMod = true,
+            EnableCorpseStorage = true,
+            EnableCorpseStink = true,
             SpawnRate = 100,
             CapacityMultiplier = 100,
             DurabilityMultiplier = 100,

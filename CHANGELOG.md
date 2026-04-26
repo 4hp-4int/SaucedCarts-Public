@@ -26,6 +26,15 @@ Pre-v2.1.5 clients that classify equipped bags as `"inv"` and send `destKind="in
 - `pz-test-kit/shell` live stress probe drives 60+ real `handleCartTransfer` invocations against a running dedicated server using actual PZ objects (not mocks): 0 invariant violations.
 - Decompiled-source-verified writeup of PZ item transmit semantics in `pz-dev-tools/knowledge/pz-item-transmit-semantics.md` (cross-cutting; covers `AddItem` vs `SynchSpawn`, `sendAddItemToContainer` wire format, container-routing rules).
 
+### Beta Opt-in
+
+A WIP corpse-storage feature ships in this build but is **disabled by default**. Two new sandbox toggles, both off:
+
+- `Enable Corpse Storage [BETA]` — load corpses into carts via grapple + right-click, with vanilla-faithful rot accounting (corpses age in the cart, despawn at the sandbox `HoursForCorpseRemoval` threshold)
+- `Cart Corpse Stink [BETA]` — loaded carts contribute to vanilla's corpse-sickness and flies-buzz registries on every nearby player in MP
+
+Off by default while we tighten up MP edges (single-mutation invariants for sickness, late-joiner replay correctness on dedi restart, animal-corpse coverage). Players who want to try it can flip the toggles in sandbox; expect rough edges. Public release of the feature is planned for a future version.
+
 ### Backward Compatibility
 
 Save-safe. No ModData schema changes. Safe to upgrade mid-save. Old `depositToGroundCart` server command and `ISCartDepositAction` symbol both still aliased.

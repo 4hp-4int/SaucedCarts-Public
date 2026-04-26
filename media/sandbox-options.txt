@@ -11,7 +11,7 @@ option SaucedCarts.EnableMod
 option SaucedCarts.EnableCorpseStorage
 {
     type = boolean,
-    default = true,
+    default = false,
     page = SaucedCarts,
     translation = SaucedCarts_EnableCorpseStorage,
 }
@@ -19,7 +19,7 @@ option SaucedCarts.EnableCorpseStorage
 option SaucedCarts.EnableCorpseStink
 {
     type = boolean,
-    default = true,
+    default = false,
     page = SaucedCarts,
     translation = SaucedCarts_EnableCorpseStink,
 }

@@ -1,5 +1,5 @@
 SaucedCarts v2.1.5 - Container & Bag Transfer Fixes
-Released: 2026-04-21
+Released: 2026-04-26
 ====================================================
 
 SUMMARY
@@ -190,10 +190,32 @@ Full transfer cycle (for MP dedi, direction="in", player bag -> cart):
    from the double-perform race. Proven by probe-double-perform.lua.
 
 
+BETA OPT-IN
+-----------
+
+A WIP corpse-storage feature ships in this build but is DISABLED BY DEFAULT.
+Two new sandbox toggles, both off:
+
+  * Enable Corpse Storage [BETA]
+      Load corpses into carts via grapple + right-click "Load into Cart".
+      Vanilla-faithful rot accounting: corpses age while stored, despawn at
+      the sandbox HoursForCorpseRemoval threshold. Halo "Corpse fully
+      decomposed" when a fully-rotted corpse comes out.
+
+  * Cart Corpse Stink [BETA]
+      Loaded carts contribute to vanilla's corpse-sickness + flies-buzz
+      registries on every nearby player in MP. Requires the storage toggle.
+
+Off by default while we tighten up the MP edges (single-mutation invariants
+for sickness, late-joiner replay correctness on dedi restart, animal-corpse
+coverage). Flip them in sandbox if you want to try; expect rough edges.
+Public release of the feature is planned for a future version.
+
+
 SHIP CHECKLIST
 --------------
 
-[x] Offline tests: 158/158 green
+[x] Offline tests: 208/208 green (158 transfer-fix tests + 50 corpse-storage / rot / Sync tests behind the disabled-by-default toggles)
 [x] Live probe: new-client bag -> cart clean
 [x] Live probe: old-client srcKind="inv" defensive fallback catches friend's bug
 [x] Live probe: idempotence on duplicate sends
