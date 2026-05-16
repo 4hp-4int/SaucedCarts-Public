@@ -12,6 +12,14 @@
     real PZ world.
 ]]
 
+-- Stub vanilla UI singletons that vanilla_requires-loaded files reference
+-- at module-load time. This file runs BEFORE vanilla_requires fires (the
+-- pz-test.lua body executes during config-load, vanilla_requires fires
+-- after). Without these stubs, e.g. ISInventoryTransferAction.lua would
+-- crash at line 5 trying to set `ISInventoryPage.putSoundContainer = nil`.
+if not ISInventoryPage then ISInventoryPage = {} end
+
+
 return {
     -- Cross-mod: none required.
     dependencies = {},
@@ -25,6 +33,16 @@ return {
         "shared/ISBaseObject",              -- base class for ISTransferAction
         "shared/TimedActions/ISBaseTimedAction",  -- base for ISCartDepositAction
         "shared/TimedActions/ISTransferAction",   -- canonical item move
+        -- ISInventoryTransferAction: introspected by OfflineApiContractTests.
+        -- Locks the API surface our ISCartTransferAction must mirror so
+        -- vanilla code calling action:setOnComplete / action:setAllowMissing-
+        -- Items / etc. doesn't crash. Depends on the ISInventoryPage stub at
+        -- the top of this file.
+        "client/TimedActions/ISInventoryTransferAction",
+        -- ISUnequipAction: ContainerRestrictions hooks its :complete to
+        -- force-drop carts. OfflineUnequipDupeTests wraps the real vanilla
+        -- complete to prove the MP client+server double-drop dupe.
+        "shared/TimedActions/ISUnequipAction",
     },
 
     -- Preload SaucedCarts namespace so tests can inspect it without each
@@ -47,7 +65,6 @@ return {
         SaucedCarts = {
             EnableMod = true,
             EnableCorpseStorage = true,
-            EnableCorpseStink = true,
             SpawnRate = 100,
             CapacityMultiplier = 100,
             DurabilityMultiplier = 100,

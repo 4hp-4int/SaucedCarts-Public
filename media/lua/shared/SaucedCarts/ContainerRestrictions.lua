@@ -258,7 +258,47 @@ local function initUnequipHook()
         end
 
         if shouldForceDrop then
-            -- Use explicit MP-safe drop pattern instead of forceDropHeavyItems
+            -- MP CLIENT: never create the world item here. This file is
+            -- SHARED, so in MP the timed-action lifecycle runs complete() on
+            -- BOTH the client and the server; each would call
+            -- AddWorldInventoryItem and the player ends up with two carts
+            -- (reported "unequipped and it duplicated in place"). Delegate to
+            -- the same server-authoritative drop InstantDrop.handle uses.
+            -- Do NOT clear the action queue (clearing mid-tick triggers
+            -- vanilla's "bugged action" freeze — see InstantDrop.lua).
+            if isClient() and self.character:getOnlineID() then
+                pcall(function()
+                    local md = self.item:getModData()
+                    if SaucedCarts.Network and SaucedCarts.Network.sendToServer then
+                        SaucedCarts.Network.sendToServer(self.character,
+                            "requestInstantDrop", {
+                                cartId = self.item:getID(),
+                                distancePushed = (md and md.SaucedCarts_distancePushed) or 0,
+                            })
+                    end
+                    self.character:setVariable("Weapon", "")
+                    self.character:setVariable("RightHandMask", "")
+                    self.character:setVariable("LeftHandMask", "")
+                end)
+                SaucedCarts.debug("Cart unequip - delegated to server (MP-safe, no client-side drop)")
+                pcall(function() ISBaseTimedAction.perform(self) end)
+                return
+            end
+
+            -- Idempotence guard: if the cart is already a world item, a drop
+            -- already happened (complete() ran twice, or a racing
+            -- requestInstantDrop beat us). Do NOT create a second world item.
+            local alreadyDropped = false
+            pcall(function()
+                alreadyDropped = self.item:getWorldItem() ~= nil
+            end)
+            if alreadyDropped then
+                SaucedCarts.debug("Cart already on ground during unequip - skipping duplicate drop")
+                pcall(function() ISBaseTimedAction.perform(self) end)
+                return
+            end
+
+            -- SP / dedicated-server: perform the authoritative MP-safe drop.
             local dropSuccess = pcall(function()
                 local character = self.character
                 local item = self.item
