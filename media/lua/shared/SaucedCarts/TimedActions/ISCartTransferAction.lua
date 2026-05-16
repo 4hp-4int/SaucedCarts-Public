@@ -30,6 +30,24 @@
 require "TimedActions/ISBaseTimedAction"
 require "SaucedCarts/Core"
 
+-- We derive from ISBaseTimedAction (NOT ISInventoryTransferAction) for
+-- two reasons:
+--   1. Boot-order in the offline test env: preload triggers our action
+--      file load BEFORE vanilla_requires fires, so ISInventoryTransferAction
+--      isn't in scope yet. A failed derive would silently fall back to
+--      ISBaseTimedAction and the contract test would (correctly) flag a
+--      broken prototype chain.
+--   2. Vanilla's :start in 42.17 calls createItemTransaction; vanilla's
+--      :update polls isItemTransactionDone; vanilla's :perform iterates
+--      a queueList. None of those work for our pipeline. Inheriting them
+--      and then having to override every lifecycle method is fragile —
+--      a future vanilla patch could add a NEW lifecycle method we'd
+--      silently inherit.
+--
+-- Trade-off: vanilla auxiliary methods (setOnComplete, setAllowMissing-
+-- Items, etc.) need explicit stubs below. The contract test in
+-- OfflineApiContractTests.lua catches any missing stub before players hit
+-- the crash, so this trade is well-policed.
 ISCartTransferAction = ISBaseTimedAction:derive("ISCartTransferAction")
 
 -- ============================================================================
@@ -82,7 +100,26 @@ function ISCartTransferAction.classifySide(container, fallbackCartItem)
     -- errors downstream.
     local sg = container.getSourceGrid and container:getSourceGrid()
     if sg and sg.getX then
-        return "world", nil, sg:getX(), sg:getY(), sg:getZ(), dtype
+        -- Disambiguate WHICH object/container on the tile. Two stacked
+        -- crates (or a fridge's fridge+freezer) share (square, type); only
+        -- the parent object's index + the container's index within that
+        -- object tell them apart. Mirrors vanilla ISInventoryPage.lua:
+        -- 1405-1410. Without these the server resolves first-by-type and
+        -- the item lands in the wrong box.
+        local objIdx, contIdx
+        local parent = container.getParent and container:getParent()
+        if parent and parent.getObjectIndex then
+            objIdx = parent:getObjectIndex()
+            if parent.getContainerCount and parent.getContainerByIndex then
+                for i = 0, parent:getContainerCount() - 1 do
+                    if parent:getContainerByIndex(i) == container then
+                        contIdx = i
+                        break
+                    end
+                end
+            end
+        end
+        return "world", nil, sg:getX(), sg:getY(), sg:getZ(), dtype, objIdx, contIdx
     end
     return "inv", nil, nil, nil, nil, nil
 end
@@ -91,6 +128,15 @@ ISCartTransferAction.Type = "ISCartTransferAction"
 function ISCartTransferAction:isValid()
     if not self.item or not self.srcContainer or not self.destContainer then
         return false
+    end
+    -- Vanilla compat: ISCraftingUI.ReturnItemToContainer (and a few other
+    -- crafting-cleanup paths) set allowMissingItems=true so the action
+    -- still completes when the item was destroyed mid-craft. Mirror
+    -- vanilla ISInventoryTransferAction:isValid (line 67) — flag dontAdd
+    -- and let perform skip the move while still firing onCompleteFunc.
+    if self.allowMissingItems and not self.srcContainer:contains(self.item) then
+        self.dontAdd = true
+        return true
     end
     if not self.srcContainer:contains(self.item) then
         return false
@@ -105,6 +151,34 @@ function ISCartTransferAction:isValid()
         return true
     end
     return self.destContainer:hasRoomFor(self.character, self.item)
+end
+
+-- ============================================================================
+-- VANILLA-API SHIMS
+-- ============================================================================
+-- Methods vanilla code calls externally on action instances. Our
+-- interceptor substitutes ISCartTransferAction for vanilla's class; if
+-- we don't expose these, downstream calls (e.g. ISCraftingUI.Return-
+-- ItemToContainer's `action:setAllowMissingItems(true)`) crash with
+-- "Object tried to call nil". OfflineApiContractTests.lua enforces
+-- presence so future vanilla additions get caught before players hit
+-- the crash.
+-- ============================================================================
+
+--- Mirror of ISInventoryTransferAction:setAllowMissingItems (vanilla
+--- ISInventoryTransferAction.lua:735). Crafting cleanup paths set this
+--- to keep the action alive when ingredients were destroyed mid-recipe.
+function ISCartTransferAction:setAllowMissingItems(allow)
+    self.allowMissingItems = allow
+end
+
+--- Mirror of ISInventoryTransferAction:setOnComplete (vanilla
+--- ISInventoryTransferAction.lua:680). Used by crafting / map / alarm
+--- / inspect-clothing flows. Our :perform fires onCompleteFunc after
+--- the move (with the args this captured).
+function ISCartTransferAction:setOnComplete(func, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+    self.onCompleteFunc = func
+    self.onCompleteArgs = { arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8 }
 end
 
 function ISCartTransferAction:waitToStart()
@@ -130,6 +204,57 @@ function ISCartTransferAction:stop()
     ISBaseTimedAction.stop(self)
 end
 
+-- ============================================================================
+-- BULK COALESCING (vanilla checkQueueList / canMergeAction parity)
+-- ============================================================================
+-- ISInventoryPane:transferItemsByWeight queues one transfer action per item.
+-- Vanilla's ISInventoryTransferAction absorbs a contiguous run of same-
+-- src/dest actions so a stack moves in one batched action. We derive from
+-- ISBaseTimedAction (not ISInventoryTransferAction) so we must reimplement
+-- this or every queued ISCartTransferAction runs full-duration in series —
+-- the reported "nails transfer one at a time with carts".
+
+ISCartTransferAction.MERGE_CAP = 50
+
+--- True if `other` is a queued cart-transfer that can be folded into this
+--- one (same endpoints + direction + cart, no per-action callbacks). Mirrors
+--- vanilla ISInventoryTransferAction:canMergeAction.
+function ISCartTransferAction:canMergeAction(other)
+    if not other then return false end
+    if other.Type ~= self.Type then return false end
+    if other.srcContainer ~= self.srcContainer then return false end
+    if other.destContainer ~= self.destContainer then return false end
+    if (other.direction or "in") ~= (self.direction or "in") then return false end
+    if other.cartItem ~= self.cartItem then return false end
+    if self.onCompleteFunc or other.onCompleteFunc then return false end
+    if self.allowMissingItems ~= other.allowMissingItems then return false end
+    return true
+end
+
+--- Pure: given this action and the list of actions queued AFTER it (in
+--- order), return (items, mergedCount) where `items` is { self.item, ... }
+--- for the contiguous mergeable prefix and `mergedCount` is how many
+--- following actions were absorbed. Stops at the first non-mergeable action
+--- and is capped at MERGE_CAP. Side-effect free so it's unit-testable
+--- without a live ISTimedActionQueue.
+function ISCartTransferAction.collectBatch(self, following)
+    local items = { self.item }
+    local merged = 0
+    if following then
+        for i = 1, #following do
+            if #items >= ISCartTransferAction.MERGE_CAP then break end
+            local a = following[i]
+            if a and a.item and self:canMergeAction(a) then
+                items[#items + 1] = a.item
+                merged = merged + 1
+            else
+                break
+            end
+        end
+    end
+    return items, merged
+end
+
 function ISCartTransferAction:perform()
     if self.item then self.item:setJobDelta(0.0) end
 
@@ -148,9 +273,9 @@ function ISCartTransferAction:perform()
         end
     end
 
-    local srcKind, srcCartId, srcSqX, srcSqY, srcSqZ, srcContType =
+    local srcKind, srcCartId, srcSqX, srcSqY, srcSqZ, srcContType, srcObjIdx, srcContIdx =
         ISCartTransferAction.classifySide(self.srcContainer, cartItem)
-    local destKind, destCartId, destSqX, destSqY, destSqZ, destContType =
+    local destKind, destCartId, destSqX, destSqY, destSqZ, destContType, destObjIdx, destContIdx =
         ISCartTransferAction.classifySide(self.destContainer, cartItem)
 
     -- Fill in player's current square when either side is a floor with no
@@ -166,20 +291,62 @@ function ISCartTransferAction:perform()
     if srcKind == "floor"  then srcSqX,  srcSqY,  srcSqZ  = fillSq(srcSqX,  srcSqY,  srcSqZ)  end
     if destKind == "floor" then destSqX, destSqY, destSqZ = fillSq(destSqX, destSqY, destSqZ) end
 
+    -- dontAdd is set by :isValid when allowMissingItems=true and the item
+    -- was destroyed mid-craft. Skip the move but still fire onComplete.
+    if self.dontAdd then
+        if self.onCompleteFunc then
+            local a = self.onCompleteArgs or {}
+            pcall(self.onCompleteFunc, a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8])
+        end
+        ISBaseTimedAction.perform(self)
+        return
+    end
+
+    -- Coalesce the contiguous run of mergeable transfer actions queued
+    -- behind us into one batch, and pull them out of the action queue so
+    -- they don't each run their own full-duration timed action.
+    local batchItems = { self.item }
+    do
+        local q = ISTimedActionQueue and ISTimedActionQueue.getTimedActionQueue
+            and ISTimedActionQueue.getTimedActionQueue(self.character)
+        local arr = q and q.queue
+        if arr then
+            local idx
+            for i = 1, #arr do if arr[i] == self then idx = i; break end end
+            if idx then
+                local following = {}
+                for i = idx + 1, #arr do following[#following + 1] = arr[i] end
+                local items, merged = ISCartTransferAction.collectBatch(self, following)
+                batchItems = items
+                for _ = 1, merged do
+                    local removed = table.remove(arr, idx + 1)
+                    if removed and table.wipe then pcall(table.wipe, removed) end
+                end
+            end
+        end
+    end
+    local itemIds = {}
+    for i = 1, #batchItems do itemIds[i] = batchItems[i]:getID() end
+
     if self.item and cartItem then
         if isClient() then
             SaucedCarts.Network.sendToServer(self.character, "cartTransfer", {
                 itemId = self.item:getID(),
+                itemIds = itemIds,               -- v2.1.7: batched bulk transfer
                 cartId = cartItem:getID(),
                 direction = self.direction or "in",
                 srcKind = srcKind,
                 srcCartId = srcCartId,
                 srcSqX = srcSqX, srcSqY = srcSqY, srcSqZ = srcSqZ,
                 srcContType = srcContType,       -- v2.1.5: world-container type
+                srcObjIdx = srcObjIdx,           -- v2.1.7: stacked-container disambiguation
+                srcContIdx = srcContIdx,
                 destKind = destKind,
                 destCartId = destCartId,
                 destSqX = destSqX, destSqY = destSqY, destSqZ = destSqZ,
                 destContType = destContType,     -- v2.1.5: world-container type
+                destObjIdx = destObjIdx,         -- v2.1.7: stacked-container disambiguation
+                destContIdx = destContIdx,
             })
         else
             if SaucedCarts.performCartTransfer then
@@ -198,12 +365,23 @@ function ISCartTransferAction:perform()
                 end
                 local dropSquare = squareFromKind(destKind, self.destContainer)
                 local srcSquare  = squareFromKind(srcKind,  self.srcContainer)
-                SaucedCarts.performCartTransfer(
-                    self.character, self.item,
-                    self.srcContainer, self.destContainer, dropSquare, srcSquare
-                )
+                for i = 1, #batchItems do
+                    SaucedCarts.performCartTransfer(
+                        self.character, batchItems[i],
+                        self.srcContainer, self.destContainer, dropSquare, srcSquare
+                    )
+                end
             end
         end
+    end
+
+    -- Vanilla compat: fire onCompleteFunc after the move (mirrors
+    -- ISInventoryTransferAction:perform line 508-511). Crafting / map /
+    -- alarm callers register a callback here; if we don't fire it the
+    -- post-craft cleanup or follow-up UI never triggers.
+    if self.onCompleteFunc then
+        local a = self.onCompleteArgs or {}
+        pcall(self.onCompleteFunc, a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8])
     end
 
     ISBaseTimedAction.perform(self)
@@ -235,6 +413,10 @@ function ISCartTransferAction:new(character, item, srcContainer, destContainer, 
     o.stopOnWalk   = true
     o.stopOnRun    = true
     o.stopOnAim    = true
+    -- Initialize the dontAdd flag for the allowMissingItems flow:
+    -- :isValid sets it to true when the item disappeared mid-craft,
+    -- :perform reads it to skip the move while still firing onComplete.
+    o.dontAdd      = false
     o.forceProgressBar = true
     return o
 end

@@ -173,13 +173,17 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
             and SaucedCarts.CorpseStorage.isCorpseItem
             and SaucedCarts.CorpseStorage.isCorpseItem(item)
             and item.loadCorpseFromByteData then
-            -- Rot short-circuit: if the stored corpse's effective age is
-            -- past vanilla's full-removal threshold, vanilla's updateBodies
-            -- would have despawned it already. Match that — drop the item
-            -- silently without rematerializing. Reconcile pulls the cart
-            -- count down via the regular spill path.
-            local removalAt
-            local skeletonAt
+            -- Rot short-circuit: silent-drop past vanilla's despawn threshold.
+            -- Vanilla's `IsoDeadBody.updateBodies` (IsoDeadBody.java:1534)
+            -- despawns non-skeleton zombie corpses at `age >= hoursForCorpse-
+            -- Removal` (= our `skeletonAt`), NOT at `removalAt`. Materializing
+            -- a body in the 24-32h window means it appears for one frame and
+            -- vanilla's next tick removes it — user sees "corpse instantly
+            -- disappears, no halo." We can't `setSkeleton(true)` on the
+            -- rematerialized body to push it into the 24-32h survival window
+            -- because the setter isn't exposed to Lua. So: match vanilla's
+            -- effective despawn boundary at `skeletonAt`.
+            local skeletonAt, removalAt
             if SaucedCarts.CorpseStorage._getRotThresholds then
                 skeletonAt, removalAt = SaucedCarts.CorpseStorage._getRotThresholds()
             end
@@ -190,18 +194,13 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
                 tostring(item:getID()), age,
                 tostring(skeletonAt), tostring(removalAt)
             ) end)
-            if removalAt and age >= removalAt then
+            if skeletonAt and age >= skeletonAt then
                 local srcCart = containerToCart(srcContainer)
                 if srcCart and SaucedCarts.CorpseStorage.reconcile then
                     pcall(function()
                         SaucedCarts.CorpseStorage.reconcile(srcCart,
                             SaucedCarts.CorpseStorage.cartTargetSquare(srcCart, player))
                     end)
-                    if SaucedCarts.CorpseStorage.publishCartStink then
-                        pcall(function()
-                            SaucedCarts.CorpseStorage.publishCartStink(srcCart, player)
-                        end)
-                    end
                 end
                 if not isServer() and HaloTextHelper and player then
                     pcall(function()
@@ -210,8 +209,8 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
                     end)
                 end
                 SaucedCarts.log(function() return string.format(
-                    "performCartTransfer: corpse age=%.1fh past removalAt=%.1fh — silent drop",
-                    age, removalAt
+                    "performCartTransfer: corpse age=%.1fh past skeletonAt=%.1fh — silent drop (vanilla despawn boundary)",
+                    age, skeletonAt
                 ) end)
                 return true
             end
@@ -241,11 +240,6 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
                         SaucedCarts.CorpseStorage.reconcile(srcCart,
                             SaucedCarts.CorpseStorage.cartTargetSquare(srcCart, player))
                     end)
-                    if SaucedCarts.CorpseStorage.publishCartStink then
-                        pcall(function()
-                            SaucedCarts.CorpseStorage.publishCartStink(srcCart, player)
-                        end)
-                    end
                 end
                 -- MP: addCorpse alone doesn't broadcast to remote clients —
                 -- IsoDeadBody.addToWorld only updates local CorpseCount +
@@ -290,11 +284,6 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
                             SaucedCarts.CorpseStorage.reconcile(srcCart,
                                 SaucedCarts.CorpseStorage.cartTargetSquare(srcCart, player))
                         end)
-                        if SaucedCarts.CorpseStorage.publishCartStink then
-                            pcall(function()
-                                SaucedCarts.CorpseStorage.publishCartStink(srcCart, player)
-                            end)
-                        end
                     end
                     SaucedCarts.log("performCartTransfer: corpse byteData was bad; spawned default fallback body")
                     return true
@@ -369,6 +358,25 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
     if srcContainer.setDrawDirty  then srcContainer:setDrawDirty(true)  end
     if destContainer.setDrawDirty then destContainer:setDrawDirty(true) end
 
+    -- Refresh content-display furniture sprites (bookcase showing books,
+    -- fridge/freezer, stacked crates). Vanilla ISInventoryTransferAction:
+    -- transferItem does this via ItemPicker.updateOverlaySprite on the
+    -- containers' parent IsoObjects (ISInventoryTransferAction.lua:661-668,
+    -- server/SP only). We bypass that action entirely, so without this the
+    -- shelf/fridge/box sprite never updates after a cart transfer.
+    -- setDrawDirty above only repaints the inventory panel, not the world
+    -- object's overlay sprite.
+    if not isClient() and ItemPicker and ItemPicker.updateOverlaySprite then
+        local sp = srcContainer.getParent and srcContainer:getParent()
+        if sp and sp.getOverlaySprite and sp:getOverlaySprite() then
+            ItemPicker.updateOverlaySprite(sp)
+        end
+        local dp = destContainer.getParent and destContainer:getParent()
+        if dp then
+            ItemPicker.updateOverlaySprite(dp)
+        end
+    end
+
     SaucedCarts.debug(function() return string.format(
         "performCartTransfer: moved item %d from container type=%s -> type=%s",
         item:getID(),
@@ -391,24 +399,63 @@ end
 -- CART / ITEM LOOKUP (SERVER SIDE)
 -- ============================================================================
 
---- Find a cart InventoryItem by ID — searches the player's own inventory
---- first (in-hand case), then does a bounded ground sweep around the player
---- (ground case). Tight radius prevents a server-side world walk on
---- hostile input.
+--- Find a cart InventoryItem by ID. Mirrors vanilla's `ContainerID.findObject`
+--- resolution paths (ContainerID.java:370-488). Tries, in order:
+---   1. `inv:getItemWithIDRecursiv(cartId)` — vanilla's recursive walk of the
+---      player's inventory tree. Handles equipped + nested cases in one Java
+---      call (vanilla uses this exact method for InventoryContainer kind).
+---   2. Vehicle scan — when the player is sitting in a vehicle, iterate part
+---      containers (mirrors vanilla's ObjectInVehicle path). Covers carts
+---      stowed in a trunk while the player is in the cab.
+---   3. Bounded ground sweep — `IsoWorldInventoryObject` on tiles around the
+---      player. Vanilla doesn't do this because its ContainerID carries the
+---      exact tile coords; we still sweep because our payload only carries
+---      `cartId` (a bare number). Kept tight to bound a server-side walk on
+---      hostile input.
+---
 ---@param player IsoPlayer
 ---@param cartId number
----@param radius number|nil  default 3
+---@param radius number|nil  default 4 (slightly wider than the loot pane's
+---                          ~2-tile reach so a player who walked a step or
+---                          two from a dropped cart can still transfer)
 ---@return InventoryItem|nil
 local function findCartNearPlayer(player, cartId, radius)
-    radius = radius or 3
+    radius = radius or 4
     if not player then return nil end
 
+    -- (1) Recursive inv lookup — same primitive vanilla uses for
+    -- InventoryContainer kind.
     local inv = player:getInventory()
+    if inv and inv.getItemWithIDRecursiv then
+        local it = inv:getItemWithIDRecursiv(cartId)
+        if it and SaucedCarts.safeIsCart(it) then return it end
+    end
+    -- Fallback for older PZ builds where getItemWithIDRecursiv may not
+    -- exist — keep the v2.1.5 non-recursive path so we never regress.
     if inv and inv.getItemById then
         local it = inv:getItemById(cartId)
         if it and SaucedCarts.safeIsCart(it) then return it end
     end
 
+    -- (2) Vehicle parts — when the player is in a vehicle, scan its part
+    -- containers for a cart with this id (e.g. cart stowed in trunk).
+    -- Mirrors vanilla's ObjectInVehicle resolution path.
+    if player.getVehicle then
+        local veh = player:getVehicle()
+        if veh and veh.getPartCount then
+            local n = veh:getPartCount()
+            for i = 0, n - 1 do
+                local part = veh:getPartByIndex(i)
+                local pc = part and part.getItemContainer and part:getItemContainer()
+                if pc and pc.getItemWithIDRecursiv then
+                    local it = pc:getItemWithIDRecursiv(cartId)
+                    if it and SaucedCarts.safeIsCart(it) then return it end
+                end
+            end
+        end
+    end
+
+    -- (3) Ground sweep around the player.
     local psq = player:getCurrentSquare()
     if not psq then return nil end
     for dy = -radius, radius do
@@ -534,6 +581,15 @@ local function findItemNearPlayer(player, itemId, radius)
     -- without this, the item lookup fails before we ever reach resolveSide.
     -- getObjects() returns tile objects; getWorldObjects() above returns
     -- dropped InventoryItems — both need scanning for different reasons.
+    --
+    -- v2.1.6: iterate ALL containers per object via getContainerCount +
+    -- getContainerByIndex. obj:getContainer() returns ONLY the first
+    -- container — for multi-container tiles (fridges have fridge+freezer,
+    -- some counters have multiple cells, double-door wardrobes, etc.) the
+    -- item might live in container index 1+. Vanilla ContainerID.findObject
+    -- uses the same pattern via ObjectContainer kind. Without this loop,
+    -- freezer→cart silently fails because findItemNearPlayer only ever
+    -- looks at the fridge half. Confirmed via dedi log on 2026-04-28.
     for dy = -radius, radius do
         for dx = -radius, radius do
             local sq = getCell():getGridSquare(psq:getX() + dx, psq:getY() + dy, psq:getZ())
@@ -542,10 +598,26 @@ local function findItemNearPlayer(player, itemId, radius)
                 if tileObjs then
                     for i = 0, tileObjs:size() - 1 do
                         local obj = tileObjs:get(i)
-                        local cont = obj and obj.getContainer and obj:getContainer()
-                        if cont and cont.getItemById then
-                            local inside = cont:getItemById(itemId)
-                            if inside then return inside end
+                        if obj then
+                            local nContainers = obj.getContainerCount and obj:getContainerCount() or 0
+                            for ci = 0, nContainers - 1 do
+                                local cont = obj.getContainerByIndex and obj:getContainerByIndex(ci)
+                                if cont and cont.getItemById then
+                                    local inside = cont:getItemById(itemId)
+                                    if inside then return inside end
+                                end
+                            end
+                            -- Belt-and-suspenders: also try the legacy
+                            -- single-container API for objects whose
+                            -- getContainerCount returns 0 but whose
+                            -- getContainer() does return something.
+                            if nContainers == 0 and obj.getContainer then
+                                local cont = obj:getContainer()
+                                if cont and cont.getItemById then
+                                    local inside = cont:getItemById(itemId)
+                                    if inside then return inside end
+                                end
+                            end
                         end
                     end
                 end
@@ -563,32 +635,57 @@ end
 local function handleCartTransfer(player, args)
     if not player then return end
     if not args or not args.itemId or not args.cartId then
-        SaucedCarts.debug("cartTransfer: invalid args")
+        SaucedCarts.debug("cartTransfer: invalid args (missing itemId or cartId)")
         return
     end
 
+    -- NOTE: bail-path logs below use .debug() so they don't spam dedi
+    -- logs in normal play. Promote to .log() temporarily when chasing
+    -- a "transfer animates but item doesn't move" report — the per-bail
+    -- diagnostics (player position, vehicle state, srcKind/destKind,
+    -- container resolution) pin which path is failing in ~one repro.
     local cart = findCartNearPlayer(player, args.cartId)
     if not cart then
-        SaucedCarts.debug(function() return "cartTransfer: cart " .. tostring(args.cartId) .. " not found near player" end)
+        SaucedCarts.debug(function()
+            local psq = player.getCurrentSquare and player:getCurrentSquare()
+            local sqStr = psq and (psq:getX() .. "," .. psq:getY() .. "," .. psq:getZ()) or "nil"
+            local invSize = (player.getInventory and player:getInventory() and player:getInventory().getItems
+                and player:getInventory():getItems():size()) or -1
+            local inVeh = (player.getVehicle and player:getVehicle()) and "yes" or "no"
+            return string.format(
+                "cartTransfer: cart %s NOT FOUND for player at (%s) invSize=%d inVehicle=%s direction=%s srcKind=%s destKind=%s",
+                tostring(args.cartId), sqStr, invSize, inVeh,
+                tostring(args.direction), tostring(args.srcKind), tostring(args.destKind))
+        end)
         return
     end
 
     local item = findItemNearPlayer(player, args.itemId)
     if not item then
-        SaucedCarts.debug(function() return "cartTransfer: item " .. tostring(args.itemId) .. " not found near player" end)
+        SaucedCarts.debug(function() return string.format(
+            "cartTransfer: item %s NOT FOUND for player (cart=%s direction=%s srcKind=%s destKind=%s)",
+            tostring(args.itemId), tostring(args.cartId),
+            tostring(args.direction), tostring(args.srcKind), tostring(args.destKind))
+        end)
         return
     end
 
     local cartContainer = cart.getItemContainer and cart:getItemContainer()
     local playerInv = player:getInventory()
-    if not cartContainer or not playerInv then return end
+    if not cartContainer or not playerInv then
+        SaucedCarts.debug(function() return string.format(
+            "cartTransfer: bail — cartContainer=%s playerInv=%s (cart=%s)",
+            tostring(cartContainer), tostring(playerInv), tostring(args.cartId))
+        end)
+        return
+    end
 
     -- Resolve a side of the transfer (src or dest) based on the client's
     -- classification. Returns (container, square-or-nil). For the floor
     -- case, the container is the floor ItemContainer on the player's
     -- square and the square is what vanilla ISTransferAction needs to
     -- do a proper world drop / world pickup.
-    local function resolveSide(kind, cartId, sqX, sqY, sqZ, containerType, isSrc)
+    local function resolveSide(kind, cartId, sqX, sqY, sqZ, containerType, isSrc, objIndex, contIndex)
         if kind == "floor" then
             local sq = nil
             if sqX and sqY and sqZ then
@@ -614,32 +711,85 @@ local function handleCartTransfer(player, args)
                 if c then return c, nil end
             end
             SaucedCarts.debug(function() return string.format(
-                "resolveSide: bag item %s not found in player inv; falling back to playerInv",
+                "resolveSide: bag item %s NOT FOUND in player inv (recursive); falling back to playerInv",
                 tostring(cartId)) end)
         end
-        -- v2.1.5: world container — the client told us this side is a shelf /
-        -- freezer / barbecue / etc. bound to an IsoObject on a specific tile.
-        -- Iterate the square's objects and match the container by type. For
-        -- most tiles this is unambiguous (one "shelves" per shelf tile, one
-        -- "freezer" per freezer tile, etc.); for multi-container tiles
-        -- (wardrobes) first-match is correct for v1 since the user-visible
-        -- transfer only operates on one container at a time anyway.
+        -- v2.1.5/2.1.6: world container — the client told us this side is a
+        -- shelf / freezer / fridge / barbecue / wardrobe / etc. bound to an
+        -- IsoObject on a specific tile. Iterate the square's objects and
+        -- match the container by type. v2.1.5 used obj:getContainer() which
+        -- is the LEGACY single-container API and only returned the FIRST
+        -- container per object — multi-container objects (fridges have
+        -- fridge+freezer; some counters have multiple cells; double-door
+        -- wardrobes; some workbenches) silently failed to match the freezer
+        -- side. v2.1.6 uses getContainerByType + iterates all containers via
+        -- getContainerCount + getContainerByIndex (mirrors vanilla
+        -- ContainerID.findObject's ObjectContainer path). Confirmed via dedi
+        -- log on 2026-04-28: fridge→cart-on-ground was hitting the wrong
+        -- side and silently failing item lookup.
         if kind == "world" and sqX and sqY and sqZ and containerType then
             local sq = getCell() and getCell():getGridSquare(sqX, sqY, sqZ)
             if sq then
                 local objs = sq:getObjects()
-                if objs then
+                -- Precise path (v2.1.7): resolve the EXACT object + container
+                -- the client clicked, via parent object index + container
+                -- index within that object. This is what disambiguates two
+                -- stacked crates / a fridge's fridge+freezer that share the
+                -- same (tile, container type). Mirrors vanilla
+                -- ISInventoryPage.lua:1405-1410. Falls through to the legacy
+                -- type-match below when the client didn't send indices
+                -- (old in-flight client) or they don't resolve.
+                if objs and objIndex ~= nil then
                     for i = 0, objs:size() - 1 do
                         local obj = objs:get(i)
-                        local cont = obj and obj.getContainer and obj:getContainer()
-                        if cont and cont.getType and cont:getType() == containerType then
-                            return cont, nil
+                        if obj and obj.getObjectIndex
+                            and obj:getObjectIndex() == objIndex then
+                            if contIndex ~= nil and obj.getContainerByIndex then
+                                local cont = obj:getContainerByIndex(contIndex)
+                                if cont then return cont, nil end
+                            end
+                            if obj.getContainerByType and containerType then
+                                local cont = obj:getContainerByType(containerType)
+                                if cont then return cont, nil end
+                            end
+                            break
+                        end
+                    end
+                    SaucedCarts.debug(function() return string.format(
+                        "resolveSide: indexed object/container (%s/%s) not resolved at (%s,%s,%s); falling back to type-match",
+                        tostring(objIndex), tostring(contIndex),
+                        tostring(sqX), tostring(sqY), tostring(sqZ)
+                    ) end)
+                end
+                if objs then
+                    -- Fast path: getContainerByType matches by type directly.
+                    for i = 0, objs:size() - 1 do
+                        local obj = objs:get(i)
+                        if obj and obj.getContainerByType then
+                            local cont = obj:getContainerByType(containerType)
+                            if cont then return cont, nil end
+                        end
+                    end
+                    -- Slow path: walk every container on every object via
+                    -- getContainerCount + getContainerByIndex. Catches the
+                    -- case where getContainerByType is missing or the type
+                    -- string disagrees subtly (different builds / mods).
+                    for i = 0, objs:size() - 1 do
+                        local obj = objs:get(i)
+                        if obj then
+                            local n = obj.getContainerCount and obj:getContainerCount() or 0
+                            for ci = 0, n - 1 do
+                                local cont = obj.getContainerByIndex and obj:getContainerByIndex(ci)
+                                if cont and cont.getType and cont:getType() == containerType then
+                                    return cont, nil
+                                end
+                            end
                         end
                     end
                 end
             end
             SaucedCarts.debug(function() return string.format(
-                "resolveSide: world container (%s) not found at (%s,%s,%s); falling back to playerInv",
+                "resolveSide: world container (%s) NOT FOUND at (%s,%s,%s); falling back to playerInv",
                 tostring(containerType), tostring(sqX), tostring(sqY), tostring(sqZ)
             ) end)
         end
@@ -654,13 +804,13 @@ local function handleCartTransfer(player, args)
         destContainer, dropSquare = resolveSide(
             args.destKind, args.destCartId,
             args.destSqX, args.destSqY, args.destSqZ,
-            args.destContType, false
+            args.destContType, false, args.destObjIdx, args.destContIdx
         )
     else
         srcContainer, srcSquare = resolveSide(
             args.srcKind, args.srcCartId,
             args.srcSqX, args.srcSqY, args.srcSqZ,
-            args.srcContType, true
+            args.srcContType, true, args.srcObjIdx, args.srcContIdx
         )
         destContainer = cartContainer
     end
@@ -717,6 +867,35 @@ local function handleCartTransfer(player, args)
     SaucedCarts.performCartTransfer(
         player, item, srcContainer, destContainer, dropSquare, srcSquare
     )
+
+    -- v2.1.7: batched bulk transfer. The client coalesced a run of same-
+    -- endpoint transfers (e.g. a stack of nails) into one command so it
+    -- isn't N round-trips / N full-duration timed actions. Move the rest
+    -- through the SAME resolved endpoints. canMergeAction guarantees they
+    -- share src/dest/direction, so re-resolving containers per item is
+    -- unnecessary; we only re-find the item by id and apply the same
+    -- per-item idempotence (skip if it's already in the destination).
+    if type(args.itemIds) == "table" and #args.itemIds > 1 then
+        for i = 1, #args.itemIds do
+            local id = args.itemIds[i]
+            if id ~= args.itemId then
+                local extra = findItemNearPlayer(player, id)
+                if extra then
+                    local already = extra.getContainer and extra:getContainer()
+                    if already ~= destContainer then
+                        SaucedCarts.performCartTransfer(
+                            player, extra, srcContainer, destContainer,
+                            dropSquare, srcSquare
+                        )
+                    end
+                else
+                    SaucedCarts.debug(function() return string.format(
+                        "cartTransfer batch: item %s not found, skipping", tostring(id)
+                    ) end)
+                end
+            end
+        end
+    end
 end
 
 if SaucedCarts.Network and SaucedCarts.Network.registerServerHandler then
