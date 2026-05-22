@@ -163,13 +163,20 @@ local function createRepairNeededTooltip(cart, repairItemType)
     needText = needText:gsub("%%1", itemName)
     table.insert(lines, "<RGB:0.9,0.6,0.1>" .. needText)
 
-    -- Show current condition
+    -- Show current condition. Inline-concatenating a trailing "%" hit a
+    -- weird PZ tooltip-render bug for some users (visible as "$s" in the
+    -- tooltip — looks like a downstream format pass eats the literal "%").
+    -- Vanilla translations encode literal percent via "%%" inside getText
+    -- (e.g. UI_GameLoad_humidity = "Humidity: %.1f %%"); doing the same
+    -- here routes the substitution through the translator and renders
+    -- cleanly across all locales.
     local condition = cart:getCondition()
     local conditionMax = cart:getConditionMax()
     local conditionPercent = math.floor((condition / conditionMax) * 100)
     local colorTag = getConditionColorTag(conditionPercent)
-    local conditionLabel = getText("IGUI_invpanel_Condition") or "Condition"
-    table.insert(lines, conditionLabel .. ":" .. colorTag .. " " .. conditionPercent .. "%")
+    local conditionLine = getText("UI_SaucedCarts_RepairTooltip_ConditionPercent",
+        tostring(conditionPercent))
+    table.insert(lines, colorTag .. " " .. conditionLine)
 
     tooltip.description = table.concat(lines, " <LINE> ")
     return tooltip
@@ -239,8 +246,24 @@ function RepairMenu.addRepairOption(context, playerObj, cart, isWorldMenu)
     -- Find repair material
     local repairItem = findRepairItem(playerObj, cart, repairItemType)
 
-    -- Create option text
-    local repairText = getTextOrFallback("UI_SaucedCarts_RepairCart", "Repair Cart")
+    -- Create option text. Append the material status inline so the player
+    -- sees what they need without hovering for the tooltip — addresses
+    -- "I had no idea what I was missing" feedback. Repair currently
+    -- consumes one item of the configured type per action, so the
+    -- shorthand is just "(have <Material>)" / "(need <Material>)".
+    local materialName = getItemDisplayName(repairItemType)
+    local repairBaseText = getTextOrFallback("UI_SaucedCarts_RepairCart", "Repair Cart")
+    local statusText
+    if repairItem then
+        statusText = " (" ..
+            getTextOrFallback("UI_SaucedCarts_RepairOption_Have", "have") ..
+            " " .. materialName .. ")"
+    else
+        statusText = " (" ..
+            getTextOrFallback("UI_SaucedCarts_RepairOption_Need", "need") ..
+            " " .. materialName .. ")"
+    end
+    local repairText = repairBaseText .. statusText
 
     -- Add option
     -- ISContextMenu:addOption signature: (text, firstArg, callback, ...moreArgs)

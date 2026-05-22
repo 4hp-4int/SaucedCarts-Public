@@ -16,14 +16,6 @@ option SaucedCarts.EnableCorpseStorage
     translation = SaucedCarts_EnableCorpseStorage,
 }
 
-option SaucedCarts.EnableCorpseStink
-{
-    type = boolean,
-    default = false,
-    page = SaucedCarts,
-    translation = SaucedCarts_EnableCorpseStink,
-}
-
 option SaucedCarts.SpawnRate
 {
     type = integer,

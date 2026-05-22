@@ -160,13 +160,24 @@ local function onKeyStartPressed(key)
     local holdingCart = primary and SaucedCarts.isCart(primary)
     local draggingCorpse = player.isDraggingCorpse and player:isDraggingCorpse()
 
-    -- Gate corpse-load behavior behind the sandbox option. If disabled,
-    -- pressing V while dragging just falls through to the normal
-    -- equip/drop logic below (equip/drop take over since the player
-    -- could, in principle, do both at once).
+    -- Gate corpse-load behavior behind the sandbox option.
     local corpseFeatureOn = SaucedCarts.CorpseStorage
         and SaucedCarts.CorpseStorage.isEnabled
         and SaucedCarts.CorpseStorage.isEnabled()
+
+    -- BETA disabled + actively grappling: bail with a halo instead of
+    -- falling through to equip/pickup. Vanilla blocks pickup while
+    -- grappling, so the action would fail its own :isValid mid-tick
+    -- and log "bugged action" — bad UX, no feedback. Telling the user
+    -- to release the body first is the actionable response.
+    if draggingCorpse and not corpseFeatureOn then
+        if HaloTextHelper then
+            HaloTextHelper.addBadText(player, getText("UI_SaucedCarts_DropBodyFirst"))
+        end
+        return
+    end
+
+    -- Feature off and not grappling → fall through to equip/drop normally.
     if not corpseFeatureOn then draggingCorpse = false end
 
     -- Priority 0: dragging a corpse → load into the most-available cart.

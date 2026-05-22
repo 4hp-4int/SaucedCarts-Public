@@ -92,9 +92,9 @@ end
 --- @type table[]
 local ATTACHMENT_MATERIALS = {
     { type = "Base.DuctTape", uses = 1, name = "Duct Tape" },
-    { type = "Base.CableTies", uses = 1, name = "Cable Ties" },
-    { type = "Base.Scotchtape", uses = 2, name = "Adhesive Tape" },
-    { type = "Base.Rope", uses = 2, name = "Rope" },
+    { type = "Base.Zipties", uses = 1, name = "Zip Ties" },
+    { type = "Base.Scotchtape", uses = 1, name = "Adhesive Tape" },
+    { type = "Base.Rope", uses = 1, name = "Rope" },
     { type = "Base.Twine", uses = 2, name = "Twine" },
 }
 

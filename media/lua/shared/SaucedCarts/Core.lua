@@ -33,7 +33,7 @@
 SaucedCarts = SaucedCarts or {}
 
 -- Version info
-SaucedCarts.VERSION = "2.1.5"
+SaucedCarts.VERSION = "2.1.7"
 SaucedCarts.MOD_ID = "SaucedCarts"
 SaucedCarts.API_VERSION = 1  -- Increment on breaking API changes (field renames, removed fields, signature changes)
 
@@ -362,6 +362,10 @@ end
 ---@param cart InventoryItem|nil
 ---@return string
 function SaucedCarts.getCartDisplayName(cart)
+    -- Vanilla `setName` + `setCustomName(true)` (via the standard
+    -- ISInventoryPaneContextMenu "Rename Bag" flow our InventoryContainer
+    -- carts pick up automatically) sets the item's display name. vanilla
+    -- syncItemFields handles MP propagation when the cart is grounded.
     if cart and cart.getName then
         local ok, n = pcall(function() return cart:getName() end)
         if ok and n and n ~= "" then return n end
@@ -656,8 +660,9 @@ require "SaucedCarts/CartTransferInterceptor"
 
 -- Generic per-attribute sync framework — collapses the per-feature
 -- ad-hoc network handlers / server registry / late-joiner replay we kept
--- rewriting (cart visual, ghost cleanup, stink, etc.). MUST load before
--- any module that calls Sync.register.
+-- rewriting (cart visual, ghost cleanup, etc.). MUST load before any
+-- module that calls Sync.register. Currently no consumers; kept as
+-- scaffolding for future per-attribute MP sync needs.
 require "SaucedCarts/Sync"
 
 -- Load corpse storage pipeline — custom action + server handler for

@@ -28,11 +28,29 @@ SaucedCarts.Network.registerClientHandler("cartBroke", function(args)
     end
 end)
 
---- Handler: Server notifies cart damaged (low condition warning)
+--- Handler: Server notifies cart damaged (low condition warning, < 25%)
 SaucedCarts.Network.registerClientHandler("cartDamaged", function(args)
     local player = getSpecificPlayer(0)
     if player and SaucedCarts.Notifications then
         SaucedCarts.Notifications.cartDamaged(player)
+    end
+end)
+
+--- Handler: Server notifies cart starting to creak (< 50%) — first
+--- heads-up so players plan a return-to-base before durability bites.
+SaucedCarts.Network.registerClientHandler("cartCreaking", function(args)
+    local player = getSpecificPlayer(0)
+    if player and SaucedCarts.Notifications then
+        SaucedCarts.Notifications.cartCreaking(player)
+    end
+end)
+
+--- Handler: Server notifies cart critically damaged (< 10%) — last
+--- warning before a hard break.
+SaucedCarts.Network.registerClientHandler("cartFailing", function(args)
+    local player = getSpecificPlayer(0)
+    if player and SaucedCarts.Notifications then
+        SaucedCarts.Notifications.cartFailing(player)
     end
 end)
 

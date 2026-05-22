@@ -142,6 +142,11 @@ function Sync.register(spec)
     -- Client: server-broadcast handler → run applyDelta against local state.
     if SaucedCarts.Network and SaucedCarts.Network.registerClientHandler then
         SaucedCarts.Network.registerClientHandler(applyCmd(name), function(args)
+            SaucedCarts.log(function()
+                return "Sync[client]: received '" .. applyCmd(name) ..
+                    "' key=" .. tostring(args and args.key) ..
+                    " hasValue=" .. tostring(args and args.value ~= nil)
+            end)
             if not args or args.key == nil then return end
             Sync._applyOnVm(name, args.key, args.value)
         end)
@@ -206,8 +211,17 @@ end
 --- produces zero delta if applyDelta is correctly written.
 function Sync._applyOnVm(name, key, value)
     local spec = registrations[name]
-    if not spec then return end
+    if not spec then
+        SaucedCarts.log(function() return "Sync._applyOnVm: NO SPEC for '" .. name .. "'" end)
+        return
+    end
     local prev = clientState[name][key]
+    SaucedCarts.log(function()
+        return "Sync._applyOnVm: name=" .. name .. " key=" .. tostring(key) ..
+            " prevHas=" .. tostring(prev ~= nil) ..
+            " newHas=" .. tostring(value ~= nil) ..
+            " [vmRole=" .. (isServer() and "server" or (isClient() and "client" or "sp")) .. "]"
+    end)
     local ok, err = pcall(spec.applyDelta, key, prev, value)
     if not ok then
         SaucedCarts.error("Sync(" .. name .. "):applyDelta threw: " .. tostring(err))

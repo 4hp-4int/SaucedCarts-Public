@@ -187,10 +187,24 @@ function Notifications.orphansFound(player, count)
     Notifications.warn(player, text, "orphans_found")
 end
 
+--- Notify player that cart condition just crossed 50% — first heads-up
+--- before durability becomes a real concern.
+---@param player IsoPlayer The player
+function Notifications.cartCreaking(player)
+    Notifications.info(player, getText("UI_SaucedCarts_CartCreaking"), "cart_creaking")
+end
+
 --- Notify player that cart condition is low (< 25%)
 ---@param player IsoPlayer The player
 function Notifications.cartDamaged(player)
     Notifications.warn(player, getText("UI_SaucedCarts_CartDamaged"), "cart_damaged")
+end
+
+--- Notify player that cart is critically damaged (< 10%) — last call
+--- before it fails. Distinct halo so it stands out from the 25% warning.
+---@param player IsoPlayer The player
+function Notifications.cartFailing(player)
+    Notifications.error(player, getText("UI_SaucedCarts_CartFailing"), "cart_failing")
 end
 
 --- Notify player that cart broke on pickup

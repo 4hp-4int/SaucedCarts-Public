@@ -1,0 +1,69 @@
+SaucedCarts v2.1.7
+Released: 2026-05-22
+====================
+
+A transfer-correctness release. Vehicle trunks now talk to carts both
+ways, stacked containers stop dropping items in the wrong box, shelves
+and fridges refresh their look after a transfer, and moving a stack of
+nails no longer crawls one item at a time. Plus a multiplayer dupe fix
+and some corpse-storage BETA polish.
+
+
+BUG FIXES
+---------
+
+* Vehicle trunk <-> cart transfers didn't work — the action played
+  but nothing moved. Now works in both directions, for trunks,
+  gloveboxes, seats, and trailer beds, whether you're sitting in the
+  vehicle or standing next to it.
+
+* Two same-type containers stacked on one tile (two crates, a fridge
+  + freezer, a double-door wardrobe) put the item in the WRONG box —
+  you'd drag to the top one and it landed in the bottom. Now lands in
+  the box you actually clicked.
+
+* Shelves, fridges, and stacked crates didn't visually update their
+  full/empty appearance after a cart transfer. They now refresh the
+  same way they do for a normal vanilla transfer.
+
+* Moving a stack of light items (nails, screws, etc.) to or from a
+  cart played one slow transfer per item. Same-type light stacks now
+  bundle into a single action, and transfer time scales with item
+  weight just like vanilla — a nail is quick, a sledgehammer takes a
+  moment.
+
+* Right-click "Unequip" on a cart could duplicate it on dedicated
+  multiplayer servers. Fixed.
+
+* Hardened the server-side transfer handler against malformed network
+  input so a misbehaving client can't interrupt a transfer.
+
+
+CORPSE STORAGE (BETA)
+---------------------
+
+Still opt-in and off by default — toggle "Enable Corpse Storage
+[BETA]" in sandbox. This release polishes it:
+
+* The BETA could silently switch itself ON when you loaded a save
+  made before the feature existed. It now stays OFF unless you
+  explicitly enable it.
+
+* Fixed a "corpse appears, then instantly vanishes" flicker when
+  unloading a body that was close to its decay threshold. It now
+  matches vanilla's despawn point exactly.
+
+* If your cart is full (or missing) when you try to load a corpse,
+  you now get an immediate on-screen message instead of a silent
+  no-op — including in multiplayer race situations.
+
+* Removed the experimental "cart corpse stink" option. It couldn't be
+  made to work reliably in multiplayer, so the sandbox toggle is gone.
+
+
+COMPATIBILITY
+-------------
+
+Save-safe. No save-data changes — safe to upgrade mid-save. The old
+"corpse stink" sandbox option is simply ignored if your config still
+has it. Carts created on older versions keep working.

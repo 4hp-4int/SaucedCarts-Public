@@ -41,10 +41,14 @@ local CorpseStorage = {}
 ---@return boolean
 function CorpseStorage.isEnabled()
     local s = SandboxVars and SandboxVars.SaucedCarts
-    if not s then return true end
+    if not s then return false end
     if s.EnableMod == false then return false end
-    if s.EnableCorpseStorage == false then return false end
-    return true
+    -- BETA gate: require explicit `true`. nil (v2.1.4 saves missing the
+    -- new option) reads as "not enabled" so upgrading from v2.1.4 →
+    -- v2.1.5 doesn't silently activate the beta feature. The previous
+    -- `== false` check fell through on nil and accidentally enabled the
+    -- BETA on every upgraded save.
+    return s.EnableCorpseStorage == true
 end
 
 -- ============================================================================
@@ -228,8 +232,14 @@ end
 ---@return number purged how many items were removed
 function CorpseStorage.purgeRottedCorpses(cart)
     if not cart or not CorpseStorage.isEnabled() then return 0 end
-    local _, removalAt = getRotThresholds()
-    if not removalAt then return 0 end  -- sandbox: never decay
+    -- Threshold = skeletonAt (sandbox HoursForCorpseRemoval). Matches the
+    -- unload silent-drop boundary in CartTransferInterceptor / GrabCorpse-
+    -- Interceptor. Past skeletonAt the corpse is dead-to-us either way:
+    -- can't survive vanilla's despawn tick (would flicker out), can't be
+    -- rendered as a skeleton (setSkeleton isn't Lua-exposed). Purging here
+    -- keeps cart inventories from accumulating unrecoverable items.
+    local skeletonAt = getRotThresholds()
+    if not skeletonAt then return 0 end  -- sandbox: never decay
 
     local container = cart.getItemContainer and cart:getItemContainer()
     if not container or not container.getItems then return 0 end
@@ -242,7 +252,7 @@ function CorpseStorage.purgeRottedCorpses(cart)
             local it = items:get(i)
             if it and CorpseStorage.isCorpseItem(it) then
                 local age = CorpseStorage.effectiveAge(it)
-                if age >= removalAt then
+                if age >= skeletonAt then
                     pcall(function() container:Remove(it) end)
                     purged = purged + 1
                 end
@@ -487,12 +497,14 @@ function CorpseStorage.handleLoadCorpseToCart(player, args)
             SaucedCarts.debug(function()
                 return "loadCorpseToCart: cart " .. tostring(args.cartId) .. " not found near player"
             end)
+            CorpseStorage._notifyLoadFailure(player, "no_cart")
             return false
         end
 
         local cartContainer = cart.getItemContainer and cart:getItemContainer()
         if not cartContainer then
             SaucedCarts.debug("loadCorpseToCart: cart has no container")
+            CorpseStorage._notifyLoadFailure(player, "fallback")
             return false
         end
 
@@ -506,12 +518,14 @@ function CorpseStorage.handleLoadCorpseToCart(player, args)
         end
         local gateOk, reason = CorpseStorage.canLoadCorpseIntoCart(cart, gateWeight)
         if not gateOk then
-            -- Debug-level: gate rejection is expected behavior (full cart,
-            -- another player filled it between menu-build and click, etc.).
-            -- The user gets a HaloTextHelper message from the client;
-            -- server-side log noise isn't needed for a normal gameplay path.
+            -- Race window: cart was full by the time the server-side handler
+            -- ran (another player loaded simultaneously, contents shifted via
+            -- transfer between client gate-check and our handler, etc.).
+            -- Notify the originating client so the user sees a halo instead
+            -- of a silent action-fizzle.
             SaucedCarts.debug(function() return
                 "loadCorpseToCart: gate rejected (" .. tostring(reason) .. ")" end)
+            CorpseStorage._notifyLoadFailure(player, reason)
             return false
         end
 
@@ -614,8 +628,6 @@ function CorpseStorage.handleLoadCorpseToCart(player, args)
         -- new count at the cart's current tile (player sq if equipped,
         -- cart world item sq if grounded).
         CorpseStorage.reconcile(cart, CorpseStorage.cartTargetSquare(cart, player))
-        -- MP-stink: propagate to remote clients via the broadcast layer.
-        CorpseStorage.publishCartStink(cart, player)
 
         local sq = deadBody.getSquare and deadBody:getSquare()
         if sq and sq.removeCorpse then
@@ -751,6 +763,54 @@ function CorpseStorage.handleRemoveGhostCorpse(args)
 end
 
 SaucedCarts.Network.registerClientHandler("removeGhostCorpse", CorpseStorage.handleRemoveGhostCorpse)
+
+-- ============================================================================
+-- CLIENT-SIDE LOAD-FAILURE HALO
+-- ============================================================================
+-- The click-time gates in ContextMenu / Hotkeys halo immediately when the
+-- gate fails locally. But there are races we can't catch client-side:
+--
+--   * Cart filled between click-time and `:perform()` (rare but real —
+--     another action mutates the cart's contents, or another player loads
+--     simultaneously on a shared grounded cart).
+--   * Server's view of the cart disagrees with the client's snapshot
+--     (e.g., transient state mismatch after a transfer).
+--
+-- Without a notification path, the action plays to completion + nothing
+-- happens. User sees no feedback. Fix: server fires `loadCorpseFailed`
+-- back to the originating player when the handler bails; client halos.
+
+--- Map a gate-failure reason to a translation key. Centralized so the
+--- server's `_notifyLoadFailure` and the client's halo handler agree on
+--- the lookup.
+local LOAD_FAIL_TEXT_KEYS = {
+    ["cart full"] = "UI_SaucedCarts_LoadBlocked_cart_full",
+    ["no_cart"]   = "UI_SaucedCarts_LoadNoCart",
+}
+
+--- Server-only: send a `loadCorpseFailed` to one player carrying the
+--- gate-rejection reason. No-op outside the server VM.
+---@param player IsoPlayer the originating client
+---@param reason string|nil one of "cart full" / "no_cart" / "fallback" / etc.
+function CorpseStorage._notifyLoadFailure(player, reason)
+    if not isServer() then return end
+    if not player or not SaucedCarts.Network or not SaucedCarts.Network.sendToClient then
+        return
+    end
+    SaucedCarts.Network.sendToClient(player, "loadCorpseFailed", { reason = reason })
+end
+
+--- Client handler — fires HaloTextHelper with the right text on receipt.
+function CorpseStorage.handleLoadCorpseFailed(args)
+    if not HaloTextHelper or not getPlayer then return end
+    local p = getPlayer()
+    if not p then return end
+    local reason = args and args.reason
+    local key = LOAD_FAIL_TEXT_KEYS[reason] or "UI_SaucedCarts_LoadBlocked_fallback"
+    pcall(function() HaloTextHelper.addBadText(p, getText(key)) end)
+end
+
+SaucedCarts.Network.registerClientHandler("loadCorpseFailed", CorpseStorage.handleLoadCorpseFailed)
 
 -- ============================================================================
 -- TEST HOOKS
@@ -913,43 +973,6 @@ local function tilesEqual(a, b)
     return a.x == b.x and a.y == b.y and a.z == b.z
 end
 
---- Emit N corpseAdded / corpseRemoved calls against CorpseCount AND
---- FliesSound at the given tile. Mirrors vanilla's `IsoDeadBody.addToWorld`
---- pairing: both registries get hit on the client (sickness + audio buzz),
---- only CorpseCount on the server (FliesSound is rendering-side, vanilla
---- guards it with `!GameServer.server`).
---- No-op if count == 0, tile is nil, or the registries aren't loaded.
----@param tileDesc table|nil {x, y, z}
----@param delta number positive → corpseAdded; negative → corpseRemoved
-local function emitDelta(tileDesc, delta)
-    if not tileDesc or delta == 0 then return end
-    local x, y, z = tileDesc.x, tileDesc.y, tileDesc.z
-    local sign = delta > 0 and 1 or -1
-    local n = sign > 0 and delta or -delta
-
-    if CorpseCount and CorpseCount.instance then
-        local cc = CorpseCount.instance
-        local fn = sign > 0 and cc.corpseAdded or cc.corpseRemoved
-        if fn then
-            for _ = 1, n do
-                pcall(function() fn(cc, x, y, z) end)
-            end
-        end
-    end
-
-    -- FliesSound: client-only registry that drives the audible buzz around
-    -- corpse piles. Vanilla skips this on server (it's a rendering thing).
-    if not isServer() and FliesSound and FliesSound.instance then
-        local fs = FliesSound.instance
-        local fn = sign > 0 and fs.corpseAdded or fs.corpseRemoved
-        if fn then
-            for _ = 1, n do
-                pcall(function() fn(fs, x, y, z) end)
-            end
-        end
-    end
-end
-
 --- THE single mutation point for per-cart corpse-count tracking.
 --- See the module header for the full contract.
 ---
@@ -972,16 +995,11 @@ function CorpseStorage.reconcile(cart, targetSq)
             targetTile = { x = targetSq:getX(), y = targetSq:getY(), z = targetSq:getZ() }
         end
 
-        -- NOTE (MP-stink, 2026-04-25): reconcile is now pure modData
-        -- accounting. All CorpseCount + FliesSound mutation goes through
-        -- applyStinkBroadcast (the single mutation point), which is invoked
-        -- via publishCartStink at every reconcile call site. This avoids
-        -- double-counting in MP-client (where the broadcast round-trip is
-        -- the authoritative path) and keeps SP correct (publishCartStink in
-        -- SP applies directly via applyStinkBroadcast).
-        --
-        -- The lastSq + lastCount tracking below is still load-bearing — it
-        -- drives the modData state that survives save/load and bootstrap.
+        -- Reconcile is pure modData accounting. The lastSq + lastCount
+        -- tracking below survives save/load and bootstrap; future MP-stink
+        -- (when CorpseCount/FliesSound get Lua-exposed by TIS or via a
+        -- different sickness pathway) will read these to decide what to
+        -- emit, but as of v2.1.5 nothing else consumes them.
 
         -- Unregister path (targetTile=nil, e.g. cart broke): clear modData
         -- count to 0 regardless of what's currently in the container. Contents
@@ -1030,197 +1048,28 @@ function CorpseStorage.cartTargetSquare(cart, player)
 end
 
 -- ============================================================================
--- MP-STINK: server-authoritative per-cart broadcast layer
--- ============================================================================
--- The H1 reconcile above is client-local: each client only feeds its own
--- CorpseCount with carts it has interacted with. In MP that means a remote
--- player carrying a loaded cart contributes ZERO stink to nearby clients —
--- they're immune to a smell they should taste.
---
--- This layer fixes that by relaying per-cart state through the server. Per
--- cart, we track (cartId, tile, count) — count is non-skeleton corpse items.
--- Server is authoritative; clients mirror via a per-cart registry that's
--- the SINGLE mutation point for CorpseCount + FliesSound in MP.
---
--- Sandbox-gated by EnableCorpseStink (separate from EnableCorpseStorage so
--- admins can keep carts as transport without the sickness/audio mechanic).
---
--- Single-mutation invariant:
---   * SP                : reconcile() → emitDelta directly. broadcast layer
---                         no-ops (no other clients to inform).
---   * MP-server         : applyStinkBroadcast → emitDelta + relay to clients.
---                         reconcile()'s emitDelta is gated OFF on the server
---                         (server doesn't render FliesSound, and CorpseCount
---                         on server is vanilla-authoritative for live bodies
---                         only — our cart contributions go through the
---                         broadcast path).
---   * MP-client         : applyStinkBroadcast (received from server) →
---                         emitDelta. reconcile()'s emitDelta is gated OFF
---                         locally so the broadcast round-trip is the sole
---                         path. publishCartStink() does the send-to-server.
---
--- Late-joiner: server keeps _stinkRegistry mirror; on Events.OnConnected,
--- client requests a full replay → server fires applyStinkBroadcast for each
--- known cart targeted at the joiner.
-
---- Sandbox gate for the entire MP-stink + flies broadcast layer. Defaults
---- to true if SandboxVars not yet loaded.
----@return boolean
-function CorpseStorage.isStinkEnabled()
-    if not CorpseStorage.isEnabled() then return false end
-    local s = SandboxVars and SandboxVars.SaucedCarts
-    if not s then return true end
-    if s.EnableCorpseStink == false then return false end
-    return true
-end
-
--- Per-cart registry. Key = cartId (Java numeric → string-keyed for Kahlua
--- table compatibility). Value = {sq = {x,y,z}, count = N}. Holds the LAST
--- broadcast we applied; new broadcasts are diffed against this to compute
--- the CorpseCount + FliesSound delta to emit.
-local _stinkRegistry = {}
-
-local function registryKey(cartId)
-    return tostring(cartId)
-end
-
---- Compute (tile, count) for the given cart's current stink contribution.
----   tile  → cart's current grid-square as {x,y,z} (via cartTargetSquare)
----           or nil if the cart isn't on a known tile (e.g., in vehicle
----           storage). nil tile = "no contribution" path.
----   count → number of non-skeleton corpse items in the cart. Skeletons
----           (effective_age >= skeletonAt) drop out — they don't smell.
----           Sandbox "never decay" (hoursForRemoval == 0) → all corpses
----           count regardless of age.
----@param cart InventoryItem
----@param player IsoGameCharacter|nil
----@return table|nil tile, number count
-function CorpseStorage.computeStinkContribution(cart, player)
-    if not cart then return nil, 0 end
-    local sq = CorpseStorage.cartTargetSquare(cart, player)
-    local tile = nil
-    if sq and sq.getX then
-        tile = { x = sq:getX(), y = sq:getY(), z = sq:getZ() }
-    end
-
-    local container = cart.getItemContainer and cart:getItemContainer()
-    if not container or not container.getItems then return tile, 0 end
-
-    local skeletonAt = select(1, getRotThresholds())  -- nil → never-decay sandbox
-    local count = 0
-    pcall(function()
-        local items = container:getItems()
-        if not items then return end
-        for i = 0, items:size() - 1 do
-            local it = items:get(i)
-            if it and CorpseStorage.isCorpseItem(it) then
-                if not skeletonAt then
-                    count = count + 1  -- sandbox: never decay → always counts
-                else
-                    local age = CorpseStorage.effectiveAge(it)
-                    if age < skeletonAt then count = count + 1 end
-                end
-            end
-        end
-    end)
-    return tile, count
-end
-
---- Stink syncs through SaucedCarts.Sync — a generic per-attribute
---- framework that owns the network plumbing, server registry mirror, and
---- late-joiner replay. The CorpseStorage-specific bits (compute current
---- value from a cart, emit deltas to vanilla CorpseCount + FliesSound) are
---- the spec we register here. publishCartStink remains the public API
---- callers use; it just delegates to Sync.publish.
----
---- Value shape (single source of truth across client/server):
----   nil                                             -- unregister
----   { tile = {x, y, z}, count = N }                  -- registered
----
---- count is computed by computeStinkContribution (skeleton-filtered, sandbox
---- "never decay" honored). tile is the cart's current grid square or nil if
---- unknown (vehicle storage, etc.) — Sync's valueIsEmpty treats nil tile as
---- unregister.
-
-if SaucedCarts.Sync and SaucedCarts.Sync.register then
-    SaucedCarts.Sync.register({
-        name  = "stink",
-        keyOf = function(cart)
-            return cart and cart.getID and tostring(cart:getID()) or nil
-        end,
-        compute = function(cart, ctx)
-            if not CorpseStorage.isStinkEnabled() then return nil end
-            local tile, count = CorpseStorage.computeStinkContribution(cart, ctx and ctx.player)
-            if not tile or count <= 0 then return nil end
-            return { tile = tile, count = count }
-        end,
-        applyDelta = function(_key, prev, new)
-            local prevTile  = prev and prev.tile or nil
-            local prevCount = prev and prev.count or 0
-            local newTile   = new and new.tile or nil
-            local newCount  = new and new.count or 0
-            if newTile and prevTile and tilesEqual(newTile, prevTile) then
-                emitDelta(newTile, newCount - prevCount)
-            else
-                if prevTile and prevCount > 0 then emitDelta(prevTile, -prevCount) end
-                if newTile and newCount > 0 then emitDelta(newTile, newCount) end
-            end
-        end,
-    })
-end
-
---- Public API: publish a cart's current stink contribution. Routes through
---- Sync (SP applies locally; MP-client → server → broadcast → all clients).
---- Sandbox-gated; no-op when EnableCorpseStink is off.
----@param cart InventoryItem
----@param player IsoGameCharacter|nil  used to compute target tile when equipped
-function CorpseStorage.publishCartStink(cart, player)
-    if not cart then return end
-    if not CorpseStorage.isStinkEnabled() then return end
-    if not (SaucedCarts.Sync and SaucedCarts.Sync.publish) then return end
-    SaucedCarts.Sync.publish("stink", cart, { player = player })
-end
-
---- Test compatibility shim — old tests call applyStinkBroadcast(cartId, tile,
---- count) directly. Forward to Sync._applyOnVm with a value table built from
---- the legacy three-arg form. Same behavior as before the refactor.
-function CorpseStorage.applyStinkBroadcast(cartId, tile, count)
-    if not cartId then return end
-    if not CorpseStorage.isStinkEnabled() then return end
-    if not SaucedCarts.Sync then return end
-    local key = registryKey(cartId)
-    local value
-    if tile and type(count) == "number" and count > 0 then
-        value = { tile = tile, count = count }
-    end
-    SaucedCarts.Sync._applyOnVm("stink", key, value)
-end
-
-CorpseStorage._registryKey = registryKey
--- Backward-compat: tests reference _stinkRegistry. Expose the Sync-managed
--- per-attribute state table under the old name. New code should use
--- SaucedCarts.Sync._clientState.stink directly.
-CorpseStorage._stinkRegistry =
-    SaucedCarts.Sync and SaucedCarts.Sync._clientState
-        and SaucedCarts.Sync._clientState.stink
-        or _stinkRegistry  -- fallback to the local table if Sync not loaded
-
--- ============================================================================
 -- RECONCILE EVENT WIRING (client-local)
 -- ============================================================================
+--
+-- NOTE (stink removed, 2026-04-26): the MP-stink broadcast layer that
+-- previously lived here was stripped after we discovered vanilla's
+-- `CorpseCount` and `FliesSound` registries are NOT exposed to Lua
+-- (LuaManager.exposeAll has neither, and CorpseCount.java carries no
+-- @LuaMethod). Without engine-level exposure from TIS, no Lua-side path
+-- can feed those registries — so feeding cart contributions into vanilla
+-- sickness / flies-buzz is unimplementable as designed. Reconcile remains
+-- as the per-cart modData state tracker (regSq, regCount).
+--
+-- The Sync rules engine (shared/SaucedCarts/Sync.lua) is still in the
+-- codebase for future per-attribute MP sync needs (cart names, easter-egg
+-- emotes, repair-status sync, etc.). Stink would need a different sickness
+-- pathway entirely — likely IsoGameCharacter.setCorpseSicknessRate or
+-- direct FOOD_SICKNESS stat injection on player update — to land in any
+-- future version.
 -- OnGameStart bootstrap: any cart the player's inventory or nearby world
--- already has at session start gets its initial reconcile. This handles
--- save/load (modData persisted → delta goes to 0) and new sessions (no
--- prior state → full register at current sq).
---
--- onCartEquip / onCartDrop / onCartMove / onCartBroke: discrete events
--- already fired by SaucedCarts' own Core event table. These ARE the
--- "cart moved to a new tile" signals — no per-tick polling needed.
---
--- OnLoadGridsquare: chunk-reload durability. When a square loads with a
--- grounded cart, ensure our contribution is (re-)added to the chunk's
--- CorpseCount — which may have been 0 after a reload even though our
--- modData claims N.
+-- already has at session start gets its initial reconcile (modData state
+-- refresh). Discrete cart events (equip/drop/move/broke) also reconcile
+-- + run the rot purge.
 
 if not isServer() and SaucedCarts.Events then
     if SaucedCarts.Events.onCartEquip then
@@ -1230,7 +1079,6 @@ if not isServer() and SaucedCarts.Events then
             -- count seen by reconcile must reflect post-purge state.
             CorpseStorage.purgeRottedCorpses(cart)
             CorpseStorage.reconcile(cart, CorpseStorage.cartTargetSquare(cart, player))
-            CorpseStorage.publishCartStink(cart, player)
         end)
     end
     if SaucedCarts.Events.onCartDrop then
@@ -1238,17 +1086,16 @@ if not isServer() and SaucedCarts.Events then
             if not CorpseStorage.isEnabled() then return end
             CorpseStorage.purgeRottedCorpses(cart)
             CorpseStorage.reconcile(cart, square)
-            CorpseStorage.publishCartStink(cart, player)
         end)
     end
-    if SaucedCarts.Events.onCartMove then
-        SaucedCarts.Events.onCartMove:Add(function(player, cart, distance)
-            if not CorpseStorage.isEnabled() then return end
-            CorpseStorage.purgeRottedCorpses(cart)
-            CorpseStorage.reconcile(cart, CorpseStorage.cartTargetSquare(cart, player))
-            CorpseStorage.publishCartStink(cart, player)
-        end)
-    end
+    -- Note (2026-04-26): onCartMove (per-tile) used to fire reconcile +
+    -- purge here, originally for the now-stripped stink layer's per-tile
+    -- contribution tracking. Without stink there's no per-tile consumer:
+    --   * reconcile's modData state has no readers in production
+    --   * purgeRottedCorpses doesn't change behavior between two adjacent
+    --     tiles — equip/drop already cover it, and the unload silent-drop
+    --     is the actual UX gate when a corpse hits removalAt mid-trip.
+    -- Removed to cut wasted per-tick work during long pushes.
     if SaucedCarts.Events.onCartBroke then
         SaucedCarts.Events.onCartBroke:Add(function(player, cart, square)
             if not CorpseStorage.isEnabled() then return end
@@ -1256,9 +1103,6 @@ if not isServer() and SaucedCarts.Events then
             -- spill go through performCartTransfer's materialization
             -- branch which does its own addCorpse.
             CorpseStorage.reconcile(cart, nil)
-            -- Stink: nil tile in publishCartStink → registries unregister
-            -- the cart entirely on every client.
-            CorpseStorage.publishCartStink(cart, player)
         end)
     end
 end
@@ -1277,7 +1121,6 @@ local function reconcileCartsInRange(player, sqFilter)
             local it = items:get(i)
             if it and SaucedCarts.safeIsCart(it) and not sqFilter then
                 CorpseStorage.reconcile(it, CorpseStorage.cartTargetSquare(it, player))
-                CorpseStorage.publishCartStink(it, player)
             end
         end
     end
@@ -1297,7 +1140,6 @@ local function reconcileCartsInRange(player, sqFilter)
                             local it = o:getItem()
                             if it and SaucedCarts.safeIsCart(it) then
                                 CorpseStorage.reconcile(it, sq)
-                                CorpseStorage.publishCartStink(it, player)
                             end
                         end
                     end

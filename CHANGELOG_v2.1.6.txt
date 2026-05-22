@@ -1,0 +1,50 @@
+SaucedCarts v2.1.6
+Released: 2026-04-28
+====================
+
+A focused fix release: the most-reported "transfer animates but item
+doesn't move" bug is finally pinned and squashed, plus a crash from
+crafting with a cart, plus a few translation + lookup fixes.
+
+
+BUG FIXES
+---------
+
+* Fridge -> cart, freezer -> cart, and other multi-container tiles
+  (some counters, double-door wardrobes, certain workbenches) silently
+  failed when the player dragged from a non-primary container. Symptom:
+  progress bar fills, animation plays, item never moves. Cart now
+  iterates every container per tile object instead of only the first.
+
+* Crash when crafting with a cart as a source container (e.g. charcoal
+  in cart -> simple furnace -> smelt iron). Vanilla's craft-cleanup
+  flow called `setAllowMissingItems` on our action class, which didn't
+  expose that method. Added the missing vanilla compat shims for
+  setAllowMissingItems + setOnComplete (also fixes potential nil-call
+  crashes from alarm, map-check, and inspect-clothing flows).
+
+* Cart in vehicle trunk was invisible to the server-side cart lookup.
+  Now scans vehicle parts when the player is in a vehicle. Also bumped
+  the ground-sweep radius slightly so a cart you walked a tile or two
+  away from still resolves.
+
+* Cart and attachment-kit tooltips weren't showing in-game — the
+  translation entries were in the wrong category file (UI_EN instead
+  of Tooltip_EN). Moved to the right files; tooltips now render.
+
+
+HARDENING
+---------
+
+* New offline contract test catches future PZ-patch additions to
+  ISInventoryTransferAction before they crash players. 221 offline
+  tests passing (up from 214).
+
+* Reverted the diagnostic logs we added to track down the multi-
+  container bug — server log is back to its quiet baseline.
+
+
+COMPATIBILITY
+-------------
+
+Save-safe. No ModData schema changes. Safe to upgrade mid-save.

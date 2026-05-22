@@ -620,48 +620,12 @@ tests["resolveDeadBody_unknown_type_returns_nil"] = function()
 end
 
 -- ============================================================================
--- H1: reconcile(cart, targetSq) — per-cart corpse-count tracking
+-- reconcile(cart, targetSq) — per-cart modData state tracking
 -- ============================================================================
--- These tests lock the load-bearing invariant that reconcile is the SINGLE
--- mutation point for CorpseCount per-cart tracking, and that it's idempotent,
--- delta-based, clamps to zero, and handles tile swaps cleanly.
-
---- Install a CorpseCount spy. Captures every corpseAdded / corpseRemoved
---- call as {x, y, z, op} tuples. Restore via spy.restore().
----
---- Also clears the per-cart stink registry so cross-test state from
---- earlier tests' applyStinkBroadcast calls doesn't bleed into this one.
---- F.item uses ZombRand for IDs which can collide across tests; without
---- this clear, a leftover registry entry for a colliding cartId would
---- cause spurious emits when the new test calls applyStinkBroadcast.
-local function installCorpseCountSpy()
-    -- Clear MP-stink registry so prior tests' applyStinkBroadcast state
-    -- doesn't leak through cartId collisions (ZombRand 100000-999999).
-    if CS._stinkRegistry then
-        for k in pairs(CS._stinkRegistry) do CS._stinkRegistry[k] = nil end
-    end
-    local calls = {}
-    local prev = _G.CorpseCount
-    _G.CorpseCount = {
-        instance = {
-            corpseAdded   = function(self, x, y, z) table.insert(calls, {x=x, y=y, z=z, op="add"}) end,
-            corpseRemoved = function(self, x, y, z) table.insert(calls, {x=x, y=y, z=z, op="remove"}) end,
-        },
-    }
-    return {
-        calls = calls,
-        nettAt = function(x, y, z)
-            local n = 0
-            for _, c in ipairs(calls) do
-                if c.x == x and c.y == y and c.z == z then
-                    n = n + (c.op == "add" and 1 or -1)
-                end
-            end
-            return n
-        end,
-        restore = function() _G.CorpseCount = prev end,
-    }
-end
+-- After the v2.1.5 stink-strip, reconcile is pure modData accounting. It
+-- doesn't emit to vanilla CorpseCount anymore (CorpseCount isn't even
+-- Lua-exposed). These tests lock the modData state machine: cart's
+-- (regSq, regCount) reflects current container contents + last seen tile.
 
 --- Make a cart whose inner container has `n` corpse items in it.
 local function makeCartWithCorpses(n, cartOpts)
@@ -671,147 +635,107 @@ local function makeCartWithCorpses(n, cartOpts)
     return cart
 end
 
---- Test helper: simulates a reconcile + stink-publish pair the way production
---- does it (post MP-stink refactor where reconcile is pure modData accounting
---- and applyStinkBroadcast is the single CorpseCount mutation point). The
---- mock environment runs as fake MP-client (`isClient()=true`), so we bypass
---- publishCartStink's network routing and call applyStinkBroadcast directly.
-local function reconcileAndApply(cart, sq)
-    CS.reconcile(cart, sq)
-    local cartId = cart.getID and cart:getID()
-    local tile = nil
-    if sq and sq.getX then
-        tile = { x = sq:getX(), y = sq:getY(), z = sq:getZ() }
-    end
-    local container = cart:getItemContainer()
-    local count = 0
-    if container and container.getItems then
-        local items = container:getItems()
-        if items then
-            for i = 0, items:size() - 1 do
-                local it = items:get(i)
-                if it and CS.isCorpseItem(it) then count = count + 1 end
-            end
-        end
-    end
-    CS.applyStinkBroadcast(cartId, tile, count)
+--- Read the cart's reconcile-state modData. Returns (sq, count) where sq
+--- is the {x,y,z} table or nil.
+local function readReconcileState(cart)
+    local md = cart:getModData()
+    return md[CS._RECONCILE_MOD_KEY_SQ], md[CS._RECONCILE_MOD_KEY_COUNT]
 end
 
-tests["reconcile_first_register_adds_N_at_target"] = function()
-    -- Fresh cart (no prior modData state) with 3 corpses. Expect +3 at targetSq.
-    local spy = installCorpseCountSpy()
+tests["reconcile_first_register_writes_modData"] = function()
     local cart = makeCartWithCorpses(3)
     local sq = { getX = function() return 10 end, getY = function() return 20 end, getZ = function() return 0 end }
 
-    reconcileAndApply(cart, sq)
+    CS.reconcile(cart, sq)
 
-    local n = spy.nettAt(10, 20, 0)
-    spy.restore()
-    return Assert.equal(n, 3, "first reconcile registers +3 at (10,20,0)")
+    local stamped, count = readReconcileState(cart)
+    if not Assert.isTrue(stamped ~= nil, "regSq stamped") then return false end
+    if not Assert.equal(stamped.x, 10, "regSq.x") then return false end
+    if not Assert.equal(stamped.y, 20, "regSq.y") then return false end
+    if not Assert.equal(stamped.z, 0,  "regSq.z") then return false end
+    return Assert.equal(count, 3, "regCount = 3 corpses in cart")
 end
 
-tests["reconcile_is_idempotent"] = function()
-    -- Call reconcile twice with identical state → second call must be net-zero.
-    local spy = installCorpseCountSpy()
+tests["reconcile_is_idempotent_state"] = function()
     local cart = makeCartWithCorpses(2)
     local sq = { getX = function() return 5 end, getY = function() return 5 end, getZ = function() return 0 end }
 
-    reconcileAndApply(cart, sq)  -- +2 at (5,5,0)
-    reconcileAndApply(cart, sq)  -- same state, expect 0
+    CS.reconcile(cart, sq)
+    local sq1, n1 = readReconcileState(cart)
+    CS.reconcile(cart, sq)
+    local sq2, n2 = readReconcileState(cart)
 
-    local n = spy.nettAt(5, 5, 0)
-    spy.restore()
-    return Assert.equal(n, 2,
-        "idempotent: double reconcile on same state still registers exactly 2 (no double-add)")
+    if not Assert.equal(n1, 2, "first reconcile sets count=2") then return false end
+    if not Assert.equal(n2, 2, "second reconcile keeps count=2 (idempotent)") then return false end
+    return Assert.isTrue(sq1.x == sq2.x and sq1.y == sq2.y, "regSq unchanged across calls")
 end
 
-tests["reconcile_delta_on_same_tile_when_count_changes"] = function()
-    -- Cart has 2 corpses at sq; reconcile. Then add 1 more corpse; reconcile
-    -- with same sq. Expect +1 applied (delta), not full re-register.
-    local spy = installCorpseCountSpy()
+tests["reconcile_updates_count_when_container_changes"] = function()
     local cart = makeCartWithCorpses(2)
     local sq = { getX = function() return 8 end, getY = function() return 9 end, getZ = function() return 0 end }
 
-    reconcileAndApply(cart, sq)  -- +2
-    cart:getItemContainer():AddItem(makeCorpseItem({ id = 9999 }))
-    reconcileAndApply(cart, sq)  -- +1 more
+    CS.reconcile(cart, sq)
+    local _, before = readReconcileState(cart)
 
-    local n = spy.nettAt(8, 9, 0)
-    spy.restore()
-    return Assert.equal(n, 3, "net should be 3 (delta +1 applied correctly)")
+    cart:getItemContainer():AddItem(makeCorpseItem({ id = 9999 }))
+    CS.reconcile(cart, sq)
+    local _, after = readReconcileState(cart)
+
+    if not Assert.equal(before, 2, "pre-add count") then return false end
+    return Assert.equal(after, 3, "post-add count tracks current container state")
 end
 
-tests["reconcile_full_swap_on_tile_change"] = function()
-    -- Cart at tile A with N=2, then cart moves to tile B (count unchanged).
-    -- Expect -2 at A, +2 at B. No residual at A.
-    local spy = installCorpseCountSpy()
+tests["reconcile_swap_overwrites_regSq_on_tile_change"] = function()
     local cart = makeCartWithCorpses(2)
     local sqA = { getX = function() return 1 end, getY = function() return 1 end, getZ = function() return 0 end }
     local sqB = { getX = function() return 5 end, getY = function() return 5 end, getZ = function() return 0 end }
 
-    reconcileAndApply(cart, sqA)
-    reconcileAndApply(cart, sqB)
+    CS.reconcile(cart, sqA)
+    CS.reconcile(cart, sqB)
+    local stamped, count = readReconcileState(cart)
 
-    local netA = spy.nettAt(1, 1, 0)
-    local netB = spy.nettAt(5, 5, 0)
-    spy.restore()
-
-    if not Assert.equal(netA, 0, "old tile A net should be 0 after swap") then return false end
-    return Assert.equal(netB, 2, "new tile B net should be 2 after swap")
+    if not Assert.equal(stamped.x, 5, "regSq overwritten to new tile X") then return false end
+    if not Assert.equal(stamped.y, 5, "regSq overwritten to new tile Y") then return false end
+    return Assert.equal(count, 2, "regCount preserved across tile swap")
 end
 
-tests["reconcile_full_decrement_when_target_is_nil"] = function()
-    -- Cart was registered at tile A with N=3, then cart-broke → reconcile(cart, nil).
-    -- Expect -3 at A, modData cleared.
-    local spy = installCorpseCountSpy()
+tests["reconcile_nil_target_clears_modData"] = function()
+    -- Cart-broke / unregister path: reconcile(cart, nil) clears state.
     local cart = makeCartWithCorpses(3)
     local sq = { getX = function() return 4 end, getY = function() return 4 end, getZ = function() return 0 end }
 
-    reconcileAndApply(cart, sq)   -- +3
-    reconcileAndApply(cart, nil)  -- -3
+    CS.reconcile(cart, sq)
+    CS.reconcile(cart, nil)
+    local stamped, count = readReconcileState(cart)
 
-    local net = spy.nettAt(4, 4, 0)
-    local md = cart:getModData()
-    spy.restore()
-
-    if not Assert.equal(net, 0, "net at old tile is 0 after unregister") then return false end
-    if not Assert.isNil(md[CS._RECONCILE_MOD_KEY_SQ], "modData sq cleared") then return false end
-    return Assert.equal(md[CS._RECONCILE_MOD_KEY_COUNT], 0, "modData count cleared to 0")
+    if not Assert.isNil(stamped, "regSq cleared") then return false end
+    return Assert.equal(count, 0, "regCount cleared to 0")
 end
 
 tests["reconcile_handles_empty_cart"] = function()
-    -- Empty cart, reconcile to a tile. Should not emit any calls (count=0).
-    local spy = installCorpseCountSpy()
     local cart = makeRegisteredCart()
     local sq = { getX = function() return 2 end, getY = function() return 2 end, getZ = function() return 0 end }
 
-    reconcileAndApply(cart, sq)
+    CS.reconcile(cart, sq)
+    local stamped, count = readReconcileState(cart)
 
-    local n = #spy.calls
-    spy.restore()
-    return Assert.equal(n, 0, "no CorpseCount calls for empty cart")
+    if not Assert.equal(count, 0, "empty cart → count 0") then return false end
+    return Assert.isTrue(stamped ~= nil, "regSq still stamped for empty-cart at-tile case")
 end
 
-tests["reconcile_clamps_on_shrinking_count"] = function()
-    -- Cart had 3 corpses registered. Now it has 1 (someone removed 2 outside
-    -- our normal flow). reconcile must emit -2, not -3 or some other value.
-    local spy = installCorpseCountSpy()
+tests["reconcile_tracks_count_decrease"] = function()
     local cart = makeCartWithCorpses(3)
     local sq = { getX = function() return 0 end, getY = function() return 0 end, getZ = function() return 0 end }
 
-    reconcileAndApply(cart, sq)  -- +3 registered
-    -- Simulate external removal of 2 items.
+    CS.reconcile(cart, sq)
     local cont = cart:getItemContainer()
     local items = cont:getItems()
-    -- Remove via the mock's Remove method — grab first 2 items
     local toRemove = { items:get(0), items:get(1) }
     for _, it in ipairs(toRemove) do cont:Remove(it) end
+    CS.reconcile(cart, sq)
+    local _, count = readReconcileState(cart)
 
-    reconcileAndApply(cart, sq)  -- delta = 1 - 3 = -2 at same tile
-
-    local n = spy.nettAt(0, 0, 0)
-    spy.restore()
-    return Assert.equal(n, 1, "shrinking count applies -2 delta, leaving net 1")
+    return Assert.equal(count, 1, "after external removal of 2, regCount = 1")
 end
 
 tests["reconcile_survives_toctou_iteration_error"] = function()
@@ -895,46 +819,34 @@ tests["loaded_corpse_item_keeps_byteData_in_cart"] = function()
 end
 
 tests["reconcile_state_survives_modData_serialize_round_trip"] = function()
-    -- Simulate save/load by snapshotting modData → re-applying. The cart
-    -- may transit through a different VM (server save → client load).
-    -- After re-apply, reconcile must see (lastSq, lastCount) and produce
-    -- a delta of 0 for an unchanged cart at the same tile.
-    local spy = installCorpseCountSpy()
+    -- Simulate save/load by snapshotting modData → re-applying on a fresh
+    -- VM. After restore, reconcile sees the prior state and treats a
+    -- same-tile/same-count call as a no-op (modData unchanged).
     local cart = makeCartWithCorpses(4)
     local sq = { getX = function() return 12 end, getY = function() return 34 end, getZ = function() return 0 end }
 
-    -- First reconcile: register at sq with count=4
-    reconcileAndApply(cart, sq)
-    local addsBefore = spy.nettAt(12, 34, 0)
-    if addsBefore ~= 4 then
-        spy.restore()
-        return Assert.equal(addsBefore, 4, "initial register adds 4 — preflight check")
-    end
-
-    -- Snapshot modData (simulate save).
+    CS.reconcile(cart, sq)
     local md = cart:getModData()
     local snapshotSq    = { x = md[CS._RECONCILE_MOD_KEY_SQ].x,
                             y = md[CS._RECONCILE_MOD_KEY_SQ].y,
                             z = md[CS._RECONCILE_MOD_KEY_SQ].z }
     local snapshotCount = md[CS._RECONCILE_MOD_KEY_COUNT]
 
-    -- Wipe the current modData and re-apply (simulate load on a fresh VM).
+    -- Wipe + re-apply (simulate save→load round-trip).
     md[CS._RECONCILE_MOD_KEY_SQ]    = nil
     md[CS._RECONCILE_MOD_KEY_COUNT] = nil
     md[CS._RECONCILE_MOD_KEY_SQ]    = snapshotSq
     md[CS._RECONCILE_MOD_KEY_COUNT] = snapshotCount
 
     -- Bootstrap reconcile (simulating OnGameStart). Same tile, same
-    -- container contents → delta should be 0. The CorpseCount spy
-    -- shouldn't have grown.
-    local callsBefore = #spy.calls
-    reconcileAndApply(cart, sq)
-    local callsAfter = #spy.calls
-    spy.restore()
+    -- container contents → modData stays at (sq, 4).
+    CS.reconcile(cart, sq)
+    local stamped = md[CS._RECONCILE_MOD_KEY_SQ]
+    local count   = md[CS._RECONCILE_MOD_KEY_COUNT]
 
-    return Assert.equal(callsAfter, callsBefore,
-        "post-load reconcile is a no-op (delta=0) when modData state matches container state — " ..
-        "save/load round-trip preserves accounting")
+    if not Assert.equal(count, 4, "regCount preserved across save/load + reconcile") then return false end
+    return Assert.isTrue(stamped.x == 12 and stamped.y == 34,
+        "regSq preserved across save/load + reconcile")
 end
 
 -- ============================================================================
@@ -1062,9 +974,13 @@ tests["restoreDeathTime_noop_when_unstamped"] = function()
         "no stamp → body's deathTime untouched (preserves byteData value)")
 end
 
-tests["purgeRottedCorpses_removes_only_past_removalAt"] = function()
+tests["purgeRottedCorpses_removes_past_skeletonAt"] = function()
+    -- Threshold = skeletonAt (= hoursForRemoval). Bodies past this can't
+    -- survive vanilla's despawn tick anyway, and we can't render skeletons
+    -- (setSkeleton isn't Lua-exposed). Purging at skeletonAt matches the
+    -- unload silent-drop boundary in CartTransferInterceptor.
     local rot = installRotFixture({ hoursForRemoval = 216, startNow = 500 })
-    -- removalAt = 216 + 72 = 288. Anything with deathTime <= 500-288 = 212 is gone.
+    -- skeletonAt = 216. Anything with deathTime <= 500-216 = 284 is purged.
 
     local cart = makeRegisteredCart({ capacity = 500 })
     local cont = cart:getItemContainer()
@@ -1073,32 +989,32 @@ tests["purgeRottedCorpses_removes_only_past_removalAt"] = function()
     fresh:getModData()[CS._CORPSE_DEATHTIME_KEY] = 400  -- age 100, fresh
 
     local rotting = makeRotCorpseItem({ id = 2 })
-    rotting:getModData()[CS._CORPSE_DEATHTIME_KEY] = 300  -- age 200, mid-rot
+    rotting:getModData()[CS._CORPSE_DEATHTIME_KEY] = 300  -- age 200, mid-rot, kept (under skeletonAt)
 
-    local skeleton = makeRotCorpseItem({ id = 3 })
-    skeleton:getModData()[CS._CORPSE_DEATHTIME_KEY] = 250  -- age 250, past skeletonAt(216) but not removalAt(288)
+    local skeletonAge = makeRotCorpseItem({ id = 3 })
+    skeletonAge:getModData()[CS._CORPSE_DEATHTIME_KEY] = 250  -- age 250, PAST skeletonAt(216) → purged
 
     local gone1  = makeRotCorpseItem({ id = 4 })
-    gone1:getModData()[CS._CORPSE_DEATHTIME_KEY] = 100  -- age 400, past removalAt
+    gone1:getModData()[CS._CORPSE_DEATHTIME_KEY] = 100  -- age 400, way past
 
     local gone2  = makeRotCorpseItem({ id = 5 })
     gone2:getModData()[CS._CORPSE_DEATHTIME_KEY] = 0   -- age 500, ancient
 
     cont:AddItem(fresh)
     cont:AddItem(rotting)
-    cont:AddItem(skeleton)
+    cont:AddItem(skeletonAge)
     cont:AddItem(gone1)
     cont:AddItem(gone2)
 
     local purged = CS.purgeRottedCorpses(cart)
     rot.restore()
 
-    if not Assert.equal(purged, 2, "exactly 2 items past removalAt purged") then return false end
+    if not Assert.equal(purged, 3, "3 items past skeletonAt purged") then return false end
     if not Assert.isTrue(cont:contains(fresh),    "fresh corpse kept") then return false end
-    if not Assert.isTrue(cont:contains(rotting),  "mid-rot corpse kept") then return false end
-    if not Assert.isTrue(cont:contains(skeleton), "post-skeleton-but-pre-removal corpse kept") then return false end
-    if not Assert.isTrue(not cont:contains(gone1), "past-removalAt corpse purged (id=4)") then return false end
-    return Assert.isTrue(not cont:contains(gone2), "past-removalAt corpse purged (id=5)")
+    if not Assert.isTrue(cont:contains(rotting),  "mid-rot corpse kept (under skeletonAt)") then return false end
+    if not Assert.isTrue(not cont:contains(skeletonAge), "post-skeletonAt corpse purged") then return false end
+    if not Assert.isTrue(not cont:contains(gone1), "ancient corpse purged (id=4)") then return false end
+    return Assert.isTrue(not cont:contains(gone2), "ancient corpse purged (id=5)")
 end
 
 tests["purgeRottedCorpses_skips_when_sandbox_says_never_decay"] = function()

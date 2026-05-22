@@ -45,6 +45,16 @@ return {
         "shared/TimedActions/ISUnequipAction",
     },
 
+    -- GrabCorpseInterceptor.lua does `pcall(require,
+    -- "TimedActions/ISGrabCorpseItem")` — at runtime that pcall gracefully
+    -- skips when the vanilla file is absent, but the pz-test-kit module
+    -- pre-scanner resolves requires eagerly and hard-fails. The grab hook
+    -- has no offline test depending on the real vanilla class, so silently
+    -- ignore the require in the test env.
+    stub_requires = {
+        "TimedActions/ISGrabCorpseItem",
+    },
+
     -- Preload SaucedCarts namespace so tests can inspect it without each
     -- file re-requiring. CartData defines SaucedCarts.registerCart /
     -- getCartData / CartTypes — tests for capacity / durability / pickup

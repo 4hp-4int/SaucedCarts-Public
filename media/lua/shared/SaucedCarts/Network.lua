@@ -289,7 +289,7 @@ function SaucedCarts.Network.broadcast(command, args)
         return false
     end
     sendServerCommand("SaucedCarts", command, args)
-    SaucedCarts.debug(function() return "Network: broadcast " .. command .. " to all clients" end)
+    SaucedCarts.debug(function() return "Network.broadcast: '" .. command .. "' fired to all clients" end)
     return true
 end
 
@@ -382,6 +382,11 @@ end
 --- Server-side dispatcher: handles OnClientCommand
 local function onClientCommand(module, command, player, args)
     if module ~= "SaucedCarts" then return end
+    SaucedCarts.debug(function()
+        return "Network[server]: dispatcher received '" .. tostring(command) ..
+            "' from " .. tostring(player and player.getUsername and player:getUsername() or "?") ..
+            " (handler=" .. tostring(serverHandlers[command] ~= nil) .. ")"
+    end)
 
     local handler = serverHandlers[command]
     if not handler then
@@ -398,6 +403,11 @@ end
 --- Client-side dispatcher: handles OnServerCommand
 local function onServerCommand(module, command, args)
     if module ~= "SaucedCarts" then return end
+
+    SaucedCarts.debug(function()
+        return "Network[client]: dispatcher received '" .. tostring(command) ..
+            "' (handler=" .. tostring(clientHandlers[command] ~= nil) .. ")"
+    end)
 
     local handler = clientHandlers[command]
     if not handler then
@@ -416,14 +426,27 @@ end
 -- =============================================================================
 -- Register dispatchers based on execution context.
 
-if isServer() then
+-- Register BOTH dispatchers unconditionally. We used to gate these on
+-- isServer() / isClient() returning true at module-load time, but that
+-- breaks when PZ loads SaucedCarts in main-menu context (where both
+-- return false) and Lua's require cache prevents Network.lua from
+-- re-running when the user later enters MP. Result: client dispatcher
+-- never installed → server-broadcast commands silently dropped → the
+-- v2.1.5 MP-stink layer's CorpseCount deltas never landed on the
+-- originator's client (moodle disappeared on cart-load).
+--
+-- Vanilla only fires OnServerCommand on connected clients and only
+-- fires OnClientCommand on the server, so registering both dispatchers
+-- everywhere is functionally equivalent to gating but immune to the
+-- main-menu cold-start ordering issue.
+if Events and Events.OnClientCommand and Events.OnClientCommand.Add then
     Events.OnClientCommand.Add(onClientCommand)
-    SaucedCarts.debug("Network: server dispatcher registered")
+    SaucedCarts.debug("Network: server dispatcher registered (unconditional)")
 end
 
-if isClient() then
+if Events and Events.OnServerCommand and Events.OnServerCommand.Add then
     Events.OnServerCommand.Add(onServerCommand)
-    SaucedCarts.debug("Network: client dispatcher registered")
+    SaucedCarts.debug("Network: client dispatcher registered (unconditional)")
 end
 
 -- =============================================================================

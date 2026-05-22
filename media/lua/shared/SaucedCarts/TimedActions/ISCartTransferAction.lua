@@ -92,6 +92,44 @@ function ISCartTransferAction.classifySide(container, fallbackCartItem)
         -- into main inv instead of the bag.
         return "bag", ci:getID(), nil, nil, nil, nil
     end
+    -- Vehicle container — bound to a VehiclePart on a BaseVehicle (trunk,
+    -- glovebox, seats, trailer bed, etc.). Vanilla's ContainerID resolves
+    -- these via Vehicle / ObjectInVehicle types using (vehicleId, partIdx)
+    -- — see ContainerID.java:444-459 + zombie.vehicles.VehicleManager.
+    -- Without this branch, a vehicle trunk collapses to "inv" downstream
+    -- and the server resolves the player's main inventory (same shape as
+    -- the pre-v2.1.5 bag bug and the pre-v2.1.6 shelf bug). Reuses the
+    -- cartId slot for vehicleId and the objIdx slot for partIdx.
+    --
+    -- Try two detection paths because some PZ builds don't expose
+    -- ItemContainer.getVehiclePart to Lua even though the Java method is
+    -- public — we also walk parent->BaseVehicle via instanceof + iterate
+    -- parts to find the index, which we know works (TransferRestrictions
+    -- uses the same instanceof check).
+    local veh, partIdx
+    local part = container.getVehiclePart and container:getVehiclePart()
+    if part and part.getIndex then
+        partIdx = part:getIndex()
+        veh = part.getVehicle and part:getVehicle()
+    end
+    if not veh then
+        local parent = container.getParent and container:getParent()
+        if parent and instanceof and instanceof(parent, "BaseVehicle") then
+            veh = parent
+            if not partIdx and veh.getPartCount and veh.getPartByIndex then
+                for i = 0, veh:getPartCount() - 1 do
+                    local p = veh:getPartByIndex(i)
+                    if p and p.getItemContainer and p:getItemContainer() == container then
+                        partIdx = i
+                        break
+                    end
+                end
+            end
+        end
+    end
+    if veh and partIdx and veh.getId then
+        return "vehicle", veh:getId(), nil, nil, nil, dtype, partIdx, nil
+    end
     -- World container — bound to an IsoObject on a specific square. Before
     -- v2.1.5, world containers collapsed to "inv" and the server resolveSide
     -- returned the player's inventory instead — so a transfer between a
@@ -217,8 +255,12 @@ end
 ISCartTransferAction.MERGE_CAP = 50
 
 --- True if `other` is a queued cart-transfer that can be folded into this
---- one (same endpoints + direction + cart, no per-action callbacks). Mirrors
---- vanilla ISInventoryTransferAction:canMergeAction.
+--- one. Stricter than vanilla's outer canMergeAction: we ALSO require the
+--- two items share a FullType AND both be light (weight <= 0.1). Vanilla
+--- does the same gate inside `checkQueueList` when grouping into queueList
+--- sub-entries (ISInventoryTransferAction.lua:713-721); we apply it to the
+--- whole merge so a stack of nails batches but mixed types / heavier items
+--- each get their own timed action with their own weight-scaled duration.
 function ISCartTransferAction:canMergeAction(other)
     if not other then return false end
     if other.Type ~= self.Type then return false end
@@ -228,6 +270,12 @@ function ISCartTransferAction:canMergeAction(other)
     if other.cartItem ~= self.cartItem then return false end
     if self.onCompleteFunc or other.onCompleteFunc then return false end
     if self.allowMissingItems ~= other.allowMissingItems then return false end
+    -- Per-item gates (require both items + the inspection methods).
+    local si, oi = self.item, other.item
+    if not (si and oi and si.getFullType and oi.getFullType) then return false end
+    if si:getFullType() ~= oi:getFullType() then return false end
+    if not (si.getWeight and oi.getWeight) then return false end
+    if si:getWeight() > 0.1 or oi:getWeight() > 0.1 then return false end
     return true
 end
 
@@ -409,7 +457,71 @@ function ISCartTransferAction:new(character, item, srcContainer, destContainer, 
     o.destContainer = destContainer
     o.direction    = direction or "in"
     o.cartItem     = cartItem
-    o.maxTime      = time or 10
+    -- Vanilla ISInventoryTransferAction:new duration formula (lines 776-833),
+    -- ported inline so we don't have to create a throwaway vanilla action
+    -- (which caused intermittent "transfer starts and never finishes" hangs).
+    -- Same numbers vanilla uses: base × weight × destCapacityDelta with
+    -- per-mode/per-trait modifiers.
+    local computed = time
+    if not computed and item and srcContainer and destContainer then
+        local playerInv = character and character.getInventory and character:getInventory()
+        local base = 120
+        local destCapacityDelta = 1.0
+        local srcIsCharInv = (srcContainer == playerInv)
+        local destInCharInv = destContainer.isInCharacterInventory
+            and destContainer:isInCharacterInventory(character) or false
+        local srcInCharInv = srcContainer.isInCharacterInventory
+            and srcContainer:isInCharacterInventory(character) or false
+
+        if srcIsCharInv then
+            if destInCharInv then
+                if destContainer.getCapacityWeight and destContainer.getMaxWeight then
+                    local maxW = destContainer:getMaxWeight()
+                    if maxW and maxW > 0 then
+                        destCapacityDelta = destContainer:getCapacityWeight() / maxW
+                    end
+                end
+            else
+                base = 50
+            end
+        elseif not srcInCharInv and destInCharInv then
+            base = 50
+        end
+
+        if destCapacityDelta < 0.4 then destCapacityDelta = 0.4 end
+
+        local w = (item.getActualWeight and item:getActualWeight()) or 1
+        if w > 3 then w = 3 end
+
+        computed = base * w * destCapacityDelta
+
+        if getCore and getCore():getGameMode() == "LastStand" then
+            computed = computed * 0.3
+        end
+
+        if destContainer.getType and destContainer:getType() == "floor" then
+            if srcIsCharInv then
+                computed = computed * 0.1
+            elseif not srcInCharInv then
+                computed = computed * 0.2
+            end
+        end
+
+        if character and character.hasTrait then
+            if character:hasTrait(CharacterTrait.DEXTROUS) then
+                computed = computed * 0.5
+            end
+            if character:hasTrait(CharacterTrait.ALL_THUMBS) or
+                (character.isWearingAwkwardGloves and character:isWearingAwkwardGloves()) then
+                computed = computed * 2.0
+            end
+        end
+
+        if character and character.isTimedActionInstant and character:isTimedActionInstant() then
+            computed = 1
+        end
+    end
+    o.maxTime      = computed or 10
     o.stopOnWalk   = true
     o.stopOnRun    = true
     o.stopOnAim    = true

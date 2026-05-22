@@ -73,24 +73,28 @@ function ISGrabCorpseItem:complete()
     local srcCart = containerToCart(srcContainer)
     if not srcCart then return origComplete(self) end
 
-    -- Effective-age check. Sandbox "never decay" returns nil thresholds
-    -- and we fall through to vanilla.
-    local _, removalAt
+    -- Effective-age check. Threshold is `skeletonAt` (= sandbox
+    -- HoursForCorpseRemoval), matching vanilla `updateBodies`'s despawn
+    -- boundary for non-skeleton zombie corpses (IsoDeadBody.java:1534).
+    -- Materializing a 24-32h body via vanilla's pickUpCorpseItem would
+    -- get despawned on the next vanilla tick — same flicker bug as the
+    -- drag-to-ground path. Sandbox "never decay" → nil → vanilla path.
+    local skeletonAt
     if SaucedCarts.CorpseStorage._getRotThresholds then
-        _, removalAt = SaucedCarts.CorpseStorage._getRotThresholds()
+        skeletonAt = SaucedCarts.CorpseStorage._getRotThresholds()
     end
-    if not removalAt then return origComplete(self) end
+    if not skeletonAt then return origComplete(self) end
 
     local age = SaucedCarts.CorpseStorage.effectiveAge
         and SaucedCarts.CorpseStorage.effectiveAge(item) or 0
 
     SaucedCarts.log(function() return string.format(
-        "ISGrabCorpseItem.complete: cart=%s itemId=%s age=%.2fh removalAt=%.2fh",
+        "ISGrabCorpseItem.complete: cart=%s itemId=%s age=%.2fh skeletonAt=%.2fh",
         tostring(srcCart.getID and srcCart:getID() or "?"),
-        tostring(item:getID()), age, removalAt
+        tostring(item:getID()), age, skeletonAt
     ) end)
 
-    if age < removalAt then
+    if age < skeletonAt then
         return origComplete(self)
     end
 
@@ -114,18 +118,17 @@ function ISGrabCorpseItem:complete()
         end)
     end
 
-    -- Reconcile the cart's per-cart bookkeeping + propagate stink update.
+    -- Reconcile the cart's per-cart bookkeeping (modData state). The
+    -- former publishCartStink call here was dead code post-stink-strip
+    -- — function no longer exists.
     pcall(function()
         SaucedCarts.CorpseStorage.reconcile(srcCart,
             SaucedCarts.CorpseStorage.cartTargetSquare(srcCart, self.character))
-        if SaucedCarts.CorpseStorage.publishCartStink then
-            SaucedCarts.CorpseStorage.publishCartStink(srcCart, self.character)
-        end
     end)
 
     SaucedCarts.log(function() return string.format(
-        "ISGrabCorpseItem.complete: cart-corpse age=%.2fh past removalAt=%.2fh — silent drop (no body materialized)",
-        age, removalAt
+        "ISGrabCorpseItem.complete: cart-corpse age=%.2fh past skeletonAt=%.2fh — silent drop (vanilla despawn boundary)",
+        age, skeletonAt
     ) end)
 
     -- Match vanilla's :complete signature.

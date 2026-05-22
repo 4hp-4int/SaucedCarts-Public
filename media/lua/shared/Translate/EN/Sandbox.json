@@ -7,8 +7,6 @@
     "Sandbox_SaucedCarts_EnableCorpseStorage": "Enable Corpse Storage [BETA]",
     "Sandbox_SaucedCarts_EnableCorpseStorage_tooltip": "EXPERIMENTAL — off by default. Allows loading and unloading corpses to/from carts via grapple + right-click 'Load into Cart'. Includes vanilla-faithful rot accounting (corpses age in the cart, despawn at the sandbox HoursForCorpseRemoval threshold). Still being tested in MP — opt in if you want to try it; expect rough edges.",
 
-    "Sandbox_SaucedCarts_EnableCorpseStink": "Cart Corpse Stink [BETA]",
-    "Sandbox_SaucedCarts_EnableCorpseStink_tooltip": "EXPERIMENTAL — off by default. When enabled, carts of corpses contribute to vanilla's corpse-sickness and flies-buzz registries on every nearby player. No effect when Corpse Storage is disabled. Requires the BETA storage feature.",
 
     "Sandbox_SaucedCarts_SpawnRate": "Spawn Rate",
     "Sandbox_SaucedCarts_SpawnRate_tooltip": "How often carts spawn in the world. 100 = default, 0 = no spawns, 200 = double spawns.",

@@ -30,9 +30,20 @@ require "SaucedCarts/TimedActions/ISCartTransferAction"
 local function act(opts)
     -- A minimal stand-in for a queued ISCartTransferAction. Real actions
     -- carry these same fields; canMergeAction only inspects them.
+    -- v2.1.7: items now also need getFullType + getWeight because we gate
+    -- batching on same-type + light-weight (vanilla's checkQueueList parity).
+    local fullType = opts.fullType or "Base.Nails"
+    local weight   = opts.weight   or 0.01
     return setmetatable({
         Type = "ISCartTransferAction",
-        item = { _id = opts.itemId, getID = function(s) return s._id end },
+        item = {
+            _id = opts.itemId,
+            _fullType = fullType,
+            _weight = weight,
+            getID = function(s) return s._id end,
+            getFullType = function(s) return s._fullType end,
+            getWeight = function(s) return s._weight end,
+        },
         srcContainer = opts.src,
         destContainer = opts.dest,
         direction = opts.direction or "in",
@@ -76,6 +87,29 @@ tests["canMerge_false_for_non_cart_transfer_action"] = function()
     local a = act({ itemId = 1, src = SRC, dest = DST, cart = CART })
     return Assert.isFalse(a:canMergeAction({ Type = "ISInventoryTransferAction" }),
         "only merges with other ISCartTransferActions")
+end
+
+tests["canMerge_false_for_different_fulltype"] = function()
+    local a = act({ itemId = 1, src = SRC, dest = DST, cart = CART, fullType = "Base.Nails" })
+    local b = act({ itemId = 2, src = SRC, dest = DST, cart = CART, fullType = "Base.Screws" })
+    return Assert.isFalse(a:canMergeAction(b),
+        "different item types do NOT batch — each stack runs in its own timed action")
+end
+
+tests["canMerge_false_for_heavy_item"] = function()
+    local a = act({ itemId = 1, src = SRC, dest = DST, cart = CART, weight = 0.5 })
+    local b = act({ itemId = 2, src = SRC, dest = DST, cart = CART, weight = 0.5 })
+    return Assert.isFalse(a:canMergeAction(b),
+        "items above the 0.1 light-item threshold do NOT batch (vanilla parity)")
+end
+
+tests["canMerge_true_for_same_light_stack"] = function()
+    local a = act({ itemId = 1, src = SRC, dest = DST, cart = CART,
+        fullType = "Base.Nails", weight = 0.01 })
+    local b = act({ itemId = 2, src = SRC, dest = DST, cart = CART,
+        fullType = "Base.Nails", weight = 0.01 })
+    return Assert.isTrue(a:canMergeAction(b),
+        "two light nails of the same FullType merge")
 end
 
 -- The batching itself: a contiguous run of mergeable followers is absorbed,

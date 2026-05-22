@@ -99,7 +99,16 @@ end
 function ISCartLoadCorpseAction:isValid()
     if not self.character or not self.cart then return false end
     if getGameSpeed and getGameSpeed() > 1 then return false end
-    if not self.character:isDraggingCorpse() then return false end
+
+    -- NOTE: do NOT check `isDraggingCorpse()` here. `:start()` releases
+    -- the local grapple via `setDoGrappleLetGo` so the player can play
+    -- the Loot anim free of vanilla's drag-corpse anim suppression.
+    -- That release flips `isDraggingCorpse` to false on the next tick,
+    -- and the queue would then drop this action mid-flight with a
+    -- "bugged action" log + no player feedback. Server resolves the
+    -- target by client-supplied id (the ghost capture in `:start`), so
+    -- we don't need a live grapple-state check anywhere in lifecycle.
+    -- See C2 refactor in CorpseStorage.lua for the full justification.
 
     -- Weight gate — corpse weight doesn't change mid-action but the cart's
     -- fill level could (another player loading items). Re-check live.
@@ -148,6 +157,23 @@ end
 
 function ISCartLoadCorpseAction:perform()
     if self.cart and self.character then
+        -- Final pre-send gate re-check. Saves a round-trip for the common
+        -- case where the cart filled between click-time and now (action
+        -- queue tick latency, action duration, etc.). The server's gate
+        -- still fires authoritatively; this is just snappier feedback.
+        local gateOk, reason = SaucedCarts.CorpseStorage.canLoadCorpseIntoCart(
+            self.cart, gateCorpseWeight())
+        if not gateOk then
+            if HaloTextHelper and not isServer() then
+                local key = (reason == "cart full")
+                    and "UI_SaucedCarts_LoadBlocked_cart_full"
+                    or  "UI_SaucedCarts_LoadBlocked_fallback"
+                pcall(function() HaloTextHelper.addBadText(self.character, getText(key)) end)
+            end
+            ISBaseTimedAction.perform(self)
+            return
+        end
+
         -- Ghost info captured in :start before grapple release. Re-capture
         -- only if :start didn't run (SP instant action shortcut).
         local ghostId   = self._ghostId

@@ -218,6 +218,13 @@ function ISCartRepairAction:complete()
     -- Reset distance accumulator so repair gives a fresh start
     cart:getModData().SaucedCarts_distancePushed = 0
 
+    -- Reset the threshold-halo marker so the player gets fresh creak/
+    -- damaged/failing warnings on the next damage cycle (otherwise we'd
+    -- skip warnings that the cart already crossed pre-repair).
+    if SaucedCarts.Durability and SaucedCarts.Durability.resetThresholdMarker then
+        SaucedCarts.Durability.resetThresholdMarker(cart)
+    end
+
     -- Fire repair event
     if SaucedCarts._fireEvent then
         SaucedCarts._fireEvent(SaucedCarts.Events.onCartRepair, self.character, cart, actualRepair, newCondition)

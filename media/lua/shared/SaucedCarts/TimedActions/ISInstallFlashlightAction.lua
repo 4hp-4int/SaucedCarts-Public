@@ -32,9 +32,9 @@ ISInstallFlashlightAction.Type = "ISInstallFlashlightAction"
 --- Attachment materials in priority order (same as FlashlightMenu.lua)
 local ATTACHMENT_MATERIALS = {
     ["Base.DuctTape"] = { uses = 1, name = "Duct Tape" },
-    ["Base.CableTies"] = { uses = 1, name = "Cable Ties" },
-    ["Base.Scotchtape"] = { uses = 2, name = "Adhesive Tape" },
-    ["Base.Rope"] = { uses = 2, name = "Rope" },
+    ["Base.Zipties"] = { uses = 1, name = "Zip Ties" },
+    ["Base.Scotchtape"] = { uses = 1, name = "Adhesive Tape" },
+    ["Base.Rope"] = { uses = 1, name = "Rope" },
     ["Base.Twine"] = { uses = 2, name = "Twine" },
 }
 

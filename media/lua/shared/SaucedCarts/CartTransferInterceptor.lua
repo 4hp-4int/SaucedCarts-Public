@@ -576,6 +576,57 @@ local function findItemNearPlayer(player, itemId, radius)
         end
     end
 
+    -- v2.1.7: scan vehicle part containers — when the player is in / next
+    -- to a vehicle and the item lives in the trunk, glovebox, seats, or
+    -- trailer bed. Symmetric counterpart to findCartNearPlayer's vehicle
+    -- scan. Without this, trunk → cart silently bails at the item lookup
+    -- (item not findable in player inv / ground / world containers), the
+    -- "not found" log is .debug() → suppressed on dedi → invisible. Mirrors
+    -- vanilla ContainerID.ObjectInVehicle resolution.
+    if player.getVehicle then
+        local veh = player:getVehicle()
+        if veh and veh.getPartCount and veh.getPartByIndex then
+            for i = 0, veh:getPartCount() - 1 do
+                local part = veh:getPartByIndex(i)
+                if part and part.getItemContainer then
+                    local pc = part:getItemContainer()
+                    if pc and pc.getItemById then
+                        local inside = pc:getItemById(itemId)
+                        if inside then return inside end
+                    end
+                end
+            end
+        end
+    end
+    -- Also scan vehicles intersecting nearby tiles (player adjacent to a
+    -- vehicle but not seated — opens trunk from outside). Use vanilla's
+    -- per-square `getVehicleContainer()` which returns the BaseVehicle
+    -- whose body intersects that square (IsoGridSquare.java:10420). Avoid
+    -- `IsoCell.getVehicles()` because it returns a Java Set without
+    -- indexed access — `:get(i)` throws RuntimeException.
+    local seenVehicles = {}
+    for dy = -radius, radius do
+        for dx = -radius, radius do
+            local sq = getCell():getGridSquare(psq:getX() + dx, psq:getY() + dy, psq:getZ())
+            if sq and sq.getVehicleContainer then
+                local veh = sq:getVehicleContainer()
+                if veh and not seenVehicles[veh] and veh.getPartCount and veh.getPartByIndex then
+                    seenVehicles[veh] = true
+                    for j = 0, veh:getPartCount() - 1 do
+                        local part = veh:getPartByIndex(j)
+                        if part and part.getItemContainer then
+                            local pc = part:getItemContainer()
+                            if pc and pc.getItemById then
+                                local inside = pc:getItemById(itemId)
+                                if inside then return inside end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     -- v2.1.5: scan world containers (shelves / freezers / barbecues / etc.)
     -- on nearby squares. Required for the "container-cart" transfer case —
     -- without this, the item lookup fails before we ever reach resolveSide.
@@ -634,9 +685,53 @@ end
 
 local function handleCartTransfer(player, args)
     if not player then return end
+    -- Entry trace — .debug() so it doesn't spam dedi logs in normal play.
+    -- Promote to .log() when chasing the next "transfer animates but item
+    -- doesn't move" report; .debug() is suppressed on dedicated servers.
+    SaucedCarts.debug(function() return string.format(
+        "handleCartTransfer: ENTERED direction=%s srcKind=%s destKind=%s itemId=%s cartId=%s srcCartId=%s srcObjIdx=%s",
+        tostring(args and args.direction),
+        tostring(args and args.srcKind),
+        tostring(args and args.destKind),
+        tostring(args and args.itemId),
+        tostring(args and args.cartId),
+        tostring(args and args.srcCartId),
+        tostring(args and args.srcObjIdx)
+    ) end)
     if not args or not args.itemId or not args.cartId then
         SaucedCarts.debug("cartTransfer: invalid args (missing itemId or cartId)")
         return
+    end
+
+    -- Network-boundary type validation. The nil-check above only rejects
+    -- MISSING fields; a modified / buggy / pre-version client can still send
+    -- a non-numeric id. getItemById / getItemWithIDRecursiv / getGridSquare
+    -- are Java methods that require numeric args — passing a String throws an
+    -- uncaught server-side RuntimeException that aborts the handler. Coerce
+    -- every numeric field here (the one place client input enters) and reject
+    -- if the two required ids aren't numbers. (Regression: probe-cart-
+    -- transfer-fuzz G10 / OfflineCartDepositTests malformed gauntlet.)
+    args.itemId = tonumber(args.itemId)
+    args.cartId = tonumber(args.cartId)
+    if not args.itemId or not args.cartId then
+        SaucedCarts.debug("cartTransfer: non-numeric itemId/cartId — rejected")
+        return
+    end
+    args.srcCartId   = tonumber(args.srcCartId)
+    args.destCartId  = tonumber(args.destCartId)
+    args.srcObjIdx   = tonumber(args.srcObjIdx)
+    args.srcContIdx  = tonumber(args.srcContIdx)
+    args.destObjIdx  = tonumber(args.destObjIdx)
+    args.destContIdx = tonumber(args.destContIdx)
+    args.srcSqX  = tonumber(args.srcSqX);  args.srcSqY  = tonumber(args.srcSqY);  args.srcSqZ  = tonumber(args.srcSqZ)
+    args.destSqX = tonumber(args.destSqX); args.destSqY = tonumber(args.destSqY); args.destSqZ = tonumber(args.destSqZ)
+    if type(args.itemIds) == "table" then
+        local clean = {}
+        for i = 1, #args.itemIds do
+            local n = tonumber(args.itemIds[i])
+            if n then clean[#clean + 1] = n end
+        end
+        args.itemIds = clean
     end
 
     -- NOTE: bail-path logs below use .debug() so they don't spam dedi
@@ -713,6 +808,32 @@ local function handleCartTransfer(player, args)
             SaucedCarts.debug(function() return string.format(
                 "resolveSide: bag item %s NOT FOUND in player inv (recursive); falling back to playerInv",
                 tostring(cartId)) end)
+        end
+        -- Vehicle kind — VehiclePart container on a BaseVehicle (trunk,
+        -- glovebox, seats, trailer bed). Mirrors vanilla ContainerID.find-
+        -- Object's `Vehicle` branch (ContainerID.java:444-459): look up the
+        -- vehicle by id, then resolve the part by index. cartId carries the
+        -- vehicle id; objIndex carries the part index.
+        if kind == "vehicle" and cartId and objIndex then
+            -- Try the canonical Lua global first; fall back to VehicleManager
+            -- in case `getVehicleById` isn't yet defined at this point in load
+            -- order on some builds.
+            local veh
+            if getVehicleById then veh = getVehicleById(cartId) end
+            if not veh and VehicleManager and VehicleManager.instance
+                and VehicleManager.instance.getVehicleByID then
+                veh = VehicleManager.instance:getVehicleByID(cartId)
+            end
+            if veh and veh.getPartByIndex then
+                local part = veh:getPartByIndex(objIndex)
+                if part and part.getItemContainer then
+                    local c = part:getItemContainer()
+                    if c then return c, nil end
+                end
+            end
+            SaucedCarts.debug(function() return string.format(
+                "resolveSide: vehicle %s part %s NOT FOUND; falling back to playerInv",
+                tostring(cartId), tostring(objIndex)) end)
         end
         -- v2.1.5/2.1.6: world container — the client told us this side is a
         -- shelf / freezer / fridge / barbecue / wardrobe / etc. bound to an
@@ -928,7 +1049,7 @@ local function installInterception()
         if ok and direction and cart then
             return ISCartTransferAction:new(
                 character, item, srcContainer, destContainer,
-                direction, cart, time or 10
+                direction, cart, time
             )
         end
         return originalNew(self, character, item, srcContainer, destContainer, time, fast, allowMissingItems)

@@ -85,8 +85,9 @@ function InstantDrop.dropCartSP(player, cartItem)
 
     local inventory = player:getInventory()
 
-    -- Apply accumulated durability damage before drop
-    local newCondition = SaucedCarts.Durability.applyAccumulatedDamage(cartItem)
+    -- Apply accumulated durability damage before drop. Passing player
+    -- enables the centralized 50%/25%/10% threshold halos.
+    local newCondition = SaucedCarts.Durability.applyAccumulatedDamage(cartItem, player)
 
     if newCondition <= 0 then
         -- Cart broke during combat drop - drop contents and destroy
@@ -115,13 +116,9 @@ function InstantDrop.dropCartSP(player, cartItem)
         return true
     end
 
-    -- Show low condition warning if applicable (25% threshold)
-    local conditionMax = cartItem:getConditionMax()
-    if conditionMax > 0 and newCondition <= math.floor(conditionMax * 0.25) then
-        if SaucedCarts.Notifications then
-            SaucedCarts.Notifications.cartDamaged(player)
-        end
-    end
+    -- Threshold halos (50% / 25% / 10%) are now centralized inside
+    -- applyAccumulatedDamage above and fire only when a threshold is
+    -- crossed downward, so the same drop won't spam the player.
 
     -- Update visual state before drop (so world item spawns with correct model)
     SaucedCarts.updateCartVisual(cartItem, player)

@@ -31,11 +31,72 @@ SaucedCarts.Durability = {}
 -- Fallback default guards against load-before-Core on dedicated servers
 local TILES_PER_DAMAGE = SaucedCarts.Config.TILES_PER_DAMAGE or 110
 
+-- Threshold halo levels (percent of max condition). Ordered low → high.
+-- When a damage application crosses a threshold downward, fire the
+-- corresponding halo once. modData tracks the lowest threshold fired so
+-- we don't spam at every drop. Repair clears the marker so the player
+-- gets fresh warnings on the next damage cycle.
+local DAMAGE_THRESHOLDS = { 10, 25, 50 }
+
+local function thresholdNotificationKey(threshold)
+    if threshold == 50 then return "cartCreaking" end
+    if threshold == 25 then return "cartDamaged"  end
+    if threshold == 10 then return "cartFailing"  end
+    return nil
+end
+
+--- Fire any threshold halo crossed by this damage application. Idempotent
+--- per-threshold via modData marker; repair flow resets it.
+---
+--- Routes by VM context: SP/MP-client halos directly; MP-server sends a
+--- per-threshold network command (cartCreaking / cartDamaged / cartFailing)
+--- that the client handler in `CartState/AnimationSync/Notifications.lua`
+--- receives and turns into a HaloTextHelper call. Same pattern as the
+--- existing cartBroke/cartDamaged broadcasts.
+local function fireThresholdHalos(cart, player, oldCondition, newCondition)
+    if not player or not cart then return end
+    local conditionMax = cart.getConditionMax and cart:getConditionMax() or 0
+    if conditionMax <= 0 then return end
+
+    local oldPct = oldCondition / conditionMax * 100
+    local newPct = newCondition / conditionMax * 100
+    local modData = cart:getModData()
+    local lowestFired = modData.SaucedCarts_lastDamageThreshold or 100
+
+    -- Find the strictest threshold we just crossed downward AND haven't
+    -- already fired. Iterate low→high so the most-urgent halo wins when
+    -- damage crosses multiple thresholds in one tick.
+    for _, t in ipairs(DAMAGE_THRESHOLDS) do
+        if newPct < t and oldPct >= t and t < lowestFired then
+            modData.SaucedCarts_lastDamageThreshold = t
+            local key = thresholdNotificationKey(t)
+            if not key then return end
+
+            if isServer() then
+                if SaucedCarts.Network and SaucedCarts.Network.sendToClient then
+                    pcall(function()
+                        SaucedCarts.Network.sendToClient(player, key, {})
+                    end)
+                end
+            else
+                if SaucedCarts.Notifications and SaucedCarts.Notifications[key] then
+                    pcall(function() SaucedCarts.Notifications[key](player) end)
+                end
+            end
+            return  -- one halo per damage tick
+        end
+    end
+end
+
 --- Apply accumulated distance damage to cart
 --- Called in ISCartPickupAction:complete() (server-authoritative)
 ---@param cart InventoryItem
+---@param player IsoPlayer|nil Optional. When provided, threshold halos
+---       (50% / 25% / 10%) fire once per crossing — caller doesn't need
+---       to chase condition transitions; centralizing here covers both
+---       the pickup and combat-drop paths.
 ---@return number newCondition The cart's condition after damage (0 = broke)
-function SaucedCarts.Durability.applyAccumulatedDamage(cart)
+function SaucedCarts.Durability.applyAccumulatedDamage(cart, player)
     if not cart then return 0 end
 
     local modData = cart:getModData()
@@ -60,11 +121,23 @@ function SaucedCarts.Durability.applyAccumulatedDamage(cart)
         SaucedCarts.debug(function() return "Applied " .. damageAmount .. " damage, condition: " ..
             currentCondition .. " -> " .. newCondition .. ", remainder: " .. string.format("%.1f", remainder) end)
 
+        -- Threshold halos: fire if we crossed 50% / 25% / 10% downward.
+        fireThresholdHalos(cart, player, currentCondition, newCondition)
+
         return newCondition
     end
 
     -- Not enough distance for damage yet, keep accumulating
     return cart:getCondition()
+end
+
+--- Reset the threshold marker on a cart. Called by the repair flow so
+--- the player gets fresh warnings the next time the cart starts taking
+--- damage.
+---@param cart InventoryItem
+function SaucedCarts.Durability.resetThresholdMarker(cart)
+    if not cart or not cart.getModData then return end
+    cart:getModData().SaucedCarts_lastDamageThreshold = nil
 end
 
 --- Salvage materials dropped when a cart breaks
