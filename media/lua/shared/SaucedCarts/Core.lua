@@ -33,7 +33,7 @@
 SaucedCarts = SaucedCarts or {}
 
 -- Version info
-SaucedCarts.VERSION = "2.1.7"
+SaucedCarts.VERSION = "2.1.8"
 SaucedCarts.MOD_ID = "SaucedCarts"
 SaucedCarts.API_VERSION = 1  -- Increment on breaking API changes (field renames, removed fields, signature changes)
 
@@ -454,6 +454,37 @@ end
 -- SANDBOX MULTIPLIERS
 -- ============================================================================
 
+--- Stamp the current sandbox weight-reduction value onto a cart.
+---
+--- CRITICAL: this MUST be called on the cart item itself (the outer
+--- InventoryContainer), NOT on cart:getItemContainer() (the inner
+--- ItemContainer). Vanilla reads the InventoryContainer's OWN weightReduction
+--- field for BOTH the tooltip display (InventoryContainer.DoTooltip ->
+--- getWeightReduction, InventoryContainer.java:207-210) and the actual
+--- encumbrance reduction (InventoryContainer.getEquippedWeight, line 286-287).
+--- The inner ItemContainer's weightReduction field is never read by the engine,
+--- so setting it (the pre-2.1.8 behavior) had no observable effect — the cart
+--- stayed pinned to the script default (WeightReduction=95) regardless of the
+--- sandbox setting. InventoryContainer.setWeightReduction propagates to both
+--- fields anyway (InventoryContainer.java:139-143).
+---
+--- Reads the sandbox value on EVERY call so mid-game changes take effect on the
+--- next equip/pickup/relog. Unlike capacity (interceptable via __classmetatables),
+--- weight reduction is a plain Java field read by Java-internal callers, so we
+--- can't override the read — we re-stamp the field instead.
+---@param cart InventoryItem The cart item (outer InventoryContainer)
+---@return number The weight-reduction value applied
+local function applyWeightReduction(cart)
+    local weightRed = 95
+    if SandboxVars.SaucedCarts then
+        weightRed = SandboxVars.SaucedCarts.WeightReduction
+            or SandboxVars.SaucedCarts.WeightReductionMultiplier or 95
+    end
+    cart:setWeightReduction(weightRed)
+    SaucedCarts.debug(function() return "WeightReduction stamped on wrapper: " .. weightRed end)
+    return weightRed
+end
+
 --- Apply sandbox multipliers to a cart when first encountered
 --- Modifies capacity and durability based on sandbox settings
 --- Also initializes schema version if not set
@@ -472,8 +503,12 @@ function SaucedCarts.applyMultipliers(cart)
         modData.SaucedCarts_schemaVersion = SaucedCarts.SCHEMA_VERSION
     end
 
-    -- Skip multipliers if already applied
+    -- Skip the one-shot multipliers if already applied, but ALWAYS re-stamp
+    -- weight reduction: it's a plain Java field (not interceptable like capacity),
+    -- so existing carts must be re-stamped each touch to pick up mid-game sandbox
+    -- changes. Cheap + idempotent.
     if modData.SaucedCarts_multipliersApplied then
+        applyWeightReduction(cart)
         -- Ensure raw capacity is in ModData (migration for saves before CapacityOverride)
         local rawCapKey = SaucedCarts.CapacityOverride and SaucedCarts.CapacityOverride.getRawCapacityKey()
         if rawCapKey and not modData[rawCapKey] then
@@ -495,19 +530,17 @@ function SaucedCarts.applyMultipliers(cart)
     -- Get sandbox multipliers (default to 100%)
     local capMult = 100
     local durMult = 100
-    local weightRedMult = 100
     local speedPenMult = 100
     if SandboxVars.SaucedCarts then
         capMult = SandboxVars.SaucedCarts.CapacityMultiplier or 100
         durMult = SandboxVars.SaucedCarts.DurabilityMultiplier or 100
-        weightRedMult = SandboxVars.SaucedCarts.WeightReduction or SandboxVars.SaucedCarts.WeightReductionMultiplier or 95
         speedPenMult = SandboxVars.SaucedCarts.SpeedPenaltyMultiplier or 100
     else
         SaucedCarts.error("applyMultipliers: SandboxVars.SaucedCarts is nil!")
     end
 
     SaucedCarts.debug(function() return "applyMultipliers: capMult=" .. capMult .. "%, durMult=" .. durMult ..
-        "%, weightRedMult=" .. weightRedMult .. "%, speedPenMult=" .. speedPenMult .. "%" end)
+        "%, speedPenMult=" .. speedPenMult .. "%" end)
 
     -- Apply capacity multiplier
     -- Java's setCapacity always stores the value (ItemContainer.java:171), but
@@ -527,16 +560,13 @@ function SaucedCarts.applyMultipliers(cart)
         end
 
         SaucedCarts.debug(function() return "Capacity: base=" .. baseCapacity .. ", applied=" .. newCapacity end)
-
-        -- Apply weight reduction (absolute value from sandbox, not a multiplier)
-        -- 100 = items weigh nothing, 95 = items weigh 5% of normal, 0 = no reduction
-        -- Clamped to 0-100 by Java's setWeightReduction
-        local newWeightRed = weightRedMult
-        container:setWeightReduction(newWeightRed)
-        SaucedCarts.debug(function() return "WeightReduction: sandbox=" .. weightRedMult .. ", applied=" .. newWeightRed end)
     else
         SaucedCarts.error("applyMultipliers: container is nil for " .. tostring(cart:getFullType()))
     end
+
+    -- Apply weight reduction on the OUTER InventoryContainer (see applyWeightReduction).
+    -- Absolute value from sandbox: 100 = items weigh nothing, 95 = 5% of normal, 0 = none.
+    applyWeightReduction(cart)
 
     -- Apply durability multiplier
     local baseConditionMax = cartData.conditionMax

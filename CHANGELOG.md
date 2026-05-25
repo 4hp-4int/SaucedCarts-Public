@@ -2,6 +2,29 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.8 — 2026-05-26 (Weight Reduction sandbox setting now applies)
+
+### Bug Fixes
+
+**Cart weight reduction ignored the sandbox "Weight Reduction %" setting**
+Carts always reduced contents weight by the script default (95%) no matter what the sandbox option was set to — set it to the 99% max and the game still showed and applied 95%. Root cause: `applyMultipliers` called `setWeightReduction` on `cart:getItemContainer()` (the inner `ItemContainer`), a field the engine never reads. Vanilla reads the **outer `InventoryContainer`'s** own `weightReduction` field for both the tooltip display (`InventoryContainer.java:207-210`) and the actual encumbrance reduction (`InventoryContainer.getEquippedWeight`, `:283-291`). The inner write was a no-op, so the cart stayed pinned to the script's `WeightReduction=95` regardless of the sandbox value. Two-part fix:
+- Stamp the value on the cart item itself (`cart:setWeightReduction`), which `InventoryContainer.setWeightReduction` (`:139-143`) propagates to both the wrapper and inner fields.
+- Decoupled weight-reduction application from the one-shot `multipliersApplied` guard. Unlike capacity (interceptable via `__classmetatables`), weight reduction is a plain Java field read by Java-internal callers, so it can't be overridden on read — it's re-stamped on every `applyMultipliers` touch instead. Existing carts therefore pick up a mid-game sandbox change on the next equip / pickup / relog.
+
+### Technical
+
+- 4 new regression tests in `OfflineCapacityOverrideTests.lua` assert against the outer `InventoryContainer.weightReduction` (the field vanilla reads): stamps the sandbox value, re-stamps past the `multipliersApplied` guard, defaults to 95 when the key is absent, and propagates to the inner container. Sensitivity-checked: all wrapper assertions fail against the old inner-container code.
+- 244 offline tests passing (was 240 at v2.1.7).
+
+### Known limitation (unchanged)
+
+The capacity number shown in a cart's tooltip is still vanilla's `50 − cartWeight` cap (≈42), not the sandbox-scaled value. That figure is computed by a Java-internal call inside the tooltip renderer that our Lua capacity override can't intercept; the cart's *actual* working capacity is unaffected and honors the multiplier. Left as-is — correcting only the displayed label would require re-implementing the vanilla tooltip.
+
+### Backward Compatibility
+
+- Save-safe. No ModData schema changes. No `SCHEMA_VERSION` bump.
+- Carts created on older versions re-stamp to the current sandbox weight-reduction value automatically on next equip/pickup/load.
+
 ## v2.1.7 — 2026-05-22 (Stacked containers, vehicle trunks, sprite refresh, batch tuning)
 
 ### Bug Fixes

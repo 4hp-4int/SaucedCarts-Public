@@ -82,6 +82,25 @@ local function makeRegisteredCart(opts)
         capacity       = opts.capacity or 100,
     })
     cart.getItemContainer = function(self) return self._innerContainer end
+
+    -- Outer InventoryContainer.weightReduction — the field vanilla actually
+    -- reads for the tooltip (InventoryContainer.java:210) AND encumbrance
+    -- (line 286). Distinct from the inner ItemContainer's field, which the
+    -- engine never reads. Seed it at the script default (WeightReduction=95)
+    -- so tests can prove production overwrites THIS field, not the inner one.
+    cart._wrapperWeightReduction = opts.initialWeightReduction or 95
+    cart.getWeightReduction = function(self) return self._wrapperWeightReduction end
+    cart.setWeightReduction = function(self, v)
+        -- Mirror InventoryContainer.setWeightReduction (java:139-143): clamp
+        -- 0-100, set the wrapper field, propagate to the inner container.
+        v = math.max(0, math.min(100, v))
+        self._wrapperWeightReduction = v
+        if self._innerContainer then self._innerContainer:setWeightReduction(v) end
+    end
+    -- applyMultipliers calls cart:setConditionMax; F.item models setCondition
+    -- (clamps to priv.conditionMax) but not the setter. Write through _private
+    -- so the clamp tracks the new max.
+    cart.setConditionMax = function(self, v) self._private.conditionMax = v end
     return cart
 end
 
@@ -344,6 +363,78 @@ tests["computeEffectiveCapacity_never_fires_network_packets"] = function()
     w:teardown()
     return Assert.equal(total, 0,
         "10 effective-capacity computations produced zero packets")
+end
+
+-- ============================================================================
+-- applyMultipliers — weight reduction lands on the OUTER InventoryContainer
+-- ============================================================================
+-- Regression for the "set 99% but game shows/applies 95%" report. Pre-2.1.8,
+-- applyMultipliers called setWeightReduction on cart:getItemContainer() (the
+-- INNER ItemContainer), a field the engine never reads. Vanilla reads the OUTER
+-- InventoryContainer.weightReduction for both the tooltip (java:210) and the
+-- actual encumbrance reduction (java:286). The inner write was a no-op, so carts
+-- stayed pinned to the script default (95) regardless of the sandbox setting.
+--
+-- These tests assert against the WRAPPER's getWeightReduction(), so they FAIL
+-- against the old inner-container code and pass only when production targets
+-- the outer container.
+
+tests["applyMultipliers_stamps_weight_reduction_on_outer_container"] = function()
+    F.withSandbox("SaucedCarts", { WeightReduction = 99, CapacityMultiplier = 100 }, function()
+        -- Seed wrapper at the script default to prove production overwrites it.
+        local cart = makeRegisteredCart({ initialWeightReduction = 95 })
+        SaucedCarts.applyMultipliers(cart)
+        Assert.equal(cart:getWeightReduction(), 99,
+            "outer InventoryContainer.weightReduction == sandbox 99 (the field vanilla reads)")
+    end)
+    return true
+end
+
+tests["applyMultipliers_reapplies_weight_reduction_past_oneshot_guard"] = function()
+    -- Existing carts already have SaucedCarts_multipliersApplied = true, which
+    -- short-circuits applyMultipliers. Weight reduction must STILL re-stamp so a
+    -- mid-game sandbox change reaches carts that predate it (on next
+    -- equip/pickup/relog).
+    local cart = makeRegisteredCart({ initialWeightReduction = 95 })
+
+    F.withSandbox("SaucedCarts", { WeightReduction = 95, CapacityMultiplier = 100 }, function()
+        SaucedCarts.applyMultipliers(cart)
+    end)
+    if not Assert.isTrue(cart:getModData().SaucedCarts_multipliersApplied,
+        "one-shot multipliers flag set after first apply") then return false end
+    if not Assert.equal(cart:getWeightReduction(), 95, "first apply stamps 95") then return false end
+
+    -- Admin bumps the sandbox to the 99 max mid-game.
+    F.withSandbox("SaucedCarts", { WeightReduction = 99, CapacityMultiplier = 100 }, function()
+        SaucedCarts.applyMultipliers(cart)
+    end)
+    return Assert.equal(cart:getWeightReduction(), 99,
+        "existing cart re-stamps to new sandbox value despite multipliersApplied guard")
+end
+
+tests["applyMultipliers_weight_reduction_defaults_to_95_when_key_absent"] = function()
+    -- SandboxVars.SaucedCarts exists but WeightReduction unset (e.g. an older
+    -- preset). Production falls back to 95, not 0/nil.
+    F.withSandbox("SaucedCarts", { CapacityMultiplier = 100 }, function()
+        local cart = makeRegisteredCart({ initialWeightReduction = 10 })
+        SaucedCarts.applyMultipliers(cart)
+        Assert.equal(cart:getWeightReduction(), 95,
+            "missing WeightReduction sandbox key falls back to 95 default")
+    end)
+    return true
+end
+
+tests["applyMultipliers_weight_reduction_propagates_to_inner_container"] = function()
+    -- Faithful to InventoryContainer.setWeightReduction (java:139-143): setting
+    -- the wrapper also syncs the inner ItemContainer. Guards against a future
+    -- refactor that sets only one layer.
+    F.withSandbox("SaucedCarts", { WeightReduction = 80, CapacityMultiplier = 100 }, function()
+        local cart = makeRegisteredCart({ initialWeightReduction = 95 })
+        SaucedCarts.applyMultipliers(cart)
+        Assert.equal(cart:getWeightReduction(), 80, "outer container updated")
+        Assert.equal(cart:getItemContainer():getWeightReduction(), 80, "inner container kept in sync")
+    end)
+    return true
 end
 
 return tests

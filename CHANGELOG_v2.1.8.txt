@@ -1,0 +1,36 @@
+SaucedCarts v2.1.8
+Released: 2026-05-26
+====================
+
+A small fix release: the "Weight Reduction %" sandbox setting now
+actually does what it says.
+
+
+BUG FIXES
+---------
+
+* The cart "Weight Reduction %" sandbox setting was ignored. No matter
+  what you set it to, carts always reduced the weight of their contents
+  by the default 95% -- set it to the 99% maximum and you'd still get
+  95%. Carts now use the value you set.
+
+  Carts you already own will pick up the new value the next time you
+  pick one up, equip it, or reload your save.
+
+
+KNOWN LIMITATION
+----------------
+
+* The capacity number shown in a cart's tooltip still reads low (around
+  42) and doesn't reflect the Capacity Multiplier sandbox setting. This
+  is a display-only quirk in the game's tooltip code that a mod can't
+  cleanly correct -- your cart's real capacity is unaffected and does
+  scale with the multiplier as intended.
+
+
+COMPATIBILITY
+-------------
+
+Save-safe. No save-data changes -- safe to upgrade mid-save. Carts
+created on older versions update to your current weight-reduction
+setting automatically.
