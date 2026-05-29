@@ -23,7 +23,8 @@ SaucedCarts.SPAWN_SCHEMA_VERSION = 1
 ---@field type string Full cart type (e.g., "SaucedCarts.ShoppingCart")
 ---@field chance number Spawn probability 0-100
 ---@field allowResidential boolean|nil If true, allow spawn in buildings flagged residential by PZ (contains a "bedroom" room). Default false — framework skips residential to avoid apartment/house spawns.
----@field allowOutdoor boolean|nil If true, allow spawn on squares with no building (purely outdoor tiles). Default false — framework requires a building to avoid unexpected parking-lot spawns.
+---@field allowOutdoor boolean|nil If true, opt this entry into the outdoor-placement-pool extension: when a building rolls a cart AND the same chunk has a `VehicleZone` square (parking lot), some placements land outside instead of inside. Default false — interior-only.
+---@field outdoorWeight number|nil 0-100. Percentage of successful rolls that place the cart OUTSIDE (in a vehicle-zone square) instead of inside, when allowOutdoor is true and the chunk has at least one outdoor candidate. Default 30. Ignored when allowOutdoor is false/nil.
 ---@field skipFrameworkFilters boolean|nil If true, bypass ALL framework filters for this entry. Addon author takes full responsibility for spawn locations.
 
 ---@type table<string, SpawnEntry[]>
@@ -37,11 +38,25 @@ SaucedCarts.SpawnLocations = {}
 -- phantom entries. Validated at load time against PZ's
 -- ItemPickerJava.hasDistributionForRoom().
 --
--- Weights reflect realism for a grocery-style shopping cart:
---   - Primary retail tier: places where carts are the default transport
---   - Retail + storage tier: bulk-goods stores and their back rooms
---   - Secondary tier: retail where carts exist but are less common
---   - Flavor tier: occasional / edge-case placements
+-- These chances are TRUE per-building probabilities under the one-shot-per-
+-- building roll model (WorldSpawning.lua, v2.1.9+): each candidate building
+-- gets exactly one roll at the value below × SandboxVars.SaucedCarts.SpawnRate.
+-- They are NOT compounded across squares — a shed with one eligible tile and a
+-- gigamart with ten both get one roll each.
+--
+-- Residential buildings (apartment lobbies, houses with garages, etc.) are
+-- rejected by the building-signature filter (evaluateSpawnEligibility →
+-- BuildingDef.isResidential), so the rates here are effectively "commercial
+-- only." Storage/garage rates can stay sensible without flooding houses —
+-- the filter handles that, not a artificially low chance.
+--
+-- Tiers calibrated for findability + realism:
+--   - Canonical retail (gigamart/grocery/departmentstore): most have a cart.
+--   - Canonical storage (back-of-house of the above + warehouse): good chance.
+--   - Major retail with plausible carts: moderate.
+--   - Secondary retail: occasional.
+--   - Commercial storage / utility (residential filtered by build flag): modest.
+--   - Flavor: rare.
 --
 -- Addons register their own rooms (and may target residential / outdoor
 -- squares via opt-out flags) via SaucedCarts.registerCart(..., spawnRooms).
@@ -49,47 +64,58 @@ SaucedCarts.SpawnLocations = {}
 local SC = "SaucedCarts.ShoppingCart"
 
 local DEFAULT_SPAWN_LOCATIONS = {
-    -- Primary retail (15-25%)
-    ["gigamart"]          = { { type = SC, chance = 25 } },
-    ["grocery"]           = { { type = SC, chance = 20 } },
-    ["departmentstore"]   = { { type = SC, chance = 18 } },
-    ["grocerystorage"]    = { { type = SC, chance = 15 } },
-    ["warehouse"]         = { { type = SC, chance = 15 } },
+    -- Canonical retail — carts ARE the default transport here.
+    -- allowOutdoor + outdoorWeight: a fraction of successful rolls place the
+    -- cart in the parking lot (chunk-coincident vehicle zone) instead of inside.
+    ["gigamart"]          = { { type = SC, chance = 80, allowOutdoor = true, outdoorWeight = 30 } },
+    ["grocery"]           = { { type = SC, chance = 60, allowOutdoor = true, outdoorWeight = 30 } },
+    ["departmentstore"]   = { { type = SC, chance = 50, allowOutdoor = true, outdoorWeight = 25 } },
 
-    -- Regular retail + major storage (10-12%)
-    ["housewarestore"]    = { { type = SC, chance = 12 } },
-    ["departmentstorage"] = { { type = SC, chance = 12 } },
-    ["producestorage"]    = { { type = SC, chance = 12 } },
-    ["toolstore"]         = { { type = SC, chance = 12 } },
-    ["gardenstore"]       = { { type = SC, chance = 12 } },
-    ["furniturestore"]    = { { type = SC, chance = 10 } },
-    ["furniturestorage"]  = { { type = SC, chance = 10 } },
-    ["outdoorsupply"]     = { { type = SC, chance = 10 } },
-    ["carsupply"]         = { { type = SC, chance = 10 } },
-    ["generalstore"]      = { { type = SC, chance = 10 } },
-    ["giftstore"]         = { { type = SC, chance = 10 } },
-    ["garagestorage"]     = { { type = SC, chance = 10 } },
-    ["electronicstore"]   = { { type = SC, chance = 10 } },
+    -- Canonical back-of-house storage (occasional loading-dock outdoor placement)
+    ["grocerystorage"]    = { { type = SC, chance = 50, allowOutdoor = true, outdoorWeight = 15 } },
+    ["warehouse"]         = { { type = SC, chance = 40, allowOutdoor = true, outdoorWeight = 20 } },
+    ["departmentstorage"] = { { type = SC, chance = 35 } },
+    ["producestorage"]    = { { type = SC, chance = 35 } },
 
-    -- Secondary retail + storage (6-8%)
-    ["storageunit"]          = { { type = SC, chance = 8 } },
-    ["liquorstore"]          = { { type = SC, chance = 8 } },
-    ["petstore"]             = { { type = SC, chance = 8 } },
-    ["clothingstorage"]      = { { type = SC, chance = 8 } },
-    ["generalstorestorage"]  = { { type = SC, chance = 8 } },
-    ["camping"]              = { { type = SC, chance = 8 } },
-    ["campingstorage"]       = { { type = SC, chance = 8 } },
-    ["giftstorage"]          = { { type = SC, chance = 8 } },
-    ["outdoorsupply_storage"] = { { type = SC, chance = 8 } },
+    -- Major retail with plausible carts
+    ["housewarestore"]    = { { type = SC, chance = 30 } },
+    ["toolstore"]         = { { type = SC, chance = 25 } },
+    ["gardenstore"]       = { { type = SC, chance = 25 } },
+    ["furniturestore"]    = { { type = SC, chance = 20 } },
+    ["furniturestorage"]  = { { type = SC, chance = 20 } },
+    ["outdoorsupply"]     = { { type = SC, chance = 18 } },
+    ["carsupply"]         = { { type = SC, chance = 18 } },
+    ["generalstore"]      = { { type = SC, chance = 18 } },
+    ["electronicstore"]   = { { type = SC, chance = 18 } },
+    ["giftstore"]         = { { type = SC, chance = 12 } },
+
+    -- Secondary retail + minor storage
+    ["liquorstore"]          = { { type = SC, chance = 10 } },
+    ["petstore"]             = { { type = SC, chance = 10 } },
+    ["clothingstorage"]      = { { type = SC, chance = 10 } },
+    ["generalstorestorage"]  = { { type = SC, chance = 10 } },
+    ["camping"]              = { { type = SC, chance = 10 } },
+    ["campingstorage"]       = { { type = SC, chance = 10 } },
+    ["giftstorage"]          = { { type = SC, chance = 10 } },
+    ["outdoorsupply_storage"] = { { type = SC, chance = 10 } },
     ["clothingstore"]        = { { type = SC, chance = 6 } },
     ["sportstore"]           = { { type = SC, chance = 6 } },
 
-    -- Flavor (2-5%)
+    -- Commercial storage / utility. The building-signature filter rejects
+    -- residential buildings, so these only fire for commercial garages
+    -- (car dealers, mechanic shops), standalone storage facilities, and
+    -- commercial sheds. Modest rates are fine — residential abundance is a
+    -- non-issue.
+    ["storageunit"]       = { { type = SC, chance = 15 } },
+    ["garagestorage"]     = { { type = SC, chance = 12 } },
+    ["storage"]           = { { type = SC, chance = 8 } },
+    ["shed"]              = { { type = SC, chance = 2 } },
+
+    -- Flavor — rare-to-never
     ["bookstore"]         = { { type = SC, chance = 5 } },
     ["conveniencestore"]  = { { type = SC, chance = 5 } },
     ["cornerstore"]       = { { type = SC, chance = 5 } },
-    ["storage"]           = { { type = SC, chance = 5 } },
-    ["lobby"]             = { { type = SC, chance = 3 } },
+    ["lobby"]             = { { type = SC, chance = 2 } },
     ["pawnshop"]          = { { type = SC, chance = 2 } },
 }
 
@@ -106,6 +132,12 @@ local function initializeDefaults()
             table.insert(SaucedCarts.SpawnLocations[roomName], {
                 type = entry.type,
                 chance = entry.chance,
+                -- Forward optional fields so DEFAULT_SPAWN_LOCATIONS can use
+                -- them without addons being the only callers.
+                allowResidential     = entry.allowResidential or nil,
+                allowOutdoor         = entry.allowOutdoor or nil,
+                outdoorWeight        = entry.outdoorWeight,
+                skipFrameworkFilters = entry.skipFrameworkFilters or nil,
             })
         end
     end
@@ -153,6 +185,9 @@ function SaucedCarts.addSpawnRooms(fullType, spawnRooms)
                     -- filter can honour per-cart-type intent.
                     allowResidential     = entry.allowResidential == true,
                     allowOutdoor         = entry.allowOutdoor == true,
+                    -- 0-100, clamped. Only meaningful when allowOutdoor=true.
+                    outdoorWeight        = entry.outdoorWeight and
+                        math.max(0, math.min(100, entry.outdoorWeight)) or nil,
                     skipFrameworkFilters = entry.skipFrameworkFilters == true,
                 })
                 added = added + 1
@@ -163,6 +198,19 @@ function SaucedCarts.addSpawnRooms(fullType, spawnRooms)
     if added > 0 then
         SaucedCarts.debug(function() return string.format("Added %d spawn room(s) for %s", added, fullType) end)
     end
+end
+
+--- True if any registered spawn entry (default OR addon-added) opts into the
+--- outdoor placement pool. Used by WorldSpawning as a cheap precheck: if no
+--- entry allows outdoor, the chunk pass skips outdoor collection entirely.
+---@return boolean
+function SaucedCarts.anyEntryAllowsOutdoor()
+    for _, entries in pairs(SaucedCarts.SpawnLocations) do
+        for _, e in ipairs(entries) do
+            if e.allowOutdoor then return true end
+        end
+    end
+    return false
 end
 
 --- Get spawn entries for a room

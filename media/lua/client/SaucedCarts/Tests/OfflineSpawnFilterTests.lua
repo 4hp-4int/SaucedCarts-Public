@@ -215,6 +215,7 @@ local KNOWN_VANILLA_ROOMS = {
     clothingstore = true, sportstore = true,
     bookstore = true, conveniencestore = true, cornerstore = true,
     storage = true, lobby = true, pawnshop = true,
+    shed = true,  -- Distributions.lua:14749 — counter/crate procedural dist
 }
 
 tests["default_rooms_have_no_phantom_names"] = function()
@@ -273,6 +274,38 @@ tests["isVanillaRoom_uses_ItemPickerJava_when_present"] = function()
     if not Assert.isTrue(ok1, "grocery recognised") then return false end
     if not Assert.isTrue(ok2, "gigamart recognised") then return false end
     return Assert.isFalse(ok3, "unknown room rejected")
+end
+
+-- ============================================================================
+-- ANY-ENTRY-ALLOWS-OUTDOOR PRECHECK
+-- ============================================================================
+-- WorldSpawning uses this as a cheap precheck per chunk: if no registered entry
+-- opts into outdoor placement, skip outdoor square collection entirely.
+
+tests["anyEntryAllowsOutdoor_true_with_default_canonical"] = function()
+    -- After defaults load, the canonical retail entries (gigamart, grocery,
+    -- departmentstore, grocerystorage, warehouse) set allowOutdoor = true.
+    -- Regression guard: if those flags get dropped during a future refactor,
+    -- the outdoor parking-lot feature silently turns into a no-op.
+    return Assert.isTrue(SaucedCarts.anyEntryAllowsOutdoor(),
+        "anyEntryAllowsOutdoor() true because defaults opt canonical retail into outdoor")
+end
+
+tests["anyEntryAllowsOutdoor_default_canonical_entries_carry_flag"] = function()
+    -- Direct verification that the registry entry for gigamart carries the
+    -- new fields (covers initializeDefaults forwarding the field; pre-fix it
+    -- stripped everything except type/chance).
+    local entries = SaucedCarts.SpawnLocations.gigamart
+    if not Assert.isTrue(entries ~= nil and #entries > 0,
+        "gigamart entries registered") then return false end
+    local found
+    for _, e in ipairs(entries) do
+        if e.type == "SaucedCarts.ShoppingCart" then found = e; break end
+    end
+    if not Assert.isTrue(found ~= nil, "base ShoppingCart entry present") then return false end
+    if not Assert.isTrue(found.allowOutdoor == true, "allowOutdoor forwarded") then return false end
+    return Assert.isTrue(type(found.outdoorWeight) == "number",
+        "outdoorWeight forwarded as number")
 end
 
 tests["canSpawnInBuilding_is_boolean_wrapper"] = function()

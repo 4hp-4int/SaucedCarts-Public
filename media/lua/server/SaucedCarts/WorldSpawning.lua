@@ -55,6 +55,15 @@ local spawnQueue = {}
 -- Tick counter for queue processing
 local tickCounter = 0
 
+-- PRIMARY short-circuit: in-memory set of chunk origins ("originX,originY")
+-- already walked this session. On LoadChunk we bail immediately if the chunk is
+-- here — a perfect, zero-iteration skip for re-streams / revisits within a
+-- session (the dominant case on a long-lived dedi). Cleared on game end, so
+-- after a restart each chunk re-walks ONCE; that re-walk is cheap and silent
+-- because the durable, cross-restart dedup is the per-building decision recorded
+-- in spawnedBuildings (see classifyInterior + onLoadChunk decide stage) — nothing re-rolls.
+local sessionEvaluatedChunks = {}
+
 -- ============================================================================
 -- MODDATA PERSISTENCE (Lazy initialization pattern from BurdJournals)
 -- Must be defined BEFORE functions that use getSpawnedBuildings()
@@ -158,15 +167,11 @@ local function hasBuildingReachedLimit(buildingKey)
     if not buildingKey then return false end
     local buildings = getSpawnedBuildings()
     local count = buildings[buildingKey] or 0
-    local max = getMaxCartsPerBuilding()
-    local atLimit = count >= max
-    if atLimit then
-        SaucedCarts.debug(function() return string.format(
-            "Building %s at spawn limit (%d/%d)",
-            buildingKey, count, max
-        ) end)
-    end
-    return atLimit
+    -- No log here: this is called per eligible square, so a capped building
+    -- (common for multi-chunk buildings) would burst-log on a chunk's first
+    -- eval. The actual spawn ("Building X spawn count: ...") and the on-demand
+    -- debug commands (checkCurrentBuilding/listTrackedBuildings) cover this.
+    return count >= getMaxCartsPerBuilding()
 end
 
 --- Increment the cart count for a building
@@ -266,55 +271,51 @@ local function processSpawnQueue()
     while i >= 1 and processed < MAX_SPAWNS_PER_TICK do
         local request = spawnQueue[i]
 
-        -- Re-validate square (may have changed since queued)
+        -- Re-validate square (may have changed since queued). The building's
+        -- spawn decision was already committed in onLoadChunk, so there's no
+        -- cap re-check or count bump here — just place the decided cart.
         if request.square and isValidSpawnSquare(request.square) then
-            -- Re-check building hasn't reached limit (another square might have processed first)
-            if not hasBuildingReachedLimit(request.buildingKey) then
-                -- Spawn the cart with slight random offset for natural placement
-                local offsetX = 0.3 + ZombRand(40) / 100  -- 0.3-0.7
-                local offsetY = 0.3 + ZombRand(40) / 100  -- 0.3-0.7
+            -- Spawn the cart with slight random offset for natural placement
+            local offsetX = 0.3 + ZombRand(40) / 100  -- 0.3-0.7
+            local offsetY = 0.3 + ZombRand(40) / 100  -- 0.3-0.7
 
-                -- AddWorldInventoryItem params: (itemType, x, y, z, autoAge, synchSpawn)
-                -- 5th param = autoAge (not used here, pass false)
-                -- 6th param = synchSpawn (true for MP sync to all clients)
-                -- Returns InventoryItem (NOT IsoWorldInventoryObject!)
-                -- NOTE: Do NOT call transmitCompleteItemToClients() after this!
-                -- Double-transmit causes duplicates in self-hosted MP.
-                local cart = request.square:AddWorldInventoryItem(
+            -- AddWorldInventoryItem params: (itemType, x, y, z, autoAge, synchSpawn)
+            -- 5th param = autoAge (not used here, pass false)
+            -- 6th param = synchSpawn (true for MP sync to all clients)
+            -- Returns InventoryItem (NOT IsoWorldInventoryObject!)
+            -- NOTE: Do NOT call transmitCompleteItemToClients() after this!
+            -- Double-transmit causes duplicates in self-hosted MP.
+            local cart = request.square:AddWorldInventoryItem(
+                request.cartType,
+                offsetX,
+                offsetY,
+                0,     -- Ground level (z offset)
+                false, -- autoAge
+                true   -- synchSpawn (transmit to clients)
+            )
+
+            if cart then
+                -- Apply sandbox multipliers (stores raw capacity in ModData)
+                SaucedCarts.applyMultipliers(cart)
+
+                SaucedCarts.debug(function() return string.format(
+                    "Spawned %s at %d,%d,%d (building %s)",
                     request.cartType,
-                    offsetX,
-                    offsetY,
-                    0,     -- Ground level (z offset)
-                    false, -- autoAge
-                    true   -- synchSpawn (transmit to clients)
-                )
+                    request.square:getX(),
+                    request.square:getY(),
+                    request.square:getZ(),
+                    request.buildingKey or "outdoor"
+                ) end)
 
-                if cart then
-                    -- Apply sandbox multipliers (stores raw capacity in ModData)
-                    SaucedCarts.applyMultipliers(cart)
-
-                    -- Increment building spawn count (ModData saved after loop)
-                    incrementBuildingCount(request.buildingKey)
-
-                    SaucedCarts.debug(function() return string.format(
-                        "Spawned %s at %d,%d,%d (building %s)",
-                        request.cartType,
-                        request.square:getX(),
-                        request.square:getY(),
-                        request.square:getZ(),
-                        request.buildingKey or "outdoor"
-                    ) end)
-
-                    -- Set empty model directly (new carts are always empty)
-                    local cartData = SaucedCarts.getCartData(cart)
-                    if cartData and cartData.visualModels and cartData.visualModels.empty then
-                        cart:setStaticModel(cartData.visualModels.empty)
-                        cart:setWorldStaticModel(cartData.visualModels.empty)
-                    end
-                    cart:getModData().SaucedCarts_fillState = "empty"
-
-                    processed = processed + 1
+                -- Set empty model directly (new carts are always empty)
+                local cartData = SaucedCarts.getCartData(cart)
+                if cartData and cartData.visualModels and cartData.visualModels.empty then
+                    cart:setStaticModel(cartData.visualModels.empty)
+                    cart:setWorldStaticModel(cartData.visualModels.empty)
                 end
+                cart:getModData().SaucedCarts_fillState = "empty"
+
+                processed = processed + 1
             end
         end
 
@@ -323,10 +324,7 @@ local function processSpawnQueue()
         i = i - 1
     end
 
-    -- Batch save/transmit ModData once per tick (not per spawn)
-    -- This reduces network overhead from N transmissions to 1
     if processed > 0 then
-        saveModData()
         SaucedCarts.debug(function() return string.format(
             "WorldSpawning: Processed %d spawn(s), %d remaining in queue",
             processed, #spawnQueue
@@ -338,73 +336,274 @@ end
 -- EVENT HANDLERS
 -- ============================================================================
 
---- Handle LoadGridsquare event - check for potential cart spawn locations
+--- Evaluate one loaded square under the ONE-SHOT-PER-BUILDING model: a building
+--- Classify an interior square as a candidate placement for its building under
+--- the one-shot-per-building model. If the square is in a spawn-eligible room,
+--- the building isn't already decided, the square is placeable, AND at least
+--- one spawn entry passes the building-signature filter (so the building is a
+--- real commercial candidate), bucket it under its buildingKey for stage-2
+--- decision. Otherwise no-op.
 ---@param square IsoGridSquare
-local function onLoadGridsquare(square)
-    -- Skip if mod disabled
-    if SandboxVars.SaucedCarts and not SandboxVars.SaucedCarts.EnableMod then return end
-    if SandboxVars.SaucedCarts and SandboxVars.SaucedCarts.EnableWorldSpawning == false then return end
-
-    if not square then return end
-
-    -- Get room info
+---@param interiorByBuilding table buildingKey -> { {square, allowedEntries, roomName}, ... }
+local function classifyInterior(square, interiorByBuilding)
     local room = square:getRoom()
-    if not room then return end  -- Outdoor or no room definition
-
+    if not room then return end
     local roomName = room:getName()
     if not roomName then return end
-
-    -- Check if this room type can spawn carts
     local spawnEntries = SaucedCarts.getSpawnEntriesForRoom(roomName)
     if not spawnEntries or #spawnEntries == 0 then return end
 
-    -- LOG: We found a spawn-eligible room (this is critical for debugging)
-    SaucedCarts.debug(function() return string.format("LoadGridsquare: Found spawn room '%s' at %d,%d", roomName, square:getX(), square:getY()) end)
-
-    -- Get building key for deduplication
     local buildingKey = getBuildingKey(square)
+    if not buildingKey then return end  -- no def => no stable persistence key
+    if getSpawnedBuildings()[buildingKey] ~= nil then return end  -- already decided
 
-    -- Skip if building has reached cart limit
-    if buildingKey and hasBuildingReachedLimit(buildingKey) then return end
+    if not isValidSpawnSquare(square) then return end
 
-    -- Resolve building once for the filter. Nil = outdoor.
+    -- Building-signature filter — only buildings that pass for at least one
+    -- entry become candidates. Residential / non-shop are rejected here and
+    -- therefore never written to spawnedBuildings (keeps it bounded).
     local building = square:getBuilding()
+    local allowedEntries
+    for _, entry in ipairs(spawnEntries) do
+        if SaucedCarts.evaluateSpawnEligibility(building, entry).allowed then
+            allowedEntries = allowedEntries or {}
+            allowedEntries[#allowedEntries + 1] = entry
+        end
+    end
+    if not allowedEntries then return end
 
-    -- Get spawn multiplier from sandbox settings (SpawnRate is 0-500%, convert to multiplier)
+    local bucket = interiorByBuilding[buildingKey]
+    if not bucket then
+        bucket = {}
+        interiorByBuilding[buildingKey] = bucket
+    end
+    bucket[#bucket + 1] = { square = square, allowedEntries = allowedEntries, roomName = roomName }
+end
+
+-- Outdoor-pool ring radius in tiles, scanned around a building's bounding box
+-- when deciding it. 12 = 1.5 chunk-widths, catches typical adjacent-chunk
+-- parking. The dominant constraint is "are adjacent chunks loaded yet?" (see
+-- pendingBuildings deferral below), not the radius itself. Cheap O(N^2) but
+-- bounded by building size + radius.
+local OUTDOOR_RING_RADIUS = 12
+
+-- How many LoadChunk events to wait before giving up on finding outdoor
+-- candidates and committing the building as interior-only. The building's
+-- interior chunk almost always fires LoadChunk BEFORE the adjacent parking-lot
+-- chunks stream in (chunks load nearest-to-player first; entering a store
+-- means the interior is loaded first, parking comes second as the player turns
+-- around or reloads the cell). Deferring 6 LoadChunks gives surrounding
+-- chunks enough time to stream before we settle for interior-only.
+local MAX_OUTDOOR_DEFER = 6
+
+-- Buildings with allowOutdoor entries whose initial outdoor scan turned up
+-- empty (because adjacent chunks weren't loaded yet). Retried on every
+-- subsequent LoadChunk until either the scan finds candidates or attempts
+-- exceeds MAX_OUTDOOR_DEFER. Session-scoped — pending entries don't survive a
+-- game-end, but they don't need to: the building is also absent from
+-- spawnedBuildings, so a session restart simply re-rolls it.
+---@type table<string, {entry: SpawnEntry, roomName: string, interiorList: table, attempts: number}>
+local pendingBuildings = {}
+
+--- Scan around a building's footprint for outdoor parking-lot candidates.
+--- Building-relative (NOT chunk-relative) — this is what fixes the chunk-
+--- coincidence bias where the interior chunk's outdoor pool was empty because
+--- the parking is in an adjacent chunk. As long as adjacent chunks are loaded
+--- (true near the player), they contribute candidates.
+---@param cell IsoCell from getCell()
+---@param building IsoBuilding the candidate building
+---@param radius number ring width in tiles around the building's bounding box
+---@return table|nil list of valid outdoor (no-room, vehicle-zone) squares
+local function scanOutdoorAroundBuilding(cell, building, radius)
+    if not cell or not building then return nil end
+    local def = building:getDef()
+    if not def then return nil end
+    local bx = def:getX()
+    local by = def:getY()
+    local bw = def:getW()
+    local bh = def:getH()
+    if not (bx and by and bw and bh) then return nil end
+    -- Parking lots are ground-level. BuildingDef has no getZ(), and even for
+    -- multi-story shops the cart belongs on the ground floor lot, not a roof.
+    local z = 0
+
+    local x0, x1 = bx - radius, bx + bw + radius - 1
+    local y0, y1 = by - radius, by + bh + radius - 1
+    local pool
+    local nNull, nRoom, nNoVz, nInvalid, nPass = 0, 0, 0, 0, 0
+    for ny = y0, y1 do
+        for nx = x0, x1 do
+            if nx < bx or nx >= bx + bw or ny < by or ny >= by + bh then
+                local sq = cell:getGridSquare(nx, ny, z)
+                if not sq then
+                    nNull = nNull + 1
+                elseif sq:getRoom() then
+                    nRoom = nRoom + 1
+                elseif not (getVehicleZoneAt and getVehicleZoneAt(nx, ny, z)) then
+                    nNoVz = nNoVz + 1
+                elseif not isValidSpawnSquare(sq) then
+                    nInvalid = nInvalid + 1
+                else
+                    nPass = nPass + 1
+                    pool = pool or {}
+                    pool[#pool + 1] = sq
+                end
+            end
+        end
+    end
+    SaucedCarts.debug(function() return string.format(
+        "  scanOutdoor bldg=%d,%d size=%dx%d r=%d  null=%d room=%d noVz=%d invalid=%d pass=%d",
+        bx, by, bw, bh, radius, nNull, nRoom, nNoVz, nInvalid, nPass) end)
+    return pool
+end
+
+-- Chunk square dimension. IsoChunk.getGridSquare bounds-checks chunkSquareX/Y
+-- to [0,8) and indexes `squares[zz][y*8+x]` (IsoChunk.java:3130). Pinned
+-- anchor — re-verify against that method if a PZ update changes chunk geometry.
+local CHUNK_SIZE = 8
+
+--- Handle LoadChunk event - evaluate every loaded square in the chunk once.
+---
+--- Replaces the former per-square LoadGridsquare hook. Vanilla fires
+--- LoadGridsquare once per square (IsoChunk.java:3797 — up to 64 per z-level
+--- per chunk, and again on every chunk reload); LoadChunk fires ONCE per chunk
+--- (IsoChunk.java:3924, after all squares + rooms are loaded). Iterating the
+--- chunk's squares here collapses ~64-192 Lua event dispatches per chunk into
+--- one and hoists the sandbox gate + multiplier out of the per-square path.
+--- On a dedicated server (where this runs for every chunk every player streams)
+--- that's the meaningful win.
+---@param chunk IsoChunk
+local function onLoadChunk(chunk)
+    -- Skip if mod / world spawning disabled (hoisted: evaluated once per chunk)
+    if SandboxVars.SaucedCarts and not SandboxVars.SaucedCarts.EnableMod then return end
+    if SandboxVars.SaucedCarts and SandboxVars.SaucedCarts.EnableWorldSpawning == false then return end
+
+    if not chunk then return end
+
+    -- Spawn multiplier from sandbox (SpawnRate 0-500% -> 0-5 multiplier), once.
     local multiplier = 1.0
     if SandboxVars.SaucedCarts and SandboxVars.SaucedCarts.SpawnRate then
         multiplier = SandboxVars.SaucedCarts.SpawnRate / 100
     end
 
-    -- Roll for each cart type that can spawn in this room
-    for _, entry in ipairs(spawnEntries) do
-        -- Building-signature filter: rejects residential buildings and
-        -- outdoor squares unless the entry opts in. Cheap: just calls
-        -- PZ's built-in BuildingDef.isResidential() (and isShop() when
-        -- StrictShopOnly sandbox is on).
-        local eligibility = SaucedCarts.evaluateSpawnEligibility(building, entry)
-        if not eligibility.allowed then
-            SaucedCarts.debug(function() return string.format(
-                "Filter denied %s at %d,%d (%s)",
-                entry.type, square:getX(), square:getY(), eligibility.reason
-            ) end)
-        else
-            local adjustedChance = entry.chance * multiplier
+    -- Outdoor is a sandbox-gated feature; cheap global precheck.
+    local outdoorEnabledGlobally =
+        (not SandboxVars.SaucedCarts or SandboxVars.SaucedCarts.EnableOutdoorSpawns ~= false)
+        and (SaucedCarts.anyEntryAllowsOutdoor and SaucedCarts.anyEntryAllowsOutdoor())
 
-            if ZombRand(100) < adjustedChance then
-                -- Only queue if square is valid (basic check, re-validated when processing)
-                if isValidSpawnSquare(square) then
-                    queueSpawn(square, entry.type, buildingKey, roomName)
+    local minZ = chunk:getMinLevel()
+    local maxZ = chunk:getMaxLevel()
+    local sessionChecked = false
 
-                    -- One cart per square - stop checking other entries for this square
-                    -- (other squares in the building can still queue carts up to the limit)
-                    if buildingKey then
-                        break
+    -- Stage 1: interior candidates only. Outdoor candidates are NOT collected
+    -- here — they're scanned per-building at decide time (see Stage 2). That
+    -- fixes the chunk-coincidence bias where a gigamart's interior chunk had
+    -- no outdoor candidates because its parking lot lives in an adjacent chunk.
+    local interiorByBuilding = {}
+
+    for z = minZ, maxZ do
+        for x = 0, CHUNK_SIZE - 1 do
+            for y = 0, CHUNK_SIZE - 1 do
+                local square = chunk:getGridSquare(x, y, z)
+                if square then
+                    -- PRIMARY short-circuit: derive the chunk key from the first
+                    -- real square (origin = sqX-localX, sqY-localY) and bail if
+                    -- we've already walked this chunk this session. Cross-restart
+                    -- dedup is the per-building decision in spawnedBuildings, so
+                    -- a post-restart re-walk is cheap and silent.
+                    if not sessionChecked then
+                        sessionChecked = true
+                        local key = (square:getX() - x) .. "," .. (square:getY() - y)
+                        if sessionEvaluatedChunks[key] then return end
+                        sessionEvaluatedChunks[key] = true
+                    end
+                    if square:getRoom() then
+                        classifyInterior(square, interiorByBuilding)
                     end
                 end
             end
         end
     end
+
+    -- Stage 2: decide per candidate building. Each building gets up to
+    -- MaxCartsPerBuilding roll attempts (default 1); on success, the placement
+    -- is picked from a pool (interior squares ± outdoor squares from a building-
+    -- relative ring scan). Spawn rate is unchanged — outdoor only affects WHERE.
+    --
+    -- Two-phase: (1) merge this chunk's interior buckets into pendingBuildings
+    -- (handles multi-chunk buildings + carries unresolved outdoor-defer state
+    -- across LoadChunks). (2) walk pendingBuildings and decide each as soon as
+    -- outdoor candidates appear, or after MAX_OUTDOOR_DEFER tries.
+    local cell = getCell()
+    local buildings = getSpawnedBuildings()
+    local committed = false
+    local max = getMaxCartsPerBuilding()
+
+    -- Phase 1: merge this chunk's interior squares into pendingBuildings.
+    for buildingKey, list in pairs(interiorByBuilding) do
+        if not buildings[buildingKey] then  -- might have been decided this session
+            local p = pendingBuildings[buildingKey]
+            if p then
+                for _, item in ipairs(list) do
+                    p.interiorList[#p.interiorList + 1] = item
+                end
+            else
+                pendingBuildings[buildingKey] = {
+                    entry = list[1].allowedEntries[1],
+                    roomName = list[1].roomName,
+                    interiorList = list,
+                    attempts = 0,
+                }
+            end
+        end
+    end
+
+    -- Phase 2: walk every pending building (not just this chunk's). Decide as
+    -- soon as outdoor scan succeeds OR after MAX_OUTDOOR_DEFER attempts.
+    -- Entries without allowOutdoor decide immediately on first pass.
+    for buildingKey, p in pairs(pendingBuildings) do
+        p.attempts = p.attempts + 1
+        local entry = p.entry
+        local outdoorWeight = entry.outdoorWeight or 30
+
+        local outdoorPool
+        if outdoorEnabledGlobally and entry.allowOutdoor then
+            local building = p.interiorList[1].square:getBuilding()
+            outdoorPool = scanOutdoorAroundBuilding(cell, building, OUTDOOR_RING_RADIUS)
+        end
+        local outdoorReady = outdoorPool and #outdoorPool > 0
+        local giveUp = p.attempts >= MAX_OUTDOOR_DEFER
+
+        -- Decide iff outdoor isn't gating us anymore.
+        if outdoorReady or giveUp or not entry.allowOutdoor then
+            local carts = 0
+            for _ = 1, max do
+                if ZombRand(100) < entry.chance * multiplier then
+                    local placeOutdoor = outdoorReady and (ZombRand(100) < outdoorWeight)
+                    local sq
+                    if placeOutdoor then
+                        sq = outdoorPool[ZombRand(#outdoorPool) + 1]
+                        queueSpawn(sq, entry.type, buildingKey, "outdoor")
+                    else
+                        sq = p.interiorList[ZombRand(#p.interiorList) + 1].square
+                        queueSpawn(sq, entry.type, buildingKey, p.roomName)
+                    end
+                    carts = carts + 1
+                end
+            end
+            buildings[buildingKey] = carts
+            committed = true
+            pendingBuildings[buildingKey] = nil
+            SaucedCarts.debug(function() return string.format(
+                "Decided building %s: %d cart(s) (attempts=%d)%s%s",
+                buildingKey, carts, p.attempts,
+                (outdoorReady and string.format(" [+outdoor pool %d]", #outdoorPool) or ""),
+                (giveUp and not outdoorReady and entry.allowOutdoor and " [outdoor defer give-up]" or "")
+            ) end)
+        end
+    end
+
+    if committed then saveModData() end
 end
 
 --- Handle OnTick event - process spawn queue
@@ -484,7 +683,11 @@ function WorldSpawning.clearSpawnTracking()
     local data = getSpawnData()
     data.spawnedBuildings = {}
     saveModData()
-    SaucedCarts.debug("DEBUG: Cleared spawn tracking - carts will respawn in all buildings")
+    -- Wipe the in-memory chunk cache too, so chunks re-walk and their (now
+    -- un-decided) buildings re-roll as you reload areas.
+    for k in pairs(sessionEvaluatedChunks) do sessionEvaluatedChunks[k] = nil end
+    for k in pairs(pendingBuildings) do pendingBuildings[k] = nil end
+    SaucedCarts.debug("DEBUG: Cleared building decisions + chunk cache + pending - carts re-roll as chunks reload")
 end
 
 --- Show spawn status
@@ -632,15 +835,37 @@ function WorldSpawning._resetSpawnTracking()
     local data = getSpawnData()
     data.spawnedBuildings = {}
     saveModData()
+    for k in pairs(sessionEvaluatedChunks) do sessionEvaluatedChunks[k] = nil end
+    for k in pairs(pendingBuildings) do pendingBuildings[k] = nil end
 end
+
+--- Live-probe / test hooks: run the per-chunk spawn evaluation directly.
+--- Server-only module, so these are reachable via pz-shell against a dedi, not
+--- the offline harness.
+WorldSpawning._onLoadChunk = onLoadChunk
+WorldSpawning._classifyInterior = classifyInterior
+WorldSpawning._scanOutdoorAroundBuilding = scanOutdoorAroundBuilding
+WorldSpawning._OUTDOOR_RING_RADIUS = OUTDOOR_RING_RADIUS
 
 -- ============================================================================
 -- EVENT REGISTRATION
 -- ============================================================================
 
--- Only need LoadGridsquare and OnTick - ModData uses lazy initialization
-Events.LoadGridsquare.Add(onLoadGridsquare)
+-- Per-chunk spawn evaluation + queue draining. ModData uses lazy init.
+-- LoadChunk (once per chunk) replaces the former per-square LoadGridsquare
+-- hook — see onLoadChunk. OnTick drains the spawn queue.
+Events.LoadChunk.Add(onLoadChunk)
 Events.OnTick.Add(onTick)
+
+-- Drop the in-memory chunk cache when leaving a game so a SP save-switch starts
+-- fresh. The durable per-building decisions live in spawnedBuildings (ModData)
+-- and need no reset.
+if Events.OnGameEnd and Events.OnGameEnd.Add then
+    Events.OnGameEnd.Add(function()
+        for k in pairs(sessionEvaluatedChunks) do sessionEvaluatedChunks[k] = nil end
+        for k in pairs(pendingBuildings) do pendingBuildings[k] = nil end
+    end)
+end
 
 SaucedCarts.WorldSpawning = WorldSpawning
 SaucedCarts.debug("WorldSpawning loaded (server)")

@@ -119,3 +119,11 @@ option SaucedCarts.StrictShopOnly
     page = SaucedCarts,
     translation = SaucedCarts_StrictShopOnly,
 }
+
+option SaucedCarts.EnableOutdoorSpawns
+{
+    type = boolean,
+    default = true,
+    page = SaucedCarts,
+    translation = SaucedCarts_EnableOutdoorSpawns,
+}
