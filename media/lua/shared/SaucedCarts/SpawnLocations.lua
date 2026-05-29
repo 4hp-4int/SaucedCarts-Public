@@ -38,11 +38,16 @@ SaucedCarts.SpawnLocations = {}
 -- phantom entries. Validated at load time against PZ's
 -- ItemPickerJava.hasDistributionForRoom().
 --
--- These chances are TRUE per-building probabilities under the one-shot-per-
--- building roll model (WorldSpawning.lua, v2.1.9+): each candidate building
--- gets exactly one roll at the value below × SandboxVars.SaucedCarts.SpawnRate.
--- They are NOT compounded across squares — a shed with one eligible tile and a
--- gigamart with ten both get one roll each.
+-- These chances are per-building binary probabilities under the
+-- one-roll-per-building model (WorldSpawning.lua, v2.1.9+): each candidate
+-- building gets ONE roll at the value below × SandboxVars.SaucedCarts
+-- .SpawnRate to decide whether it spawns any carts today. On a hit, the
+-- building spawns `1 + ZombRand(MaxCartsPerBuilding)` carts (uniform on
+-- [1, cap]), and each cart independently picks interior vs. outdoor
+-- placement via outdoorWeight when parking zones exist for the building.
+-- Rates here are calibrated against cap=1 (the sandbox default) — raising
+-- cap multiplies the count per spawned building, NOT the per-building hit
+-- rate.
 --
 -- Residential buildings (apartment lobbies, houses with garages, etc.) are
 -- rejected by the building-signature filter (evaluateSpawnEligibility →
@@ -67,13 +72,14 @@ local DEFAULT_SPAWN_LOCATIONS = {
     -- Canonical retail — carts ARE the default transport here.
     -- allowOutdoor + outdoorWeight: a fraction of successful rolls place the
     -- cart in the parking lot (chunk-coincident vehicle zone) instead of inside.
-    ["gigamart"]          = { { type = SC, chance = 80, allowOutdoor = true, outdoorWeight = 30 } },
-    ["grocery"]           = { { type = SC, chance = 60, allowOutdoor = true, outdoorWeight = 30 } },
-    ["departmentstore"]   = { { type = SC, chance = 50, allowOutdoor = true, outdoorWeight = 25 } },
+    ["gigamart"]          = { { type = SC, chance = 80, allowOutdoor = true, outdoorWeight = 50 } },
+    ["grocery"]           = { { type = SC, chance = 60, allowOutdoor = true, outdoorWeight = 50 } },
+    ["departmentstore"]   = { { type = SC, chance = 50, allowOutdoor = true, outdoorWeight = 40 } },
 
-    -- Canonical back-of-house storage (occasional loading-dock outdoor placement)
-    ["grocerystorage"]    = { { type = SC, chance = 50, allowOutdoor = true, outdoorWeight = 15 } },
-    ["warehouse"]         = { { type = SC, chance = 40, allowOutdoor = true, outdoorWeight = 20 } },
+    -- Canonical back-of-house storage (loading-dock outdoor placement when a
+    -- vehicle zone overlaps the ring — typically rarer than retail frontage).
+    ["grocerystorage"]    = { { type = SC, chance = 50, allowOutdoor = true, outdoorWeight = 30 } },
+    ["warehouse"]         = { { type = SC, chance = 40, allowOutdoor = true, outdoorWeight = 35 } },
     ["departmentstorage"] = { { type = SC, chance = 35 } },
     ["producestorage"]    = { { type = SC, chance = 35 } },
 
@@ -104,12 +110,14 @@ local DEFAULT_SPAWN_LOCATIONS = {
     -- Commercial storage / utility. The building-signature filter rejects
     -- residential buildings, so these only fire for commercial garages
     -- (car dealers, mechanic shops), standalone storage facilities, and
-    -- commercial sheds. Modest rates are fine — residential abundance is a
-    -- non-issue.
-    ["storageunit"]       = { { type = SC, chance = 15 } },
-    ["garagestorage"]     = { { type = SC, chance = 12 } },
-    ["storage"]           = { { type = SC, chance = 8 } },
-    ["shed"]              = { { type = SC, chance = 2 } },
+    -- commercial sheds. Rates kept low because under MaxCartsPerBuilding > 1
+    -- each independent roll compounds — a 12% rate with cap=5 produces
+    -- ~47% of buildings getting at least one cart, which felt too dense in
+    -- play. Tuned so even at cap=5 storage feels like a treat, not a flood.
+    ["storageunit"]       = { { type = SC, chance = 8 } },
+    ["garagestorage"]     = { { type = SC, chance = 5 } },
+    ["storage"]           = { { type = SC, chance = 4 } },
+    ["shed"]              = { { type = SC, chance = 1 } },
 
     -- Flavor — rare-to-never
     ["bookstore"]         = { { type = SC, chance = 5 } },
@@ -315,6 +323,76 @@ end
 ---@return boolean
 function SaucedCarts.canSpawnInBuilding(building, entry)
     return SaucedCarts.evaluateSpawnEligibility(building, entry).allowed
+end
+
+-- ============================================================================
+-- SPAWN DICE (pure)
+-- ============================================================================
+-- The per-building probability math, extracted from WorldSpawning's onLoadChunk
+-- so it can be unit-tested offline without mocking the world. Lives here beside
+-- evaluateSpawnEligibility because, like that filter, it's pure spawn policy with
+-- no server/world dependencies. WorldSpawning passes ZombRand as the rng; tests
+-- pass a scripted rng for deterministic dice.
+--
+-- v2.1.9 model: ONE binary roll per building decides whether it spawns any carts
+-- (chance is a true per-building probability, not a per-roll knob). On a hit, the
+-- count is uniform [1, MaxCartsPerBuilding], and each cart independently picks a
+-- TYPE (weighted by chance, across all eligible entries) and then an interior-vs-
+-- outdoor placement via that type's outdoorWeight (only when parking zones exist).
+--
+-- Addon mixing: takes a LIST of eligible entries so addon-registered cart types
+-- mix with the built-in cart in shared rooms. The building's hit rate is the MAX
+-- chance among its entries (so adding addons varies the type mix WITHOUT
+-- inflating how often a building has a cart) — which makes the single-entry case
+-- byte-identical to before, including the RNG stream (the weighted type pick is
+-- skipped entirely when there's only one entry).
+--
+-- Returns placement *intent* only; actual interior/outdoor depends on square
+-- availability at queue time (an "outdoor" intent that can't find a lot square
+-- falls back to interior downstream).
+
+--- Decide how many carts a building spawns, and per cart its type + placement.
+---@param entries SpawnEntry[] eligible entries for the building (deduped by type)
+---@param max number MaxCartsPerBuilding cap (count is uniform 1..max on a hit)
+---@param multiplier number SandboxVars SpawnRate / 100
+---@param outdoorReady boolean true if parking zones were found for the building
+---@param rng fun(n:number):number returns an int in [0, n-1] like ZombRand
+---@return table[] placements list of { type=string, kind="interior"|"outdoor" }; empty if no spawn
+function SaucedCarts.decideSpawnPlacements(entries, max, multiplier, outdoorReady, rng)
+    local placements = {}
+    if not entries or #entries == 0 then return placements end
+
+    -- Building hit rate = max chance; total chance = weighted-pick denominator.
+    local buildingChance, totalWeight = 0, 0
+    for _, e in ipairs(entries) do
+        if e.chance > buildingChance then buildingChance = e.chance end
+        totalWeight = totalWeight + e.chance
+    end
+
+    if rng(100) < buildingChance * multiplier then
+        local count = 1 + rng(max)            -- uniform 1..max
+        local single = #entries == 1
+        for _ = 1, count do
+            -- Weighted type pick by chance. Skipped for the single-entry case so
+            -- a base-only setup consumes the exact same RNG sequence as before.
+            local pick = entries[1]
+            if not single and totalWeight > 0 then
+                local r, cum = rng(totalWeight), 0
+                for _, e in ipairs(entries) do
+                    cum = cum + e.chance
+                    if r < cum then pick = e; break end
+                end
+            end
+            -- Interior vs. outdoor: only types that opt in can land outside, and
+            -- the per-cart outdoor roll is consumed only when that's possible.
+            local kind = "interior"
+            if outdoorReady and pick.allowOutdoor and rng(100) < (pick.outdoorWeight or 30) then
+                kind = "outdoor"
+            end
+            placements[#placements + 1] = { type = pick.type, kind = kind }
+        end
+    end
+    return placements
 end
 
 -- ============================================================================

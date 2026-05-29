@@ -2,6 +2,90 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.9 — 2026-05-29 (World-spawning rework: parking-lot carts, cleaner perf, honest probabilities)
+
+### New: outdoor parking-lot spawns
+
+Carts now occasionally spawn in the parking lot of canonical retail (gigamart, grocery, department store, warehouse, grocery storage) the way an abandoned cart would in real life. Spawn rate is unchanged — only WHERE a cart can land. New sandbox option `SaucedCarts.EnableOutdoorSpawns` (default ON) is the master switch.
+
+Per-entry knobs on the public `SpawnEntry` API:
+- `allowOutdoor = true` opts an entry into the outdoor pool.
+- `outdoorWeight` (0-100, default 30) is the per-cart probability of placing outside vs. inside when zones exist. Canonical retail ships at 40-50.
+
+### New: addon cart types mix in shared rooms
+
+When more than one cart type is registered for the same room (e.g. an addon cart alongside the built-in ShoppingCart in `gigamart`), world spawning now pools all eligible types per building instead of only ever spawning the first one. The building's hit rate is the **highest** `chance` among the pooled types (so adding addons varies the *mix*, not how often a building has a cart), and each spawned cart picks a type **weighted by `chance`**. At `MaxCartsPerBuilding > 1` a single store can show a mix of types, each using its own `outdoorWeight`/`allowOutdoor`. The single-cart-type case (no addons) is byte-identical to before, including the RNG stream. See `docs/ADDON_GUIDE.md` → "Mixing with other carts in a shared room."
+
+### Architecture: vanilla-mirror world-spawning
+
+Replaced the per-square `LoadGridsquare` hook + chunk-iteration model with a pre-indexed `LoadChunk` model that mirrors how vanilla spawns vehicles.
+
+**`Events.OnLoadedMapZones` → metagrid building index.** At world init (after `IsoWorld.CreateStep2` consolidates `BuildingDef`s — `IsoWorld.java:1976-1984`), we walk `getWorld():getMetaGrid():getBuildings()` once and build a `chunkX,chunkY → [buildingKey]` reverse index of cart-eligible buildings. `LoadChunk` then does a single hash lookup; chunks with no cart-eligible buildings (the vast majority) return in O(1).
+
+**Outdoor placement via `VehicleZone` enumeration.** Per-building parking is discovered by a one-shot ring scan calling only the geometry-only `getVehicleZoneAt` (no chunk-streaming required), deduped to distinct `VehicleZone` refs, filtered against a deny-list (rejects `trafficjam*` and burnt-junk zones — accepts all other parking flavors including wealth-tier `medium`/`good` and franchise `spiffo`/`mccoy`/etc.). Cached per-building. Outdoor placement at decision time is one call to vanilla's `Zone:getRandomFreeSquareInZone()` — Java picks, we validate.
+
+**Deferred decision under chunk streaming.** A building's interior chunk often fires `LoadChunk` BEFORE the adjacent parking-lot chunks stream in. Buildings whose initial scan finds zero zones defer up to 6 `LoadChunk` events while neighbouring chunks load; after that they commit interior-only.
+
+### Per-building probability semantics
+
+The chance / cap / outdoor model is now **honestly per-building**:
+
+| Field | Meaning |
+|---|---|
+| `entry.chance` | Per-building probability the place spawns ANY carts today (one binary roll). |
+| `MaxCartsPerBuilding` | Max count per spawned building — uniform `1 + ZombRand(cap)`. |
+| `entry.outdoorWeight` | Per-cart probability of outdoor placement (when zones exist). |
+
+The old model ran `MaxCartsPerBuilding` independent rolls at `chance%` each. A gigamart at cap=5 was effectively spawning ~4 carts every visit; a `chance=12%` garage at cap=5 produced carts in 47% of garages instead of the implied 12%. The new one-binary-roll + uniform-count model decouples *how often* from *how many*: `chance=100` means every such building spawns, `chance=5` means 1 in 20 — independent of cap. Cap controls the count when a building does spawn.
+
+Net effect: rates are predictable. Storage no longer floods at cap=5; gigamart at cap=5 still feels populated (80% × avg 3 carts = 2.4 expected) with a real visible mix of indoor and parking-lot carts thanks to per-cart `outdoorWeight`.
+
+### Tuning
+
+Retuned the storage/garage entries downward to compensate for the per-roll-vs-per-building semantics shift and to fix "garages everywhere" feedback at higher caps:
+
+- `storageunit`: 15 → 8
+- `garagestorage`: 12 → 5
+- `storage`: 8 → 4
+- `shed`: 2 → 1
+
+Bumped `outdoorWeight` on canonical retail so the parking-lot presence is reliably noticeable:
+
+- `gigamart` / `grocery`: 30 → 50
+- `departmentstore`: 25 → 40
+- `grocerystorage`: 15 → 30
+- `warehouse`: 20 → 35
+
+### Improvements
+
+**Transfer hook fast-path** — `ISInventoryTransferAction` wrapper now early-returns the vanilla path when no cart is involved on either side of the transfer, via a new `transferInvolvesCart` discriminator. Eliminates the per-transfer classification cost for the 99% of transfers that don't touch a cart.
+
+### Technical
+
+- New `media/lua/client/SaucedCarts/Tests/OfflineTransferRestrictionTests.lua` covers the cart-involvement discriminator.
+- Extended `OfflineSpawnFilterTests.lua` with `anyEntryAllowsOutdoor` regression tests + `shed` added to the known-vanilla-rooms list.
+- 266 offline tests passing (was 244 at v2.1.8). Includes `OfflineSpawnDecisionTests.lua` locking the per-building dice + the new weighted addon type-mix.
+- `SaucedCarts.evaluateSpawnEligibility` accepts either an `IsoBuilding` or a `BuildingDef` (via a thin Lua wrapper at index-build time) — no public-API change.
+- New `SaucedCarts.anyEntryAllowsOutdoor()` helper on the public spawn API. Used internally as a cheap precheck; reachable from addons that want to know if any registered entry opts into outdoor placement.
+- `chunk.wx` / `chunk.wy` field access with a `chunk:getGridSquare(0,0,0)`-derived fallback for robustness.
+- Outdoor zone cache is lazy-built (only on first decision attempt per building) — no upfront cost for the ~6.6k buildings the player never visits.
+
+**Post-review cleanup (no gameplay change):**
+- **Dropped a dead network broadcast.** The server was transmitting the entire (ever-growing) `spawnedBuildings` ModData to all clients on every committed chunk decision, but that table is purely server-side dedup state with zero client readers. Removed the transmit and deleted the write-only `WorldSpawningClient.lua` receiver. Disk persistence is unaffected (global ModData serializes to the save without transmit). On a dedicated server this removes an O(N)-growing per-chunk broadcast as players explore.
+- **Chunk-coordinate guard.** The chunk index is keyed `floor(squareX/8)` and looked up via `chunk.wx`; a one-time startup assertion now cross-checks the two and logs an error (instead of silently spawning nothing) if a future PZ update changes chunk geometry or `wx` semantics.
+- **Decision-loop test coverage.** Extracted the per-building spawn dice (binary roll → uniform count → per-cart outdoor split) into the pure, shared `SaucedCarts.decideSpawnPlacements`, and added `OfflineSpawnDecisionTests.lua` (10 deterministic cases) that lock the v2.1.9 probability semantics. `WorldSpawning` now calls the shared function; behavior is byte-identical.
+
+### Public API / addon compatibility
+
+- **`SaucedCarts.API_VERSION`** unchanged. No breaking changes to the registration shape — `outdoorWeight` is new but optional; `allowOutdoor` already existed.
+- **`docs/ADDON_GUIDE.md`** updated with the new probability semantics and `outdoorWeight` flag. Addon authors who set `chance=N` under the old per-roll model and want similar density should roughly double their `chance` (the exact equivalence depends on cap).
+- New sandbox: `SaucedCarts.EnableOutdoorSpawns` (boolean, default `true`). Master switch — when off, the outdoor branch is bypassed entirely.
+
+### Backward Compatibility
+
+- Save-safe. No ModData schema changes. No `SCHEMA_VERSION` bump.
+- Previously-decided buildings stay decided. The persistence shape in `spawnedBuildings` ModData is unchanged.
+
 ## v2.1.8 — 2026-05-26 (Weight Reduction sandbox setting now applies)
 
 ### Bug Fixes

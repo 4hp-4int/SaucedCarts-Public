@@ -1,0 +1,92 @@
+SaucedCarts v2.1.9
+Released: 2026-05-29
+====================
+
+A world-spawning rework. Parking-lot carts at retail stores, smarter
+performance, and probabilities that actually do what they say.
+
+
+WHAT'S NEW
+----------
+
+* Carts now occasionally spawn in the PARKING LOT of grocery stores,
+  gigamarts, department stores, warehouses, and grocery-storage areas.
+  An abandoned cart in front of an abandoned shop -- the way it would
+  look in real life. Spawn rate is unchanged; only WHERE a cart can
+  land. Most multi-cart shops will end up with a mix of indoor and
+  parking-lot carts.
+
+* New sandbox option: "Enable Parking-Lot Spawns" (default ON). Turn it
+  off if you'd rather keep all carts strictly inside.
+
+
+CHANGED: WORLD-SPAWN PROBABILITIES
+----------------------------------
+
+Spawn rates now work the way the labels imply.
+
+  * "Spawn chance" is the chance the building spawns ANY carts today --
+    one roll per building, not per square or per cart attempt.
+  * "Max Carts Per Building" is the cap on how many carts spawn in a
+    building that does spawn (uniform 1 to cap).
+
+Previously the chance was rolled once per cart-attempt, so a 12% garage
+chance at cap=5 actually produced carts in nearly half of garages. Now
+12% means 12%. If you've cranked up "Max Carts Per Building" expect
+more carts per shop, not a higher rate of shops having carts.
+
+Storage / garage chances were lowered alongside this change so the
+overall distribution stays similar to v2.1.8 at the default cap=1:
+
+  storageunit   15 -> 8
+  garagestorage 12 -> 5
+  storage        8 -> 4
+  shed           2 -> 1
+
+If you preferred the v2.1.8 density at cap > 1, raise the storage
+chances back up via an addon override or wait for a future option to
+tune individual room rates from the sandbox.
+
+
+PERFORMANCE
+-----------
+
+World spawning -- rewrote the hook to mirror how vanilla spawns
+vehicles:
+
+  * Hooks LoadChunk (once per chunk) instead of LoadGridsquare (once
+    per square).
+  * Builds a one-time index of cart-eligible buildings at world load.
+    Chunks with nothing to spawn return instantly.
+  * Outdoor placement uses PZ's VehicleZone system directly -- no
+    tile-by-tile parking-lot scan during play.
+
+Most LoadChunk events now finish in a single hash lookup. The savings
+matter most on dedicated servers, where chunks stream constantly as
+players move.
+
+Inventory transfers -- the cart's transfer hook now bails to the
+vanilla path immediately when neither side of a transfer involves a
+cart, instead of classifying every transfer in the world. The vast
+majority of transfers (chest-to-chest, looting, crafting) never touch
+a cart, so they no longer pay any SaucedCarts overhead.
+
+Server-to-client traffic -- the world-spawn tracker no longer
+broadcasts its (ever-growing) building-decision table to clients on
+every chunk; it was server-only bookkeeping that no client read. One
+less packet stream on dedicated servers as players explore.
+
+
+COMPATIBILITY
+-------------
+
+Save-safe. No save-data changes -- safe to upgrade mid-save. Buildings
+that already spawned a cart on v2.1.8 stay decided; only newly streamed
+buildings use the new spawn logic.
+
+Addon authors: the public spawn-registration API is unchanged.
+`allowOutdoor = true` opts an entry into outdoor placement; an optional
+`outdoorWeight` (0-100, default 30) controls how often that entry's
+carts land outside vs. inside. See docs/ADDON_GUIDE.md for the new
+probability-semantics section -- if your mod tuned `chance` under the
+old per-roll model, you may want to bump those numbers.
