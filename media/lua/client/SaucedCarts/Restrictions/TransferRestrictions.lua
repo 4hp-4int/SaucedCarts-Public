@@ -321,6 +321,26 @@ local function safeGetSize(items)
     return 0
 end
 
+--- True if any entry in the transfer list is (or wraps) a cart.
+--- The transferItemsByWeight hook only ever filters/blocks CARTS, so a
+--- false result means we can delegate straight to vanilla and skip
+--- destination classification, table-building, notifications, and logging.
+--- Mirrors the main loop's stack-wrapper unwrap (context-menu format).
+---@param items any Lua table or Java ArrayList of items / stack-wrappers
+---@return boolean
+local function transferInvolvesCart(items)
+    local found = false
+    safeIterateItems(items, function(rawItem)
+        if found then return end
+        local item = rawItem
+        if type(rawItem) == "table" and not instanceof(rawItem, "InventoryItem") then
+            item = rawItem.items and rawItem.items[1] or rawItem
+        end
+        if SaucedCarts.safeIsCart(item) then found = true end
+    end)
+    return found
+end
+
 -- ============================================================================
 -- TRANSFER HOOK
 -- ============================================================================
@@ -341,6 +361,16 @@ local function initTransferHook()
     local originalTransferItemsByWeight = ISInventoryPane.transferItemsByWeight
 
     ISInventoryPane.transferItemsByWeight = function(self, items, container)
+        -- Fast path: this hook only filters/blocks CARTS. The overwhelming
+        -- majority of transfers contain none — delegate straight to vanilla
+        -- with no destination classification, table-building, toast, or log
+        -- work. pcall'd so a scan error can't break a vanilla transfer; on
+        -- error we fall through to the full (also pcall'd, fail-safe) path.
+        local scanOk, hasCart = pcall(transferInvolvesCart, items)
+        if scanOk and not hasCart then
+            return originalTransferItemsByWeight(self, items, container)
+        end
+
         -- Default: pass through unchanged
         local filteredItems = items
         local didFilter = false
@@ -735,6 +765,9 @@ function TransferRestrictions.isInitialized()
 end
 
 SaucedCarts.TransferRestrictions = TransferRestrictions
+
+-- Test hook: pure discriminator that gates the transferItemsByWeight fast-path.
+TransferRestrictions._transferInvolvesCart = transferInvolvesCart
 
 -- ============================================================================
 -- CLEANUP ON GAME END

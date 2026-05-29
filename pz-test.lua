@@ -53,6 +53,11 @@ return {
     -- ignore the require in the test env.
     stub_requires = {
         "TimedActions/ISGrabCorpseItem",
+        -- TransferRestrictions.lua requires this vanilla UI class at load.
+        -- OfflineTransferRestrictionTests exercises only the pure
+        -- transferInvolvesCart discriminator; the hook itself installs on
+        -- OnGameStart (never fires offline), so the real class isn't needed.
+        "ISUI/ISInventoryPane",
     },
 
     -- Preload SaucedCarts namespace so tests can inspect it without each
