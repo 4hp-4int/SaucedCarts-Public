@@ -560,11 +560,19 @@ local function findItemNearPlayer(player, itemId, radius)
                             local groundItem = o:getItem()
                             if groundItem then
                                 if groundItem:getID() == itemId then return groundItem end
-                                -- Recurse into any cart's inner container.
-                                if SaucedCarts.safeIsCart(groundItem) and groundItem.getItemContainer then
+                                -- Descend into ANY dropped container item's
+                                -- inner container — cart, backpack, duffel,
+                                -- crate, etc. Pre-fix this was gated to carts
+                                -- (safeIsCart), so an item inside a BAG lying on
+                                -- the ground was never located by id → the MP
+                                -- server reconstruction bailed at "item NOT
+                                -- FOUND" and the transfer silently no-op'd. (SP
+                                -- uses the live container ref in :perform's
+                                -- else-branch and was never affected.)
+                                if groundItem.getItemContainer then
                                     local innerCont = groundItem:getItemContainer()
-                                    if innerCont then
-                                        local inside = innerCont.getItemById and innerCont:getItemById(itemId)
+                                    if innerCont and innerCont.getItemById then
+                                        local inside = innerCont:getItemById(itemId)
                                         if inside then return inside end
                                     end
                                 end
@@ -800,13 +808,20 @@ local function handleCartTransfer(player, args)
         -- cartId is reused as the containing-item's ID. Recurse because the
         -- bag may live nested inside another bag.
         if kind == "bag" and cartId then
+            -- The containing bag item — first in the player's inventory tree
+            -- (worn/carried bag, possibly nested), then on nearby reachable
+            -- surfaces (a bag lying on the floor). The ground fallback fixes
+            -- the "out" direction (cart -> dropped bag), which — unlike "in" —
+            -- has NO item:getContainer() recovery downstream, so without it the
+            -- item lands in the player's main inventory instead of the bag.
             local bagItem = findInventoryItemRecursive(player:getInventory(), cartId)
+                or findItemNearPlayer(player, cartId)
             if bagItem and bagItem.getItemContainer then
                 local c = bagItem:getItemContainer()
                 if c then return c, nil end
             end
             SaucedCarts.debug(function() return string.format(
-                "resolveSide: bag item %s NOT FOUND in player inv (recursive); falling back to playerInv",
+                "resolveSide: bag item %s NOT FOUND in inv or nearby; falling back to playerInv",
                 tostring(cartId)) end)
         end
         -- Vehicle kind — VehiclePart container on a BaseVehicle (trunk,

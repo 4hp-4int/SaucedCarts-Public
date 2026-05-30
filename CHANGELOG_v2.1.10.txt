@@ -1,0 +1,26 @@
+SaucedCarts v2.1.10
+Released: 2026-05-30
+====================
+
+A one-fix hotfix for multiplayer: moving items between a held cart and a
+bag lying on the ground now works.
+
+
+BUG FIX
+-------
+
+* Multiplayer only: you couldn't move items INTO a held cart from a bag
+  lying on the ground -- you'd start the transfer and nothing would
+  happen. The reverse (moving items from a held cart OUT into a bag on
+  the ground) put them in your main inventory instead of the bag.
+
+  Both directions now work correctly. The item ends up where you told it
+  to go.
+
+  Single-player was never affected.
+
+
+COMPATIBILITY
+-------------
+
+Save-safe. No save-data changes -- safe to upgrade mid-save.

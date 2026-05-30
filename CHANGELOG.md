@@ -2,6 +2,23 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.10 — 2026-05-30 (Hotfix: ground-bag ↔ held-cart transfers in MP)
+
+### Fixed
+
+**MP: items inside a bag on the ground couldn't be moved into a held cart, and the reverse dumped them into main inventory.** On a dedicated server, dragging an item from a bag lying on the floor into a held cart silently no-op'd; dragging from the cart back out to a ground bag landed the item in the player's main inventory instead of the bag.
+
+Root cause is in the server-side reconstruction path (`CartTransferInterceptor.lua`), which only runs in MP — SP uses the live captured container ref in `ISCartTransferAction:perform()`'s else-branch and was never affected:
+
+- **`findItemNearPlayer` (the "in" direction)** descended into a dropped item's inner container only when that item was a *cart* (the `SaucedCarts.safeIsCart` guard). An item inside a plain dropped bag (backpack/duffel/crate) was therefore never located by id, so `handleCartTransfer` bailed at "item NOT FOUND" and nothing moved. Fix: descend into *any* dropped container item's inner container, not just carts.
+- **`resolveSide` "bag" branch (the "out" direction)** only resolved the containing bag from the player's own inventory tree (`findInventoryItemRecursive`). A bag on the ground isn't in that tree, so resolution fell through to `playerInv` and the item landed in main inventory. Unlike the "in" direction, this has no downstream `item:getContainer()` recovery. Fix: added a `findItemNearPlayer` ground/nearby fallback after the inventory-tree lookup.
+
+### Technical
+
+- Regression test `findItemNearPlayer_descends_into_ground_bag` added to `OfflineCartDepositTests.lua` — drives `findItemNearPlayer` directly against a non-cart bag dropped on a nearby square; red before the descent fix (returns nil), green after.
+- 267 offline tests passing (was 266 at v2.1.9).
+- Save-safe. No SCHEMA_VERSION / API_VERSION change.
+
 ## v2.1.9 — 2026-05-29 (World-spawning rework: parking-lot carts, cleaner perf, honest probabilities)
 
 ### New: outdoor parking-lot spawns

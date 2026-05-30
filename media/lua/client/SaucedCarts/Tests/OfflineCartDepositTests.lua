@@ -1425,4 +1425,78 @@ tests["fuzz_random_transfers_preserve_invariants"] = function()
     return Assert.equal(failures, 0, ITERATIONS .. " random transfers preserved all invariants")
 end
 
+-- ============================================================================
+-- BUG REPORT (2026-05): "can't take items to a held cart from a bag lying on
+-- the ground." Root cause: findItemNearPlayer's nearby-ground scan only
+-- descends into a dropped item's inner container when that item is a CART
+-- (the safeIsCart guard). A dropped NON-cart bag (backpack/duffel/etc.) is
+-- skipped, so an item inside it is never located by id → handleCartTransfer
+-- bails at "item NOT FOUND" and nothing moves.
+--
+-- This drives findItemNearPlayer directly with a ground bag holding the target
+-- item. RED before the descent fix (returns nil), GREEN after (returns item).
+-- ============================================================================
+
+-- A bag dropped on the ground: a non-cart InventoryContainer item whose inner
+-- container holds `inner`, wrapped in an IsoWorldInventoryObject on a square.
+local function makeGroundBagSquare(bagId, x, y, z, inner)
+    local bagInner = makeContainer({ typeName = "Bag" })
+    if inner then bagInner:AddItem(inner) end
+    local bagItem = { _id = bagId, _type = "InventoryContainer", _fullType = "Base.Bag_Backpack" }
+    bagItem.getID = function(self) return self._id end
+    bagItem.getFullType = function(self) return self._fullType end
+    bagItem.getItemContainer = function(self) return bagInner end
+    bagInner._containingItem = bagItem
+
+    local worldObj = { _class = "IsoWorldInventoryObject" }
+    worldObj.getItem = function(self) return bagItem end
+
+    local objs = { _o = { worldObj } }
+    objs.size = function(s) return #s._o end
+    objs.get  = function(s, i) return s._o[i + 1] end
+    return {
+        getX = function() return x end, getY = function() return y end, getZ = function() return z end,
+        getWorldObjects = function(self) return objs end,
+        getObjects = function(self) return nil end,
+        getVehicleContainer = function(self) return nil end,
+    }, bagItem
+end
+
+tests["findItemNearPlayer_descends_into_ground_bag"] = function()
+    local find = CTI.findItemNearPlayer
+    if not Assert.notNil(find, "findItemNearPlayer exposed") then return false end
+
+    local target = makeItem({ id = 7777 })
+    local bagSq = makeGroundBagSquare(5555, 11, 10, 0, target)   -- bag at (11,10), item inside
+    local playerSq = {
+        getX = function() return 10 end, getY = function() return 10 end, getZ = function() return 0 end,
+        getWorldObjects = function() return nil end, getObjects = function() return nil end,
+        getVehicleContainer = function() return nil end,
+    }
+
+    local chr = makeCharacter()
+    chr._inv = makeContainer({})              -- target is NOT carried — it's in the ground bag
+    chr.getCurrentSquare = function(self) return playerSq end
+
+    -- findItemNearPlayer needs getCell + instanceof, which the offline harness
+    -- doesn't provide — stub them for this test and restore after.
+    local realGetCell, realInstanceof = getCell, instanceof
+    getCell = function()
+        return { getGridSquare = function(self, gx, gy, gz)
+            if gx == 11 and gy == 10 then return bagSq end
+            if gx == 10 and gy == 10 then return playerSq end
+            return nil
+        end }
+    end
+    instanceof = function(o, cls) return type(o) == "table" and o._class == cls end
+
+    local ok, found = pcall(find, chr, 7777)
+
+    getCell, instanceof = realGetCell, realInstanceof
+
+    if not Assert.isTrue(ok, "findItemNearPlayer did not crash: " .. tostring(found)) then return false end
+    return Assert.equal(found, target,
+        "item inside a bag on the ground is located by findItemNearPlayer")
+end
+
 return tests
