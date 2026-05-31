@@ -1499,4 +1499,58 @@ tests["findItemNearPlayer_descends_into_ground_bag"] = function()
         "item inside a bag on the ground is located by findItemNearPlayer")
 end
 
+-- A dead body (corpse) on the ground exposing its loot container via
+-- getContainer(). Corpses live in sq:getDeadBodys(), not getObjects/
+-- getWorldObjects, so findItemNearPlayer needs a dedicated scan.
+local function makeCorpseSquare(x, y, z, inner)
+    local corpseCont = makeContainer({ typeName = "inventory" })
+    if inner then corpseCont:AddItem(inner) end
+    local body = { getContainer = function(self) return corpseCont end }
+    local bodies = { _b = { body } }
+    bodies.size = function(s) return #s._b end
+    bodies.get  = function(s, i) return s._b[i + 1] end
+    return {
+        getX = function() return x end, getY = function() return y end, getZ = function() return z end,
+        getWorldObjects = function() return nil end,
+        getObjects = function() return nil end,
+        getVehicleContainer = function() return nil end,
+        getDeadBodys = function(self) return bodies end,
+    }, corpseCont
+end
+
+tests["findItemNearPlayer_scans_dead_body_container"] = function()
+    local find = CTI.findItemNearPlayer
+    if not Assert.notNil(find, "findItemNearPlayer exposed") then return false end
+
+    local target = makeItem({ id = 8888 })
+    local corpseSq = makeCorpseSquare(12, 10, 0, target)   -- corpse at (12,10), loot inside
+    local playerSq = {
+        getX = function() return 10 end, getY = function() return 10 end, getZ = function() return 0 end,
+        getWorldObjects = function() return nil end, getObjects = function() return nil end,
+        getVehicleContainer = function() return nil end, getDeadBodys = function() return nil end,
+    }
+
+    local chr = makeCharacter()
+    chr._inv = makeContainer({})              -- target is NOT carried — it's in the corpse
+    chr.getCurrentSquare = function(self) return playerSq end
+
+    local realGetCell, realInstanceof = getCell, instanceof
+    getCell = function()
+        return { getGridSquare = function(self, gx, gy, gz)
+            if gx == 12 and gy == 10 then return corpseSq end
+            if gx == 10 and gy == 10 then return playerSq end
+            return nil
+        end }
+    end
+    instanceof = function(o, cls) return type(o) == "table" and o._class == cls end
+
+    local ok, found = pcall(find, chr, 8888)
+
+    getCell, instanceof = realGetCell, realInstanceof
+
+    if not Assert.isTrue(ok, "findItemNearPlayer did not crash: " .. tostring(found)) then return false end
+    return Assert.equal(found, target,
+        "item inside a dead body on the ground is located by findItemNearPlayer")
+end
+
 return tests

@@ -120,10 +120,12 @@ option SaucedCarts.StrictShopOnly
     translation = SaucedCarts_StrictShopOnly,
 }
 
-option SaucedCarts.EnableOutdoorSpawns
+option SaucedCarts.OutdoorSpawnDensity
 {
-    type = boolean,
-    default = true,
+    type = enum,
+    numValues = 4,
+    default = 3,
     page = SaucedCarts,
-    translation = SaucedCarts_EnableOutdoorSpawns,
+    translation = SaucedCarts_OutdoorSpawnDensity,
+    valueTranslation = SaucedCarts_OutdoorSpawnDensity,
 }

@@ -2,28 +2,28 @@
     SaucedCarts — Spawn decision dice tests
     ========================================
 
-    Locks the per-building probability model exposed by
-    SaucedCarts.decideSpawnPlacements (shared/SpawnLocations.lua):
+    Locks the pure spawn-policy functions in shared/SpawnLocations.lua:
 
+      INTERIOR (decideSpawnPlacements):
         ONE binary roll  -> "does this building spawn any carts today?"
                             (rate = MAX chance among the building's entries)
         uniform 1..max   -> "how many?"
         per-cart type     -> weighted by chance across all eligible entries
-        per-cart place    -> interior/outdoor via that type's outdoorWeight
-                            (only when parking zones exist AND it opts in)
+        Returns a list of cart-type strings (outdoor is no longer decided here).
 
-    The function is pure (no world deps) and takes an injected rng, so every
-    case is deterministic via a scripted rng. rng-call order is:
-        [1] binary roll       rng(100)
-        [2] count roll        rng(max)            -> count = 1 + result
+      OUTDOOR / ZONE (zone-anchored, mirrors vanilla AddVehicles):
+        zoneOverlapsChunk -> geometry test (IsoChunk.java:1735 port)
+        decideZoneSpawns  -> area-scaled count of carts for a vehicle zone
+        pickOutdoorCartType -> weighted cart-type pick from the outdoor pool
+
+    All functions are pure (injected rng), so every case is deterministic via a
+    scripted rng. decideSpawnPlacements rng order:
+        [1] binary roll   rng(100)
+        [2] count roll    rng(max)         -> count = 1 + result
         per cart:
-          [3] type pick        rng(totalChance)    -> ONLY when >1 entry
-          [4] outdoor roll      rng(100)            -> ONLY when outdoorReady
-                                                      AND the picked type opts in
-
-    v2.1.10 note: the single-entry case skips the type-pick roll entirely, so a
-    base-only setup (no addons) consumes the exact same RNG sequence as before
-    addon mixing existed.
+          [3] type pick    rng(totalChance) -> ONLY when >1 entry
+    The single-entry case skips the type-pick roll, keeping a base-only setup's
+    RNG sequence stable.
 ]]
 
 if isServer() and not isClient() then return end
@@ -49,14 +49,11 @@ local function scriptRng(values)
     end
 end
 
---- Assert a placements list equals expected list of { type, kind }.
-local function assertPlacements(actual, expected, label)
+--- Assert a cart-type-string list equals expected.
+local function assertTypes(actual, expected, label)
     if not Assert.equal(#actual, #expected, label .. " (length)") then return false end
     for k = 1, #expected do
-        if not Assert.equal(actual[k].type, expected[k].type, label .. " [" .. k .. "].type") then
-            return false
-        end
-        if not Assert.equal(actual[k].kind, expected[k].kind, label .. " [" .. k .. "].kind") then
+        if not Assert.equal(actual[k], expected[k], label .. " [" .. k .. "]") then
             return false
         end
     end
@@ -65,33 +62,32 @@ end
 
 local decide = SaucedCarts.decideSpawnPlacements
 
--- Convenience entry builders.
-local function E(t, chance, allowOutdoor, outdoorWeight)
-    return { type = t, chance = chance, allowOutdoor = allowOutdoor, outdoorWeight = outdoorWeight }
+-- Convenience entry builder (interior dice only care about type + chance).
+local function E(t, chance)
+    return { type = t, chance = chance }
 end
-
--- ============================================================================
--- TESTS — single entry (base-only; preserves pre-addon behavior + RNG stream)
--- ============================================================================
 
 local tests = {}
 
+-- ============================================================================
+-- INTERIOR — single entry (base-only; preserves pre-addon RNG stream)
+-- ============================================================================
+
 tests["binary_roll_fail_spawns_nothing"] = function()
     -- chance 80, mult 1 -> threshold 80. rng(100)=99 -> 99 < 80 is false.
-    local out = decide({ E("X.Cart", 80) }, 1, 1.0, false, scriptRng({ 99 }))
+    local out = decide({ E("X.Cart", 80) }, 1, 1.0, scriptRng({ 99 }))
     return Assert.equal(#out, 0, "no carts when binary roll fails")
 end
 
 tests["binary_roll_hit_cap1_one_cart"] = function()
     -- rng(100)=0 (<80 hit), rng(1)=0 -> count = 1. single entry -> no type roll.
-    local out = decide({ E("X.Cart", 80) }, 1, 1.0, false, scriptRng({ 0, 0 }))
-    return assertPlacements(out, { { type = "X.Cart", kind = "interior" } },
-        "cap=1 hit yields one interior X.Cart")
+    local out = decide({ E("X.Cart", 80) }, 1, 1.0, scriptRng({ 0, 0 }))
+    return assertTypes(out, { "X.Cart" }, "cap=1 hit yields one X.Cart")
 end
 
 tests["count_is_one_plus_count_roll"] = function()
     for k = 0, 4 do
-        local out = decide({ E("X.Cart", 100) }, 5, 1.0, false, scriptRng({ 0, k }))
+        local out = decide({ E("X.Cart", 100) }, 5, 1.0, scriptRng({ 0, k }))
         if not Assert.equal(#out, 1 + k, "count = 1 + rng(max) for k=" .. k) then
             return false
         end
@@ -99,94 +95,138 @@ tests["count_is_one_plus_count_roll"] = function()
     return true
 end
 
-tests["outdoor_not_ready_all_interior"] = function()
-    -- Even with outdoorWeight 100, outdoorReady=false forces interior and skips
-    -- the per-cart outdoor roll (only binary + count consumed).
-    local out = decide({ E("X.Cart", 100, true, 100) }, 3, 1.0, false, scriptRng({ 0, 2 }))
-    return assertPlacements(out, {
-        { type = "X.Cart", kind = "interior" },
-        { type = "X.Cart", kind = "interior" },
-        { type = "X.Cart", kind = "interior" },
-    }, "outdoorReady=false -> all interior")
-end
-
-tests["outdoor_weight_100_all_outdoor"] = function()
-    -- count = 3; each per-cart rng(100)=0 < 100 -> outdoor.
-    local out = decide({ E("X.Cart", 100, true, 100) }, 3, 1.0, true, scriptRng({ 0, 2, 0, 0, 0 }))
-    return assertPlacements(out, {
-        { type = "X.Cart", kind = "outdoor" },
-        { type = "X.Cart", kind = "outdoor" },
-        { type = "X.Cart", kind = "outdoor" },
-    }, "weight=100 -> all outdoor")
-end
-
-tests["outdoor_weight_0_all_interior"] = function()
-    -- count = 3; per-cart rng(100)=0 but 0 < 0 is false -> interior. The outdoor
-    -- roll IS consumed (the type opts in + zones ready), it just never wins.
-    local out = decide({ E("X.Cart", 100, true, 0) }, 3, 1.0, true, scriptRng({ 0, 2, 0, 0, 0 }))
-    return assertPlacements(out, {
-        { type = "X.Cart", kind = "interior" },
-        { type = "X.Cart", kind = "interior" },
-        { type = "X.Cart", kind = "interior" },
-    }, "weight=0 -> all interior")
-end
-
-tests["outdoor_weight_defaults_to_30"] = function()
-    -- No outdoorWeight -> default 30. count = 2; rolls 29 (<30 outdoor), 30 (interior).
-    local out = decide({ E("X.Cart", 100, true, nil) }, 2, 1.0, true, scriptRng({ 0, 1, 29, 30 }))
-    return assertPlacements(out, {
-        { type = "X.Cart", kind = "outdoor" },
-        { type = "X.Cart", kind = "interior" },
-    }, "nil outdoorWeight defaults to 30")
+tests["single_entry_skips_type_roll"] = function()
+    -- Only binary + count rolls are consumed for a single entry. A 3rd scripted
+    -- value of 999 (out of range) would surface if a type roll were taken.
+    local out = decide({ E("X.Cart", 100) }, 1, 1.0, scriptRng({ 0, 0, 999 }))
+    return assertTypes(out, { "X.Cart" }, "single entry consumes no type roll")
 end
 
 tests["multiplier_scales_threshold_up"] = function()
     -- chance 50 x mult 2.0 -> threshold 100; rng(100)=99 < 100 -> spawns.
-    local out = decide({ E("X.Cart", 50) }, 1, 2.0, false, scriptRng({ 99, 0 }))
+    local out = decide({ E("X.Cart", 50) }, 1, 2.0, scriptRng({ 99, 0 }))
     return Assert.equal(#out, 1, "mult 2.0 lifts threshold to 100, 99 still hits")
 end
 
 tests["multiplier_zero_never_spawns"] = function()
-    local out = decide({ E("X.Cart", 50, true) }, 5, 0.0, true, scriptRng({ 0 }))
+    local out = decide({ E("X.Cart", 50) }, 5, 0.0, scriptRng({ 0 }))
     return Assert.equal(#out, 0, "mult 0 -> threshold 0 -> never spawns")
 end
 
 -- ============================================================================
--- TESTS — multiple entries (addon carts mix with the built-in cart)
+-- INTERIOR — multiple entries (addon carts mix with the built-in cart)
 -- ============================================================================
 
 tests["building_hitrate_is_max_chance_not_sum"] = function()
     -- base 80 + addon 20. Hit rate must be MAX (80), not SUM (100). rng(100)=85:
     -- 85 < 80 is false -> no spawn. (If it summed, 85 < 100 would spawn.)
-    local out = decide({ E("BASE", 80), E("ADDON", 20) }, 1, 1.0, false, scriptRng({ 85 }))
+    local out = decide({ E("BASE", 80), E("ADDON", 20) }, 1, 1.0, scriptRng({ 85 }))
     return Assert.equal(#out, 0, "hit rate uses MAX chance (80), not SUM")
 end
 
 tests["weighted_pick_low_roll_selects_base"] = function()
-    -- base 80 + addon 20 (total 100). binary 0 (hit), count rng(1)=0 -> 1,
-    -- type roll rng(100)=50 -> cum 80 (50<80) -> BASE.
-    local out = decide({ E("BASE", 80), E("ADDON", 20) }, 1, 1.0, false, scriptRng({ 0, 0, 50 }))
-    return assertPlacements(out, { { type = "BASE", kind = "interior" } },
-        "type roll 50 lands in BASE's [0,80) band")
+    -- binary 0 (hit), count rng(1)=0 -> 1, type roll rng(100)=50 -> cum 80 -> BASE.
+    local out = decide({ E("BASE", 80), E("ADDON", 20) }, 1, 1.0, scriptRng({ 0, 0, 50 }))
+    return assertTypes(out, { "BASE" }, "type roll 50 lands in BASE's [0,80) band")
 end
 
 tests["weighted_pick_high_roll_selects_addon"] = function()
     -- type roll rng(100)=90 -> cum 80 (no), 100 (90<100) -> ADDON.
-    local out = decide({ E("BASE", 80), E("ADDON", 20) }, 1, 1.0, false, scriptRng({ 0, 0, 90 }))
-    return assertPlacements(out, { { type = "ADDON", kind = "interior" } },
-        "type roll 90 lands in ADDON's [80,100) band")
+    local out = decide({ E("BASE", 80), E("ADDON", 20) }, 1, 1.0, scriptRng({ 0, 0, 90 }))
+    return assertTypes(out, { "ADDON" }, "type roll 90 lands in ADDON's [80,100) band")
 end
 
-tests["outdoor_only_for_opted_in_type"] = function()
-    -- OUT opts into outdoor (weight 100); IN does not. zones ready.
-    -- Cart 1: type roll 10 (<50) -> OUT; outdoor roll 0 (<100) -> outdoor.
-    -- Cart 2: type roll 60 (>=50) -> IN; IN doesn't opt in -> no outdoor roll, interior.
-    local entries = { E("OUT", 50, true, 100), E("IN", 50) }
-    local out = decide(entries, 2, 1.0, true, scriptRng({ 0, 1, 10, 0, 60 }))
-    return assertPlacements(out, {
-        { type = "OUT", kind = "outdoor" },
-        { type = "IN", kind = "interior" },
-    }, "only the opted-in type consumes the outdoor roll / can go outside")
+-- ============================================================================
+-- ZONE — zoneOverlapsChunk (geometry; port of IsoChunk.java:1735)
+-- ============================================================================
+-- Chunk (cx,cy) covers tiles [cx*8 .. cx*8+7] on each axis.
+
+local overlaps = SaucedCarts.zoneOverlapsChunk
+
+tests["zone_inside_chunk_overlaps"] = function()
+    return Assert.isTrue(overlaps(0, 0, 4, 4, 0, 0), "zone fully inside chunk 0,0")
+end
+
+tests["zone_in_other_chunk_no_overlap"] = function()
+    -- zone at tiles 10..11 is in chunk 1, not chunk 0.
+    if not Assert.isFalse(overlaps(10, 10, 2, 2, 0, 0), "zone in chunk 1 doesn't hit chunk 0") then
+        return false
+    end
+    return Assert.isTrue(overlaps(10, 10, 2, 2, 1, 1), "...but does hit chunk 1,1")
+end
+
+tests["zone_boundary_belongs_to_higher_chunk"] = function()
+    -- tile x=8 is the first tile of chunk 1, not the last of chunk 0.
+    if not Assert.isFalse(overlaps(8, 0, 2, 2, 0, 0), "tile 8 not in chunk 0") then return false end
+    return Assert.isTrue(overlaps(8, 0, 2, 2, 1, 0), "tile 8 is in chunk 1")
+end
+
+tests["zone_spanning_two_chunks_hits_both"] = function()
+    -- tiles 6..9 straddle chunk 0 (0..7) and chunk 1 (8..15).
+    if not Assert.isTrue(overlaps(6, 0, 4, 2, 0, 0), "straddling zone hits chunk 0") then return false end
+    return Assert.isTrue(overlaps(6, 0, 4, 2, 1, 0), "straddling zone hits chunk 1")
+end
+
+-- ============================================================================
+-- ZONE — decideZoneSpawns (area-scaled count)
+-- ============================================================================
+
+local decideZone = SaucedCarts.decideZoneSpawns
+
+tests["zone_driveway_one_roll"] = function()
+    -- area 15 < areaPerRoll 16 -> rolls clamps up to 1. chance 100 -> hit.
+    local n = decideZone(15, 100, 1.0, 2, 16, scriptRng({ 0 }))
+    return Assert.equal(n, 1, "small driveway gets exactly one roll")
+end
+
+tests["zone_big_lot_capped_by_max"] = function()
+    -- area 100 -> floor(100/16)=6 rolls, capped to maxPerZone=2. Both hit.
+    local n = decideZone(100, 100, 1.0, 2, 16, scriptRng({ 0, 0 }))
+    return Assert.equal(n, 2, "big area capped at maxPerChunk")
+end
+
+tests["zone_chance_gates_each_roll"] = function()
+    -- area 16 -> 1 roll. chance 25, rng(100)=50 -> 50 < 25 false -> 0.
+    local n = decideZone(16, 25, 1.0, 2, 16, scriptRng({ 50 }))
+    return Assert.equal(n, 0, "roll above chance places nothing")
+end
+
+tests["zone_multiplier_scales_chance"] = function()
+    -- chance 25 x mult 2 -> threshold 50. rng(100)=40 < 50 -> hit.
+    local n = decideZone(16, 25, 2.0, 2, 16, scriptRng({ 40 }))
+    return Assert.equal(n, 1, "multiplier lifts the per-roll threshold")
+end
+
+tests["zone_partial_hits"] = function()
+    -- area 64 -> floor(64/16)=4 rolls, cap 5. rolls hit/miss/hit/miss.
+    local n = decideZone(64, 50, 1.0, 5, 16, scriptRng({ 0, 99, 0, 99 }))
+    return Assert.equal(n, 2, "counts only the rolls that hit")
+end
+
+-- ============================================================================
+-- ZONE — pickOutdoorCartType (weighted pool pick)
+-- ============================================================================
+
+local pickType = SaucedCarts.pickOutdoorCartType
+
+tests["pool_single_entry_no_roll"] = function()
+    local t = pickType({ { type = "ONLY", weight = 100 } }, scriptRng({ 999 }))
+    return Assert.equal(t, "ONLY", "single-entry pool returns it without rolling")
+end
+
+tests["pool_weighted_low_roll"] = function()
+    -- A:80 B:20 (total 100). rng(100)=50 -> cum 80 -> A.
+    local t = pickType({ { type = "A", weight = 80 }, { type = "B", weight = 20 } }, scriptRng({ 50 }))
+    return Assert.equal(t, "A", "roll 50 lands in A's band")
+end
+
+tests["pool_weighted_high_roll"] = function()
+    local t = pickType({ { type = "A", weight = 80 }, { type = "B", weight = 20 } }, scriptRng({ 90 }))
+    return Assert.equal(t, "B", "roll 90 lands in B's band")
+end
+
+tests["pool_empty_returns_nil"] = function()
+    return Assert.isTrue(pickType({}, scriptRng({ 0 })) == nil, "empty pool -> nil")
 end
 
 return tests

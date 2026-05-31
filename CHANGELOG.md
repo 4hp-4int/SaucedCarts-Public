@@ -2,6 +2,31 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.11 — 2026-05-31 (Zone-anchored outdoor spawns, wider interior coverage, corpse-loot transfer fix)
+
+### New / Improved
+
+**Outdoor cart spawns reworked to be zone-anchored.** Carts now spawn in the same map *vehicle zones* vanilla uses to spawn cars — store parking lots, residential driveways, trailer-park parking — instead of the old building-ring outdoor scan that almost never actually placed a cart outside. Per chunk, `LoadChunk` scans for an overlapping `VehicleZone` (`getVehicleZoneAt`, stride-2), mirroring `IsoChunk.AddVehicles`, then makes one decision per chunk deduped against a new `decidedZones` ModData table. New sandbox option **"Outdoor Cart Spawns"** (Off / Low / Medium / High, default Medium ≈ 3% per parking chunk) scales with Spawn Rate. Replaces the old per-building `allowOutdoor`/`outdoorWeight` ring-scan + deferral model.
+
+**Interior coverage expanded 36 → 83 rooms.** Added drugstores, toy stores, hardware/auto/BBQ/paint, gas marts, back-of-house storage, industrial docks, and garages. The spawn floor was also raised so the *frequent* building types (storage units, garages, secondary retail) reliably produce carts at the default rate instead of almost never.
+
+**Multi-room buildings roll at their best room's chance.** A building that contains several cart-eligible room types now uses the *highest* `chance` among them, so a gigamart that also contains a low-chance lobby is no longer dragged down to the lobby's rate.
+
+**Addon cart types mix into outdoor spawns by default.** Registered cart types now feed BOTH interior and outdoor (vehicle-zone) spawns with no addon change required. Set `registerCart{ outdoorWeight = 0 }` to opt a cart out of outdoor placement. `outdoorWeight` defaults to 100 (interior-and-outdoor); it is additive and optional, so old addons keep loading unchanged.
+
+### Fixed
+
+**MP: looting an item from a zombie/corpse straight into a held cart silently did nothing.** The server-side `findItemNearPlayer` reconstruction didn't scan dead-body containers, so an item dragged from a corpse's inventory into a held cart was never located by id and the transfer no-op'd. It now descends into nearby dead-body containers and the item transfers correctly. Same class of bug as the v2.1.10 ground-bag fix.
+
+**Debug-mode-only crash when an outdoor-eligible building found no parking nearby** — a dangling nil reference inside a logging closure. Only reachable with debug logging enabled; fixed.
+
+### Technical
+
+- **Zone-anchored outdoor placement.** `getVehicleZoneAt` per-chunk stride-2 scan; per-chunk decision keyed in a new `decidedZones` world-ModData table (lazy-created, additive, save-safe). `decideSpawnPlacements` simplified to interior-only. New pure, offline-tested helpers: `zoneOverlapsChunk`, `decideZoneSpawns`, `pickOutdoorCartType`. Retired the building→outdoor coupling (ring scan, deferral, `pendingBuildings`).
+- World-spawning remains server-only — clients do no spawn work and there is no ModData transmit.
+- 276 offline tests passing (was 267 at v2.1.10). Added a corpse-loot regression plus zone-helper coverage; removed the obsolete per-room outdoor tests.
+- Save-safe. No SCHEMA_VERSION / API_VERSION change. `decidedZones` is additive world ModData (no migration); `outdoorWeight` on `registerCart` is optional with a default (no API break).
+
 ## v2.1.10 — 2026-05-30 (Hotfix: ground-bag ↔ held-cart transfers in MP)
 
 ### Fixed

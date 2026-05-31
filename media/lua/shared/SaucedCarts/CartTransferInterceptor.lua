@@ -684,6 +684,34 @@ local function findItemNearPlayer(player, itemId, radius)
         end
     end
 
+    -- v2.1.11: scan nearby dead bodies' loot containers. Looting an item from a
+    -- zombie/corpse into a held cart is an "in" transfer whose src is the
+    -- corpse's ItemContainer (IsoDeadBody:getContainer()). Corpses live in
+    -- sq:getDeadBodys(), NOT getObjects()/getWorldObjects(), so every scan above
+    -- misses them — without this, corpse -> cart silently no-ops in MP (the
+    -- server can't locate the item; the "not found" log is .debug(), suppressed
+    -- on dedi). Once found, the "in" defensive fallback (item:getContainer())
+    -- recovers the corpse as the real src container. SP uses the live captured
+    -- ref in :perform's else-branch and was never affected.
+    for dy = -radius, radius do
+        for dx = -radius, radius do
+            local sq = getCell():getGridSquare(psq:getX() + dx, psq:getY() + dy, psq:getZ())
+            if sq and sq.getDeadBodys then
+                local bodies = sq:getDeadBodys()
+                if bodies then
+                    for i = 0, bodies:size() - 1 do
+                        local body = bodies:get(i)
+                        local cont = body and body.getContainer and body:getContainer()
+                        if cont and cont.getItemById then
+                            local inside = cont:getItemById(itemId)
+                            if inside then return inside end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     return nil
 end
 

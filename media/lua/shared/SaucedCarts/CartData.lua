@@ -39,6 +39,7 @@ require "SaucedCarts/Core"
 ---@field repairXpGain number XP awarded per successful repair (default: 3)
 ---@field spawnRooms SpawnRoomEntry[] Room-based spawn locations with probabilities
 ---@field spawnWeight number Relative spawn weight for vehicle distributions
+---@field outdoorWeight number Relative weight in the outdoor vehicle-zone spawn pool (parking lots / driveways). Defaults to 100, so any registered cart mixes into outdoor spawns alongside the base ShoppingCart. Set 0 to opt OUT (interior-only). Independent of spawnRooms.
 ---@field visualModels VisualModels|nil Custom model names for fill states (optional)
 ---@field canHaveFlashlight boolean|nil Can install flashlight upgrade (default: true)
 ---@field upgradeModels UpgradeModels|nil Model overrides for upgraded states
@@ -62,6 +63,7 @@ SaucedCarts.CartTypes = {
         -- This field is for addons to define custom spawn locations
         spawnRooms = {},
         spawnWeight = 6,  -- Weight for vehicle distributions
+        outdoorWeight = 100,  -- Base cart anchors the outdoor vehicle-zone pool
         -- Visual models for fill states (must match model definitions in scripts)
         visualModels = {
             empty = "ShoppingCartModel",
@@ -103,6 +105,8 @@ local CART_DEFAULTS = {
     repairXpGain = 3,  -- XP awarded per successful repair
     spawnRooms = {},  -- Room-based spawning (array of {room, chance})
     spawnWeight = 1,
+    outdoorWeight = 100,  -- Default-in: registered carts join the outdoor pool
+                          -- (mix in lots/driveways). Set 0 to opt OUT.
     visualModels = nil,  -- nil = use convention-based naming (see CartVisuals.lua)
     canHaveFlashlight = true,  -- true = can install flashlight upgrade
     upgradeModels = nil,  -- nil = use standard fill-state models when upgraded
@@ -128,6 +132,7 @@ local FIELD_TYPES = {
     repairXpGain = "number",
     spawnRooms = "table",  -- Array of {room, chance} entries
     spawnWeight = "number",
+    outdoorWeight = "number",  -- Outdoor vehicle-zone pool weight (0 = none)
     visualModels = "table",  -- {empty, partial, full} model names
     canHaveFlashlight = "boolean",  -- Can install flashlight upgrade
     upgradeModels = "table",  -- {flashlight} with {empty, partial, full}
@@ -145,6 +150,7 @@ local FIELD_RANGES = {
     repairTimeBase = {10, 500},  -- Ticks (10 = instant-ish, 500 = very long)
     repairXpGain = {0, 50},  -- 0 = no XP, 50 = max
     spawnWeight = {0, 100},
+    outdoorWeight = {0, 100},
 }
 
 -- =============================================================================

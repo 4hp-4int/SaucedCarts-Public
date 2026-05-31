@@ -1,0 +1,61 @@
+SaucedCarts v2.1.11
+Released: 2026-05-31
+====================
+
+A world-spawning update -- carts now appear in real parking lots and
+driveways, many more building types stock them, and a multiplayer
+corpse-looting bug is fixed.
+
+
+WHAT'S NEW
+----------
+
+* Outdoor carts now spawn in actual PARKING LOTS and DRIVEWAYS. Carts
+  use the same map "vehicle zones" the game uses to place abandoned
+  cars -- store parking lots, residential driveways, trailer-park
+  parking. The old version tried to scatter them around the edges of
+  buildings and almost never managed to put one outside; now they land
+  where you'd actually expect to find an abandoned cart.
+
+* New sandbox option: "Outdoor Cart Spawns" -- Off / Low / Medium /
+  High (default Medium). Turn it down or off if you want fewer carts
+  outdoors, up if you want more. It scales along with your Spawn Rate
+  setting.
+
+* Many more buildings stock carts. Coverage grew from 36 room types to
+  83 -- drugstores, toy stores, hardware / auto / BBQ / paint shops,
+  gas-station marts, back-of-house storage, industrial docks, and
+  garages. Common buildings like storage units and garages now
+  reliably turn up carts at the default rate instead of almost never.
+
+* Buildings with several stockrooms now use their BEST room's spawn
+  chance. A big store that happens to also contain a low-chance room
+  (like a lobby) no longer gets dragged down to that low rate.
+
+* Addon carts ride along automatically. Cart types added by other mods
+  now mix into both indoor and outdoor (parking-lot) spawns with no
+  extra work -- addon authors can opt a cart out of outdoors with
+  outdoorWeight = 0 on registerCart.
+
+
+BUG FIXES
+---------
+
+* Multiplayer only: looting an item directly from a zombie or corpse
+  into a held cart did nothing -- you'd start the transfer and the item
+  would stay put. It now transfers correctly. (Same kind of bug as the
+  ground-bag fix in v2.1.10.)
+
+* Fixed a crash that could only happen with debug logging turned on,
+  when an outdoor-eligible building had no parking nearby.
+
+
+COMPATIBILITY
+-------------
+
+Save-safe. No save-data changes -- safe to upgrade mid-save. Existing
+carts and saves are unaffected.
+
+Addon authors: the cart-registration API is unchanged. registerCart
+gained an optional `outdoorWeight` field (default 100; set 0 to keep a
+cart indoor-only) -- existing addons keep working without changes.

@@ -61,20 +61,21 @@ local tickCounter = 0
 -- chunks, so the LoadChunk handler does an O(1) lookup instead of walking the
 -- chunk's 64 squares to discover rooms.
 --
---   candidateBuildings: bkey -> { def, roomName, entries, anyOutdoor }
---     One record per cart-eligible BuildingDef. `entries` is ALL eligible spawn
---     entries for the building (deduped by cart type, across every cart-eligible
---     room it contains) so addon-registered cart types mix with the built-in
---     cart at decision time (see decideSpawnPlacements). `anyOutdoor` is true if
---     any of those entries opts into parking-lot placement. `roomName` is the
---     first matched room, kept for the interior debug tag only. (Rooms are
---     re-walked from the def at decision time — see pickInteriorSquare — so a
---     gigamart's many "gigamart"-named rects all contribute placement squares.)
+--   candidateBuildings: bkey -> { def, roomName, entries }
+--     One record per cart-eligible BuildingDef, for INTERIOR spawns only
+--     (outdoor placement is zone-anchored — see the vehicle-zone pass in
+--     onLoadChunk). `entries` is ALL eligible spawn entries for the building
+--     (merged per cart type across every cart-eligible room, keeping the max
+--     chance) so addon cart types mix with the built-in cart at decision time
+--     (see decideSpawnPlacements). `roomName` is the first matched room, kept
+--     for the debug tag only. (Rooms are re-walked from the def at decision
+--     time — see pickInteriorSquare — so a gigamart's many "gigamart"-named
+--     rects all contribute placement squares.)
 --
 --   chunkBuildingIndex: "chunkX,chunkY" -> { bkey, ... }
 --     Reverse lookup. Most chunks have no entry (instant early-return);
 --     chunks with at least one cart-eligible building yield a small list.
----@type table<string, {def: any, roomName: string, entries: SpawnEntry[], anyOutdoor: boolean}>
+---@type table<string, {def: any, roomName: string, entries: SpawnEntry[]}>
 local candidateBuildings = {}
 ---@type table<string, string[]>
 local chunkBuildingIndex = {}
@@ -105,6 +106,12 @@ local function getSpawnData()
         data.schemaVersion = SCHEMA_VERSION
         SaucedCarts.debug("WorldSpawning: Created new ModData")
     end
+
+    -- Per-zone outdoor dedup (v2.1.11+). Additive namespace alongside
+    -- spawnedBuildings (interior) — no schema bump, no migration: a save that
+    -- predates zone spawning simply starts with an empty table and accumulates
+    -- zone decisions as chunks load.
+    if not data.decidedZones then data.decidedZones = {} end
 
     -- Migrate if needed (v1 -> v2: boolean to count)
     local version = data.schemaVersion or 0
@@ -144,6 +151,14 @@ end
 ---@return table<string, number> Building keys to spawn counts
 local function getSpawnedBuildings()
     return getSpawnData().spawnedBuildings
+end
+
+--- Get the decidedZones table (lazy access). Keyed by parking-chunk
+--- ("cx,cy") — one decision per chunk that contains parking — value = carts
+--- placed (0 = decided, none placed).
+---@return table<string, number>
+local function getDecidedZones()
+    return getSpawnData().decidedZones
 end
 
 --- Persistence chokepoint for spawnedBuildings.
@@ -366,33 +381,21 @@ end
 -- EVENT HANDLERS
 -- ============================================================================
 
--- Outdoor-pool ring radius in tiles, scanned around a building's bounding box
--- when deciding it. 12 = 1.5 chunk-widths, catches typical adjacent-chunk
--- parking. The dominant constraint is "are adjacent chunks loaded yet?" (see
--- pendingBuildings deferral below), not the radius itself. Cheap O(N^2) but
--- bounded by building size + radius.
-local OUTDOOR_RING_RADIUS = 12
-
--- How many LoadChunk events to wait before giving up on finding outdoor
--- candidates and committing the building as interior-only. The building's
--- interior chunk almost always fires LoadChunk BEFORE the adjacent parking-lot
--- chunks stream in (chunks load nearest-to-player first; entering a store
--- means the interior is loaded first, parking comes second as the player turns
--- around or reloads the cell). Deferring 6 LoadChunks gives surrounding
--- chunks enough time to stream before we settle for interior-only.
-local MAX_OUTDOOR_DEFER = 6
-
--- Buildings whose decision is in flight: indexed (chunk overlap matched) but
--- not yet committed. Holds the per-building chosen entry/room + an attempts
--- counter to drive the outdoor defer. Session-scoped — entries don't survive
--- a game-end, and they don't need to: the building's persistent record in
--- spawnedBuildings is also absent, so a session restart simply re-rolls.
----@type table<string, {data: table, attempts: number}>
-local pendingBuildings = {}
--- Lua 5.1 has `next` for emptiness checks but Kahlua under PZ does not expose
--- it as a global in our scope. Maintain an explicit counter at every
--- insert/remove site so onLoadChunk's phase-2 fast-path stays O(1).
-local pendingCount = 0
+-- Outdoor (vehicle-zone) spawning. We decide ONE roll per CHUNK that contains
+-- parking, NOT per zone — a real lot is subdivided into dozens of tiny
+-- ParkingStall zones (5x3 each), so rolling per zone floods it. Density then
+-- scales with lot AREA (number of parking chunks) instead of stall COUNT.
+-- Area-scaled within a chunk: ~one roll per AREA_PER_ROLL parking sample tiles
+-- (stride-2 samples, so a full chunk yields up to ~16/AREA_PER_ROLL rolls),
+-- capped by MAX_CARTS_PER_CHUNK.
+local OUTDOOR_AREA_PER_ROLL = 8
+-- Per-parking-chunk spawn chance by the OutdoorSpawnDensity sandbox enum
+-- (1=Off, 2=Low, 3=Medium, 4=High). Medium (3%) is the default — tuned from
+-- live logs (≈1 in 10 lots has a cart across a fully-explored district). All
+-- still scale with SpawnRate (the player's global lever).
+local OUTDOOR_DENSITY_CHANCE = { [1] = 0, [2] = 1, [3] = 3, [4] = 8 }
+local OUTDOOR_DENSITY_DEFAULT = 3  -- Medium
+local MAX_CARTS_PER_CHUNK = 2
 
 -- VehicleZone types we REJECT as outdoor placements. Everything else is a
 -- parking lot of some flavor (parkingstall is the default, medium/good/bad
@@ -406,85 +409,6 @@ local OUTDOOR_ZONE_TYPE_DENY = {
     trafficjamn = true, trafficjams = true,
     normalburnt = true, specialburnt = true,
 }
-
---- Walk a building's perimeter ring ONCE and collect the distinct
---- `VehicleZone` objects (filtered to parking-lot types) overlapping it.
---- Cached on the candidate's `outdoorZones` field. Subsequent decisions
---- reuse the cache — no more 1000-lookup ring scans per attempt.
----
---- Pure geometry: uses only the global `getVehicleZoneAt(x,y,z)` (queries
---- the metagrid's pre-loaded zone AABBs — does NOT require chunks to be
---- streamed). Safe to call from a LoadChunk before adjacent chunks load.
----@param data table candidate-building entry from candidateBuildings
----@return table|nil list of VehicleZone refs (or nil if none)
-local function buildOutdoorZones(data)
-    if data.outdoorZonesCached then return data.outdoorZones end
-    data.outdoorZonesCached = true
-    if not data.anyOutdoor or not getVehicleZoneAt then return nil end
-
-    local def = data.def
-    local bx, by = def:getX(), def:getY()
-    local bw, bh = def:getW(), def:getH()
-    local r = OUTDOOR_RING_RADIUS
-    local x0, x1 = bx - r, bx + bw + r - 1
-    local y0, y1 = by - r, by + bh + r - 1
-    local zones
-    local typesSeen = {}
-    local seen = {}  -- "zx,zy" dedup key — Kahlua-safe (userdata as table key
-                     -- is unreliable; build a string key from zone origin).
-    for ny = y0, y1 do
-        for nx = x0, x1 do
-            if nx < bx or nx >= bx + bw or ny < by or ny >= by + bh then
-                local zone = getVehicleZoneAt(nx, ny, 0)
-                if zone then
-                    local key = zone:getX() .. "," .. zone:getY()
-                    if not seen[key] then
-                        seen[key] = true
-                        -- getType returns the explicit type or "parkingstall"
-                        -- as the documented default. PZ may return it with
-                        -- mixed case (e.g., "ParkingStall", "TrafficJamN") —
-                        -- normalize to lowercase before comparing the deny list.
-                        local raw = (zone.getType and zone:getType()) or "parkingstall"
-                        local ztype = string.lower(raw)
-                        typesSeen[raw] = (typesSeen[raw] or 0) + 1
-                        if not OUTDOOR_ZONE_TYPE_DENY[ztype] then
-                            zones = zones or {}
-                            zones[#zones + 1] = zone
-                        end
-                    end
-                end
-            end
-        end
-    end
-    data.outdoorZones = zones
-    SaucedCarts.debug(function()
-        local typeSummary = {}
-        for t, n in pairs(typesSeen) do typeSummary[#typeSummary + 1] = t .. ":" .. n end
-        return string.format(
-            "  outdoor zone cache bldg=%d,%d -> %d accepted zone(s) [types: %s]",
-            bx, by, zones and #zones or 0,
-            #typeSummary > 0 and table.concat(typeSummary, ",") or "none")
-    end)
-    return zones
-end
-
---- Pick a free outdoor placement square from the building's cached zones.
---- Asks PZ's `Zone:getRandomFreeSquareInZone` for a candidate; falls back to
---- nil if no zone's chunks are streamed yet (caller defers).
----@param data table
----@return IsoGridSquare|nil
-local function pickOutdoorSquare(data)
-    local zones = buildOutdoorZones(data)
-    if not zones or #zones == 0 then return nil end
-    -- Try each zone (up to first-pass count). Most allowOutdoor buildings
-    -- have 1-2 zones; the loop is tiny.
-    for _ = 1, #zones do
-        local z = zones[ZombRand(#zones) + 1]
-        local sq = z.getRandomFreeSquareInZone and z:getRandomFreeSquareInZone()
-        if sq and isValidSpawnSquare(sq) then return sq end
-    end
-    return nil
-end
 
 --- Pick a placement square from any of the building's cart-eligible rooms.
 --- Walks RoomDefs in order; for each whose name matches a registered spawn
@@ -548,8 +472,19 @@ local function initBuildingIndex()
             -- by cart type, so addon carts mix with the built-in cart. (A type
             -- can appear in two of the building's rooms — gigamart + gigamart-
             -- kitchen — so the seenTypes guard keeps it single-weighted.)
-            local matchedEntries, matchedRoomName, anyOutdoor
-            local seenTypes = {}
+            -- Merge eligible entries PER cart type across every room in the
+            -- building, keeping the BEST one — not whichever room PZ happens to
+            -- enumerate first. A single BuildingDef often contains many rooms
+            -- with different names (e.g. gigamart + grocerystorage + lobby); for
+            -- a given cart type we want the building to roll at its MAX chance
+            -- and to inherit the outdoor opt-in (max outdoorWeight) if ANY of its
+            -- rooms allows it. Without the merge, a gigamart that also has a
+            -- low-chance lobby could roll at 2% with no outdoor just because the
+            -- lobby room sorted first. Dedup-by-type (vs. one entry per room)
+            -- still keeps decideSpawnPlacements' weighted type pick from
+            -- double-counting a type present in several of the building's rooms.
+            local byType, typeOrder = {}, {}
+            local matchedRoomName
             for j = 0, rooms:size() - 1 do
                 local room = rooms:get(j)
                 local roomName = room and room.getName and room:getName()
@@ -557,17 +492,33 @@ local function initBuildingIndex()
                     local roomEntries = SaucedCarts.getSpawnEntriesForRoom(roomName)
                     if roomEntries then
                         for _, entry in ipairs(roomEntries) do
-                            if not seenTypes[entry.type]
-                                and SaucedCarts.evaluateSpawnEligibility(wrap, entry).allowed then
-                                seenTypes[entry.type] = true
-                                matchedEntries = matchedEntries or {}
-                                matchedEntries[#matchedEntries + 1] = entry
-                                matchedRoomName = matchedRoomName or roomName
-                                if entry.allowOutdoor then anyOutdoor = true end
+                            if SaucedCarts.evaluateSpawnEligibility(wrap, entry).allowed then
+                                local agg = byType[entry.type]
+                                if not agg then
+                                    agg = {
+                                        type                 = entry.type,
+                                        chance               = entry.chance,
+                                        allowResidential     = entry.allowResidential or nil,
+                                        skipFrameworkFilters = entry.skipFrameworkFilters or nil,
+                                    }
+                                    byType[entry.type] = agg
+                                    typeOrder[#typeOrder + 1] = entry.type
+                                    matchedRoomName = matchedRoomName or roomName
+                                else
+                                    if entry.chance > agg.chance then agg.chance = entry.chance end
+                                    if entry.allowResidential then agg.allowResidential = true end
+                                    if entry.skipFrameworkFilters then agg.skipFrameworkFilters = true end
+                                end
                             end
                         end
                     end
                 end
+            end
+
+            local matchedEntries
+            for _, t in ipairs(typeOrder) do
+                matchedEntries = matchedEntries or {}
+                matchedEntries[#matchedEntries + 1] = byType[t]
             end
 
             if matchedEntries then
@@ -577,7 +528,6 @@ local function initBuildingIndex()
                     def = def,
                     roomName = matchedRoomName,
                     entries = matchedEntries,
-                    anyOutdoor = anyOutdoor == true,
                 }
 
                 -- Enumerate chunks via the bounding rect, confirm with
@@ -665,92 +615,122 @@ local function onLoadChunk(chunk)
     end
 
     local key = cx .. "," .. cy
-    local candidateKeys = chunkBuildingIndex[key]
-
-    -- Phase 1: stash any not-yet-decided candidates from this chunk as pending.
-    if candidateKeys then
-        local buildings = getSpawnedBuildings()
-        for _, bkey in ipairs(candidateKeys) do
-            if buildings[bkey] == nil and not pendingBuildings[bkey] then
-                pendingBuildings[bkey] = {
-                    data = candidateBuildings[bkey],
-                    attempts = 0,
-                }
-                pendingCount = pendingCount + 1
-            end
-        end
-    end
-
-    -- Phase 2: walk ALL pending buildings (across earlier chunks too) and
-    -- decide each as soon as outdoor scan succeeds, or after MAX_OUTDOOR_DEFER
-    -- attempts. Entries without allowOutdoor decide on first pass.
-    if pendingCount == 0 then return end
 
     local multiplier = 1.0
     if SandboxVars.SaucedCarts and SandboxVars.SaucedCarts.SpawnRate then
         multiplier = SandboxVars.SaucedCarts.SpawnRate / 100
     end
-    local outdoorEnabledGlobally =
-        (not SandboxVars.SaucedCarts or SandboxVars.SaucedCarts.EnableOutdoorSpawns ~= false)
-        and (SaucedCarts.anyEntryAllowsOutdoor and SaucedCarts.anyEntryAllowsOutdoor())
 
-    local buildings = getSpawnedBuildings()
-    local committed = false
-    local max = getMaxCartsPerBuilding()
-
-    for bkey, pending in pairs(pendingBuildings) do
-        pending.attempts = pending.attempts + 1
-        local data = pending.data
-
-        -- Build (or reuse) the building's parking-zone cache. Pure geometry
-        -- lookup — no chunk streaming required. Returns zones overlapping
-        -- the building's ring, filtered to parking-stall types.
-        local outdoorZones
-        if outdoorEnabledGlobally and data.anyOutdoor then
-            outdoorZones = buildOutdoorZones(data)
+    -- ── Interior pass ───────────────────────────────────────────────────────
+    -- Decide each cart-eligible building overlapping this chunk, immediately on
+    -- first overlap (no deferral — outdoor is handled separately by the zone
+    -- pass below). pickInteriorSquare draws from whatever of the building's
+    -- rooms are currently streamed; a building whose eligible room hasn't loaded
+    -- yet commits 0 (unchanged from the prior model).
+    local candidateKeys = chunkBuildingIndex[key]
+    if candidateKeys then
+        local buildings = getSpawnedBuildings()
+        local max = getMaxCartsPerBuilding()
+        local committed = false
+        for _, bkey in ipairs(candidateKeys) do
+            if buildings[bkey] == nil then
+                local data = candidateBuildings[bkey]
+                local picks = SaucedCarts.decideSpawnPlacements(data.entries, max, multiplier, ZombRand)
+                local carts = 0
+                for _, ctype in ipairs(picks) do
+                    local sq = pickInteriorSquare(data)
+                    if sq then
+                        queueSpawn(sq, ctype, bkey, data.roomName)
+                        carts = carts + 1
+                    end
+                end
+                buildings[bkey] = carts
+                committed = true
+                SaucedCarts.debug(function() return string.format(
+                    "Decided building %s: %d cart(s) interior", bkey, carts) end)
+            end
         end
-        local outdoorReady = outdoorZones and #outdoorZones > 0
-        local giveUp = pending.attempts >= MAX_OUTDOOR_DEFER
+        if committed then saveModData() end
+    end
 
-        if outdoorReady or giveUp or not data.anyOutdoor then
-            local carts = 0
-            local outdoorPlaced = 0
-            -- Pure dice: one binary roll for "spawns today?", then a uniform
-            -- 1..max count; each cart picks a TYPE (weighted by chance across
-            -- all eligible entries, so addon carts mix in) and an interior/
-            -- outdoor intent. See SaucedCarts.decideSpawnPlacements (shared,
-            -- unit-tested). An "outdoor" intent that can't find a lot square
-            -- falls back to interior here (placement depends on availability).
-            local placements = SaucedCarts.decideSpawnPlacements(data.entries, max, multiplier, outdoorReady, ZombRand)
-            for _, p in ipairs(placements) do
-                local sq, isOutdoor
-                if p.kind == "outdoor" then
-                    sq = pickOutdoorSquare(data)
-                    if sq then isOutdoor = true end
-                end
-                if not sq then
-                    sq = pickInteriorSquare(data)
-                end
-                if sq then
-                    queueSpawn(sq, p.type, bkey, isOutdoor and "outdoor" or data.roomName)
-                    carts = carts + 1
-                    if isOutdoor then outdoorPlaced = outdoorPlaced + 1 end
+    -- ── Outdoor pass (zone-anchored) ────────────────────────────────────────
+    -- Mirrors IsoChunk.AddVehicles: walk the cell's vehicle zones overlapping
+    -- this chunk and roll carts directly into them — no buildings. Covers store
+    -- parking lots, residential driveways, and trailer-park parking uniformly,
+    -- the same map zones vanilla spawns cars in. Cars are already placed by the
+    -- time LoadChunk fires (IsoChunk.java:3676 before :3924), so isValidSpawnSquare
+    -- leaves them be and carts slot into empty stalls.
+    local densityLevel = (SandboxVars.SaucedCarts and SandboxVars.SaucedCarts.OutdoorSpawnDensity)
+        or OUTDOOR_DENSITY_DEFAULT
+    local outdoorChance = OUTDOOR_DENSITY_CHANCE[densityLevel] or OUTDOOR_DENSITY_CHANCE[OUTDOOR_DENSITY_DEFAULT]
+    if outdoorChance <= 0 then return end  -- Off
+    local pool = SaucedCarts.getOutdoorCartPool()
+    if not pool or #pool == 0 then return end
+
+    if not getVehicleZoneAt then return end
+
+    -- ONE decision per chunk (not per parking zone). Dedup by chunk key.
+    local decided = getDecidedZones()
+    local ckey = cx .. "," .. cy
+    if decided[ckey] ~= nil then return end
+
+    -- Stride-2 sample of the chunk's 16 representative tiles. Parking stalls /
+    -- driveways are >=2 tiles wide, so striding still finds them at ~1/4 the
+    -- getVehicleZoneAt cost. (IsoMetaCell.vehicleZones is NOT readable from
+    -- Kahlua — verified live — so getVehicleZoneAt is the only accessor; it
+    -- queries pre-loaded zone AABBs, no chunk streaming.) Collect accepted
+    -- parking tiles as placement candidates; skip denied types (trafficjam*/burnt).
+    local cox, coy = cx * 8, cy * 8
+    local candidates = {}
+    local sampleType
+    for ly = 0, 7, 2 do
+        for lx = 0, 7, 2 do
+            local zone = getVehicleZoneAt(cox + lx, coy + ly, 0)
+            if zone then
+                local ztype = string.lower((zone.getType and zone:getType()) or "parkingstall")
+                if not OUTDOOR_ZONE_TYPE_DENY[ztype] then
+                    candidates[#candidates + 1] = { lx, ly }
+                    sampleType = sampleType or ztype
                 end
             end
-            buildings[bkey] = carts
-            committed = true
-            pendingBuildings[bkey] = nil
-            pendingCount = pendingCount - 1
-            SaucedCarts.debug(function() return string.format(
-                "Decided building %s: %d cart(s) (%d outdoor) (attempts=%d)%s%s",
-                bkey, carts, outdoorPlaced, pending.attempts,
-                (outdoorReady and string.format(" [zones=%d]", #outdoorZones) or ""),
-                (giveUp and not outdoorReady and entry.allowOutdoor and " [no zones found]" or "")
-            ) end)
         end
     end
 
-    if committed then saveModData() end
+    -- No parking in this chunk: don't record (keeps the dedup table small; the
+    -- cheap stride-2 scan just re-runs if the chunk reloads).
+    if #candidates == 0 then return end
+
+    -- Area-scaled by how much of the chunk is parking (sample count): a fully
+    -- paved chunk can roll up to MAX_CARTS_PER_CHUNK; a small sliver gets one.
+    -- outdoorChance comes from the OutdoorSpawnDensity preset, scaled by SpawnRate.
+    local count = SaucedCarts.decideZoneSpawns(
+        #candidates, outdoorChance, multiplier, MAX_CARTS_PER_CHUNK, OUTDOOR_AREA_PER_ROLL, ZombRand)
+
+    -- Shuffle candidates so the placed carts are spread across the chunk's
+    -- parking, then take the first `count` that validate (no two on one tile).
+    for i = #candidates, 2, -1 do
+        local j = ZombRand(i) + 1
+        candidates[i], candidates[j] = candidates[j], candidates[i]
+    end
+
+    local placed = 0
+    for _, t in ipairs(candidates) do
+        if placed >= count then break end
+        local sq = chunk:getGridSquare(t[1], t[2], 0)
+        if sq and isValidSpawnSquare(sq) then
+            local ctype = SaucedCarts.pickOutdoorCartType(pool, ZombRand)
+            if ctype then
+                queueSpawn(sq, ctype, nil, "outdoor:" .. (sampleType or "parking"))
+                placed = placed + 1
+            end
+        end
+    end
+
+    decided[ckey] = placed
+    saveModData()
+    SaucedCarts.debug(function() return string.format(
+        "Decided parking chunk %s (%s, %d parking tiles): %d cart(s)",
+        ckey, sampleType or "parking", #candidates, placed) end)
 end
 
 --- Handle OnTick event - process spawn queue
@@ -829,10 +809,9 @@ function WorldSpawning.clearSpawnTracking()
     if not SaucedCarts.isDebugEnabled() then return end
     local data = getSpawnData()
     data.spawnedBuildings = {}
+    data.decidedZones = {}
     saveModData()
-    for k in pairs(pendingBuildings) do pendingBuildings[k] = nil end
-    pendingCount = 0
-    SaucedCarts.debug("DEBUG: Cleared building decisions + pending - carts re-roll as chunks reload")
+    SaucedCarts.debug("DEBUG: Cleared building + zone decisions - carts re-roll as chunks reload")
 end
 
 --- Show spawn status
@@ -940,6 +919,13 @@ function WorldSpawning.dumpModData()
         else
             SaucedCarts.debug("    spawnedBuildings: nil")
         end
+        if orCreateData.decidedZones then
+            local zcount = 0
+            for _ in pairs(orCreateData.decidedZones) do zcount = zcount + 1 end
+            SaucedCarts.debug("    decidedZones count: " .. zcount)
+        else
+            SaucedCarts.debug("    decidedZones: nil")
+        end
     else
         SaucedCarts.debug("  ModData.getOrCreate() returned nil (should never happen)")
     end
@@ -979,9 +965,8 @@ end
 function WorldSpawning._resetSpawnTracking()
     local data = getSpawnData()
     data.spawnedBuildings = {}
+    data.decidedZones = {}
     saveModData()
-    for k in pairs(pendingBuildings) do pendingBuildings[k] = nil end
-    pendingCount = 0
 end
 
 --- Live-probe / test hooks: run the spawn evaluation directly.
@@ -989,12 +974,10 @@ end
 --- the offline harness.
 WorldSpawning._onLoadChunk = onLoadChunk
 WorldSpawning._initBuildingIndex = initBuildingIndex
-WorldSpawning._buildOutdoorZones = buildOutdoorZones
 WorldSpawning._pickInteriorSquare = pickInteriorSquare
-WorldSpawning._pickOutdoorSquare = pickOutdoorSquare
 WorldSpawning._candidateBuildings = candidateBuildings
 WorldSpawning._chunkBuildingIndex = chunkBuildingIndex
-WorldSpawning._OUTDOOR_RING_RADIUS = OUTDOOR_RING_RADIUS
+WorldSpawning._getDecidedZones = getDecidedZones
 
 -- ============================================================================
 -- EVENT REGISTRATION
@@ -1003,9 +986,9 @@ WorldSpawning._OUTDOOR_RING_RADIUS = OUTDOOR_RING_RADIUS
 -- OnLoadedMapZones (past tense) fires after every OnLoadMapZones handler
 -- completes, including metazoneHandler.lua's VehicleZone registration. By
 -- then both BuildingDefs (from CreateStep2 — IsoWorld.java:1976) AND
--- VehicleZones (from metazoneHandler) are consolidated, so buildOutdoorZones
--- can call getVehicleZoneAt safely. Vanilla uses this same event for
--- forageSystem.init + StoryClutter.Init for the same reason.
+-- VehicleZones (from metazoneHandler) are consolidated, so the index build and
+-- the per-chunk vehicle-zone pass see a complete world. Vanilla uses this same
+-- event for forageSystem.init + StoryClutter.Init for the same reason.
 if Events.OnLoadedMapZones and Events.OnLoadedMapZones.Add then
     Events.OnLoadedMapZones.Add(initBuildingIndex)
 end
@@ -1014,12 +997,11 @@ end
 Events.LoadChunk.Add(onLoadChunk)
 Events.OnTick.Add(onTick)
 
--- Wipe pending decisions when leaving a game so SP save-switches start fresh.
--- spawnedBuildings (ModData) carries the durable cross-session dedup.
+-- Reset the one-time chunk-coord invariant flag on game-end so a SP
+-- save-switch re-validates. Durable dedup (spawnedBuildings + decidedZones)
+-- lives in ModData and carries across sessions.
 if Events.OnGameEnd and Events.OnGameEnd.Add then
     Events.OnGameEnd.Add(function()
-        for k in pairs(pendingBuildings) do pendingBuildings[k] = nil end
-        pendingCount = 0
         chunkCoordChecked = false
     end)
 end

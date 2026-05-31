@@ -216,6 +216,27 @@ local KNOWN_VANILLA_ROOMS = {
     bookstore = true, conveniencestore = true, cornerstore = true,
     storage = true, lobby = true, pawnshop = true,
     shed = true,  -- Distributions.lua:14749 — counter/crate procedural dist
+
+    -- v2.1.11 coverage expansion (all verified present in vanilla Distributions.lua)
+    toystore = true, pharmacy = true, carsupplysport = true,
+    ww_toolstore = true, ww_generalstore = true,
+    barbecuestore = true, paintershop = true, gunstore = true,
+    plazastore1 = true, leatherclothesstore = true, baseballstore = true,
+    golfstore = true,
+    gasstore = true, gas2go = true, zippeestore = true,
+    artstore = true, shoestore = true, camerastore = true,
+    candystore = true, comicstore = true, musicstore = true,
+    knifestore = true, tobaccostore = true,
+    toolstorestorage = true, toystorestorage = true, pharmacystorage = true,
+    electronicsstorage = true, medicalstorage = true, hospitalstorage = true,
+    gunstorestorage = true, potatostorage = true, sportstorage = true,
+    candystorage = true, gasstorage = true,
+    farmstorage = true,
+    loggingwarehouse = true, factory = true, factorystorage = true,
+    loggingfactory = true, cabinetshipping = true, dogfoodshipping = true,
+    golfshipping = true, jerkyshipping = true, knifeshipping = true,
+    radioshipping = true,
+    firegarage = true, policegarage = true,
 }
 
 tests["default_rooms_have_no_phantom_names"] = function()
@@ -277,35 +298,23 @@ tests["isVanillaRoom_uses_ItemPickerJava_when_present"] = function()
 end
 
 -- ============================================================================
--- ANY-ENTRY-ALLOWS-OUTDOOR PRECHECK
+-- OUTDOOR CART POOL
 -- ============================================================================
--- WorldSpawning uses this as a cheap precheck per chunk: if no registered entry
--- opts into outdoor placement, skip outdoor square collection entirely.
+-- Outdoor (vehicle-zone) spawns draw from a pool of cart types whose
+-- registration set outdoorWeight > 0. The built-in ShoppingCart must anchor it,
+-- or parking lots / driveways never get carts (silent no-op regression guard).
 
-tests["anyEntryAllowsOutdoor_true_with_default_canonical"] = function()
-    -- After defaults load, the canonical retail entries (gigamart, grocery,
-    -- departmentstore, grocerystorage, warehouse) set allowOutdoor = true.
-    -- Regression guard: if those flags get dropped during a future refactor,
-    -- the outdoor parking-lot feature silently turns into a no-op.
-    return Assert.isTrue(SaucedCarts.anyEntryAllowsOutdoor(),
-        "anyEntryAllowsOutdoor() true because defaults opt canonical retail into outdoor")
-end
-
-tests["anyEntryAllowsOutdoor_default_canonical_entries_carry_flag"] = function()
-    -- Direct verification that the registry entry for gigamart carries the
-    -- new fields (covers initializeDefaults forwarding the field; pre-fix it
-    -- stripped everything except type/chance).
-    local entries = SaucedCarts.SpawnLocations.gigamart
-    if not Assert.isTrue(entries ~= nil and #entries > 0,
-        "gigamart entries registered") then return false end
+tests["base_cart_anchors_outdoor_pool"] = function()
+    require "SaucedCarts/CartData"
+    SaucedCarts.resetOutdoorCartPool()
+    local pool = SaucedCarts.getOutdoorCartPool()
+    if not Assert.isTrue(pool ~= nil and #pool > 0, "outdoor pool is non-empty") then return false end
     local found
-    for _, e in ipairs(entries) do
+    for _, e in ipairs(pool) do
         if e.type == "SaucedCarts.ShoppingCart" then found = e; break end
     end
-    if not Assert.isTrue(found ~= nil, "base ShoppingCart entry present") then return false end
-    if not Assert.isTrue(found.allowOutdoor == true, "allowOutdoor forwarded") then return false end
-    return Assert.isTrue(type(found.outdoorWeight) == "number",
-        "outdoorWeight forwarded as number")
+    if not Assert.isTrue(found ~= nil, "base ShoppingCart present in outdoor pool") then return false end
+    return Assert.isTrue((found.weight or 0) > 0, "base cart carries positive outdoor weight")
 end
 
 tests["canSpawnInBuilding_is_boolean_wrapper"] = function()
