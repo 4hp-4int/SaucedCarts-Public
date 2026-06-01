@@ -167,17 +167,19 @@ function ISCartTransferAction:isValid()
     if not self.item or not self.srcContainer or not self.destContainer then
         return false
     end
-    -- Vanilla compat: ISCraftingUI.ReturnItemToContainer (and a few other
-    -- crafting-cleanup paths) set allowMissingItems=true so the action
-    -- still completes when the item was destroyed mid-craft. Mirror
-    -- vanilla ISInventoryTransferAction:isValid (line 67) — flag dontAdd
-    -- and let perform skip the move while still firing onCompleteFunc.
-    if self.allowMissingItems and not self.srcContainer:contains(self.item) then
+    -- Vanilla compat: when the src no longer contains the item — e.g.
+    -- ISCraftingUI.ReturnItemToContainer after a recipe consumed it, or a
+    -- concurrent batch already moved it — flag dontAdd and stay valid so
+    -- onCompleteFunc still fires. B42 buildid 23504596 GENERALIZED this: it
+    -- dropped the old `allowMissingItems and` guard and now does it
+    -- unconditionally (ISInventoryTransferAction:isValid). We mirror that.
+    -- Safe for carts: perform no-ops a missing item anyway (server
+    -- findItemNearPlayer bails; SP's ISTransferAction:transferItem has a
+    -- "src doesn't contain item" early return), and nothing is added → no dupe.
+    self.dontAdd = false
+    if not self.srcContainer:contains(self.item) then
         self.dontAdd = true
         return true
-    end
-    if not self.srcContainer:contains(self.item) then
-        return false
     end
     -- Floor destinations: skip hasRoomFor. PZ's floor container enforces
     -- a per-tile weight cap in vanilla's hasRoomFor, but we're going out

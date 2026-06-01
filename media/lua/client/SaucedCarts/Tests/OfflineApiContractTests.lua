@@ -86,6 +86,13 @@ local KNOWN_VANILLA_INTERNALS = {
     ["stopLoopingSound"]              = true,
     ["getTransferStartSoundName"]     = true,
     ["getTransferCompleteSoundName"]  = true,
+    -- playTransferCompleteSound — NEW in B42 buildid 23504596. Vanilla's
+    -- :transferItem calls self:playTransferCompleteSound(item)
+    -- (ISInventoryTransferAction.lua:625,685). Our action derives from
+    -- ISBaseTimedAction and never runs vanilla's :transferItem on self
+    -- (performCartTransfer calls ISTransferAction:transferItem directly), so
+    -- vanilla never invokes this on our action. Self-only — safe to ignore.
+    ["playTransferCompleteSound"]     = true,
     -- forceComplete / forceStop — only vanilla's :update fires these on
     -- `self` based on transaction state. Our action doesn't use vanilla's
     -- transaction system so we don't need to expose these.
