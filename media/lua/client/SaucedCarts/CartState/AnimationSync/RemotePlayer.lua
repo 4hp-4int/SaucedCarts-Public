@@ -45,9 +45,7 @@ local function maintainRemoteAnimations()
                 local primary = targetPlayer:getPrimaryHandItem()
                 if primary and SaucedCarts.isCart(primary) then
                     -- Re-apply animation variables (engine may have overwritten)
-                    targetPlayer:setVariable("Weapon", "cart")
-                    targetPlayer:setVariable("RightHandMask", "holdingcartright")
-                    targetPlayer:setVariable("LeftHandMask", "holdingcartleft")
+                    SaucedCarts.applyCartPose(targetPlayer)
                 else
                     -- They dropped the cart, remove from tracking
                     remoteCartPlayers[onlineId] = nil
@@ -103,9 +101,7 @@ SaucedCarts.Network.registerClientHandler("updateCartAnimation", function(args)
         -- Track for continuous re-application (engine overwrites animation vars)
         remoteCartPlayers[args.playerOnlineId] = true
 
-        targetPlayer:setVariable("Weapon", "cart")
-        targetPlayer:setVariable("RightHandMask", "holdingcartright")
-        targetPlayer:setVariable("LeftHandMask", "holdingcartleft")
+        SaucedCarts.applyCartPose(targetPlayer)
         -- Force animator/model refresh
         targetPlayer:resetEquippedHandsModels()
         SaucedCarts.debug(function() return "RemotePlayer: set cart animations for remote player " ..
@@ -114,9 +110,7 @@ SaucedCarts.Network.registerClientHandler("updateCartAnimation", function(args)
         -- Remove from tracking
         remoteCartPlayers[args.playerOnlineId] = nil
 
-        targetPlayer:setVariable("Weapon", "")
-        targetPlayer:setVariable("RightHandMask", "")
-        targetPlayer:setVariable("LeftHandMask", "")
+        SaucedCarts.clearCartPose(targetPlayer)
         -- Force animator/model refresh
         targetPlayer:resetEquippedHandsModels()
         SaucedCarts.debug(function() return "RemotePlayer: cleared animations for remote player " ..

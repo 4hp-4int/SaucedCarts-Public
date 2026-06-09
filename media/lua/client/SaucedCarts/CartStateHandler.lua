@@ -11,6 +11,7 @@
 -- MODULES:
 --   CartState/FlashlightHook.lua       - F-key flashlight toggle
 --   CartState/HighlightDisable.lua     - World item highlight suppression
+--   CartState/HolderRegistry.lua       - Event-fed cart-holder registry (authoritative for the early exit)
 --   CartState/InstantDrop.lua          - SP/MP instant drop logic
 --   CartState/VisualUpdateQueue.lua    - Pending cart visual updates
 --   CartState/AnimationSync/Throttle.lua       - Animation sync throttling
@@ -31,6 +32,7 @@ require "SaucedCarts/UpgradeSync"
 -- Load extracted modules (they self-initialize on require)
 local FlashlightHook = require "SaucedCarts/CartState/FlashlightHook"
 local HighlightDisable = require "SaucedCarts/CartState/HighlightDisable"
+local HolderRegistry = require "SaucedCarts/CartState/HolderRegistry"
 local InstantDrop = require "SaucedCarts/CartState/InstantDrop"
 local VisualUpdateQueue = require "SaucedCarts/CartState/VisualUpdateQueue"
 local Throttle = require "SaucedCarts/CartState/AnimationSync/Throttle"
@@ -71,6 +73,17 @@ local playerLastPos = {}
 local playerLastSyncedDistance = {}
 local DISTANCE_SYNC_THRESHOLD = SaucedCarts.Config.DISTANCE_SYNC_THRESHOLD or 10
 
+-- Timed-action tracking for pose restore (per player). True while the player
+-- had a timed action running last frame; the action-finished EDGE triggers the
+-- full pose restore (see SaucedCarts.maintainCartPose).
+local playerWasInAction = {}
+
+-- One-shot hand seed (per player). Hands are authoritative the FIRST frame we
+-- see a player: join/load writes the hand field directly (IsoPlayer.java:1264,
+-- no OnEquipPrimary), and in MP the hands aren't populated yet when
+-- OnCreatePlayer fires — shadow-phase divergence #1 was exactly this path.
+local playerSeeded = {}
+
 -- =============================================================================
 -- PLAYER KEY HELPER
 -- =============================================================================
@@ -83,6 +96,16 @@ local function getPlayerKey(player)
     local onlineId = player:getOnlineID()
     if onlineId then return onlineId end
     return player:getPlayerNum()
+end
+
+--- Is the player currently running a timed action (anything in their queue)?
+--- Used to defer the equipped-model refresh until an action has finished, so
+--- we don't fight an action's own hand-model overrides mid-run.
+---@param player IsoPlayer
+---@return boolean
+local function hasActiveTimedAction(player)
+    local q = ISTimedActionQueue.getTimedActionQueue(player)
+    return q ~= nil and q.queue ~= nil and #q.queue > 0
 end
 
 -- =============================================================================
@@ -99,28 +122,46 @@ local function onPlayerUpdate(player)
 
     local playerKey = getPlayerKey(player)
 
-    -- Skip if pending drop (waiting for server to process)
-    local isPending = InstantDrop.isPending(player)
-    if isPending then
+    -- One-shot seed: hands are authoritative the first frame (see
+    -- playerSeeded above for why events can't cover join/load).
+    if not playerSeeded[playerKey] then
+        playerSeeded[playerKey] = true
+        local seedPrimary = player:getPrimaryHandItem()
+        if seedPrimary and SaucedCarts.isCart(seedPrimary) then
+            HolderRegistry.registerKey(playerKey)
+        end
+    end
+
+    -- Registry-driven early exit (phase 2). Events (OnEquipPrimary + our own)
+    -- maintain the registry, the seed covers join, and the registry's slow
+    -- reconciler audits for missed equips. Non-holders exit on two table
+    -- lookups — no per-frame hand poll.
+    local isHolder = HolderRegistry.isHolderKey(playerKey)
+    local hadCart = playerCartState[playerKey]
+    if not isHolder and not hadCart then
         return
     end
 
-    local primary = player:getPrimaryHandItem()
-    local hasCart = primary and SaucedCarts.isCart(primary)
-    local hadCart = playerCartState[playerKey]
-
-    -- Early exit for players who have never interacted with a cart
-    -- Reduces ~90% of calls from ~8 ops to ~6 ops
-    if not hasCart and not hadCart then
+    -- Skip if pending drop (waiting for server to process)
+    if InstantDrop.isPending(player) then
         return
+    end
+
+    -- For holders the hand stays authoritative, checked every frame: we must
+    -- NEVER keep restrictions/pose on a cartless player, holders are few, and
+    -- the check is cheap. A disagreement here is a missed unequip event —
+    -- count it on the registry's divergence meter and resync; the normal
+    -- hasCart/hadCart transition below then actuates the unequip.
+    local primary = player:getPrimaryHandItem()
+    local hasCart = (primary and SaucedCarts.isCart(primary)) or false
+    if isHolder ~= hasCart then
+        HolderRegistry.reportObserved(playerKey, hasCart)
     end
 
     -- State transition: just equipped a cart
     if hasCart and not hadCart then
-        -- Set animation variables
-        player:setVariable("Weapon", "cart")               -- Body animations (idle, walk, run, sprint)
-        player:setVariable("RightHandMask", "holdingcartright")  -- Right arm masking
-        player:setVariable("LeftHandMask", "holdingcartleft")    -- Left arm masking
+        -- Set the cart-push pose animation variables (canonical helper)
+        SaucedCarts.applyCartPose(player)
 
         -- Apply restrictions
         player:setIgnoreContextKey(true)   -- Block E key / context menu climbing
@@ -132,10 +173,8 @@ local function onPlayerUpdate(player)
 
     -- State transition: just unequipped a cart
     elseif not hasCart and hadCart then
-        -- Clear animation variables
-        player:setVariable("Weapon", "")                   -- Clear body animations
-        player:setVariable("RightHandMask", "")            -- Clear right arm masking
-        player:setVariable("LeftHandMask", "")             -- Clear left arm masking
+        -- Clear the cart-push pose animation variables (canonical helper)
+        SaucedCarts.clearCartPose(player)
 
         -- Remove restrictions
         player:setIgnoreContextKey(false)   -- Re-enable E key / context menu climbing
@@ -144,6 +183,7 @@ local function onPlayerUpdate(player)
         -- Clear distance tracking (position no longer relevant)
         playerLastPos[playerKey] = nil
         playerLastSyncedDistance[playerKey] = nil
+        playerWasInAction[playerKey] = nil
 
         playerCartState[playerKey] = nil  -- Use nil for consistency (both nil and false are falsy)
         SaucedCarts.debug("Cart unequipped - cleared animations and restrictions")
@@ -161,6 +201,21 @@ local function onPlayerUpdate(player)
         if player:isAiming() then
             InstantDrop.handle(player, primary)
             return  -- Exit early, cart state will update next frame
+        end
+
+        -- Pose maintenance. Vanilla timed actions (smoking, barricading,
+        -- eating, transferring, …) drive their own animation and hand-model
+        -- overrides while a container stays equipped, and don't restore ours
+        -- when they end — leaving the cart hanging at the player's side.
+        -- maintainCartPose (Core.lua) leaves a running action alone, then does
+        -- a full restore (pose vars + equipped-model rebind) on the frame the
+        -- action finishes; outside actions it heals variable drift from any
+        -- other clobber source.
+        local inAction, restored = SaucedCarts.maintainCartPose(
+            player, playerWasInAction[playerKey], hasActiveTimedAction(player))
+        playerWasInAction[playerKey] = inAction or nil
+        if restored then
+            SaucedCarts.debug("Cart pose restored (action finished / drift)")
         end
 
         -- Distance tracking for durability system
@@ -333,10 +388,12 @@ local function onPlayerDeath(player)
     playerLastSyncedDistance[playerKey] = nil
     playerFrameCounter[playerKey] = nil
     upgradeRecoveryCounter[playerKey] = nil
+    playerWasInAction[playerKey] = nil
 
     -- Cleanup extracted modules
     Throttle.cleanup(playerKey)
     InstantDrop.cleanup(player)
+    HolderRegistry.unregisterKey(playerKey)
 
     SaucedCarts.debug("CartStateHandler: cleaned up tracking for dead player")
 end
@@ -355,6 +412,8 @@ local function onGameEnd()
     upgradeRecoveryCounter = {}
     playerLastPos = {}
     playerLastSyncedDistance = {}
+    playerWasInAction = {}
+    playerSeeded = {}
 
     -- Reset extracted modules
     Throttle.reset()

@@ -179,10 +179,8 @@ function InstantDrop.handle(player, cartItem)
         local playerKey = getPlayerKey(player)
         pendingDropTime[playerKey] = getTimestampMs()
 
-        -- Clear local animation state
-        player:setVariable("Weapon", "")
-        player:setVariable("RightHandMask", "")
-        player:setVariable("LeftHandMask", "")
+        -- Clear local animation state (canonical helper)
+        SaucedCarts.clearCartPose(player)
 
         SaucedCarts.debug("InstantDrop: requested from server")
         return true

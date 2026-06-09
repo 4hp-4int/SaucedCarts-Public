@@ -42,9 +42,7 @@ SaucedCarts.Network.registerClientHandler("fullAnimationSync", function(args)
                 -- Track for continuous re-application (engine overwrites animation vars)
                 RemotePlayer.trackPlayer(state.id)
 
-                targetPlayer:setVariable("Weapon", "cart")
-                targetPlayer:setVariable("RightHandMask", "holdingcartright")
-                targetPlayer:setVariable("LeftHandMask", "holdingcartleft")
+                SaucedCarts.applyCartPose(targetPlayer)
                 targetPlayer:resetEquippedHandsModels()
                 applied = applied + 1
             end

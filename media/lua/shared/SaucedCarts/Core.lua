@@ -598,6 +598,106 @@ function SaucedCarts.applyMultipliers(cart)
 end
 
 -- ============================================================================
+-- CART-PUSH POSE ANIMATION VARIABLES
+-- ============================================================================
+-- The two-handed cart-pushing pose is driven entirely by three animation
+-- variables. They are NOT sticky: anything that drives a hand animation
+-- overwrites them and restores ITS defaults, not ours —
+--   * vanilla timed actions: eating, drinking, reloading, bandaging, smoking,
+--     transferring, etc. (local player)
+--   * the engine's network sync (IsoPlayer.java) for remote players
+-- So every holder must keep re-asserting them. These helpers are the single
+-- source of truth for the variable names + apply/clear/check, so callers
+-- (equip/unequip transitions, the per-frame self-heal in CartStateHandler, the
+-- remote-player maintenance loop, late-joiner sync, instant-drop) never
+-- hardcode the literals or drift apart. They take a character so they work for
+-- the local player AND remote avatars.
+
+SaucedCarts.CART_POSE_VARS = {
+    Weapon        = "cart",
+    RightHandMask = "holdingcartright",
+    LeftHandMask  = "holdingcartleft",
+}
+
+--- Apply the cart-push pose animation variables.
+---@param character IsoGameCharacter
+function SaucedCarts.applyCartPose(character)
+    if not character then return end
+    character:setVariable("Weapon", "cart")
+    character:setVariable("RightHandMask", "holdingcartright")
+    character:setVariable("LeftHandMask", "holdingcartleft")
+end
+
+--- Clear the cart-push pose animation variables.
+---@param character IsoGameCharacter
+function SaucedCarts.clearCartPose(character)
+    if not character then return end
+    character:setVariable("Weapon", "")
+    character:setVariable("RightHandMask", "")
+    character:setVariable("LeftHandMask", "")
+end
+
+--- Have the cart-push pose variables drifted from their expected values?
+--- Cheap (string compares) — lets the per-frame self-heal re-apply only when
+--- something actually clobbered them.
+---@param character IsoGameCharacter
+---@return boolean
+function SaucedCarts.cartPoseDrifted(character)
+    if not character then return false end
+    return character:getVariableString("Weapon") ~= "cart"
+        or character:getVariableString("RightHandMask") ~= "holdingcartright"
+        or character:getVariableString("LeftHandMask") ~= "holdingcartleft"
+end
+
+--- Restore the full cart-push pose: animation variables + equipped-model
+--- binding. The variables alone fix the body animation set, but actions that
+--- play their own animation while a container stays equipped (smoking,
+--- barricading, …) leave the cart MODEL bound where the action put it — in the
+--- primary hand at the player's side — and only resetEquippedHandsModels
+--- rebinds it (the same pairing RemotePlayer/LateJoiner/CartVisuals use).
+---@param character IsoGameCharacter
+function SaucedCarts.restoreCartPose(character)
+    if not character then return end
+    SaucedCarts.applyCartPose(character)
+    if character.resetEquippedHandsModels then
+        character:resetEquippedHandsModels()
+    end
+end
+
+--- Per-frame cart-pose maintenance for a cart holder. Call once per frame with
+--- whether the character had a timed action running LAST frame (caller-stored)
+--- and whether one is running NOW; returns the value to store for next frame
+--- plus whether a restore fired.
+---
+--- Two rules, in priority order:
+---   1. While a timed action runs, do NOTHING — the action owns the animation
+---      (smoking, barricading, transferring…), and fighting its variables or
+---      hand-model overrides mid-run breaks the action's own visuals.
+---   2. On the frame the action finishes (wasInAction → not inAction edge),
+---      restore UNCONDITIONALLY. The edge matters: the variables may read
+---      correct at that point (healed earlier, or never clobbered — some
+---      actions only override hand models / the action state, not our vars),
+---      but the model binding is stale either way. A drift check here would
+---      skip the rebind — that exact false-negative shipped once.
+--- Outside actions, heal variable drift from any other clobber source (engine
+--- sync etc.) as it appears.
+---@param character IsoGameCharacter
+---@param wasInAction boolean|nil had a timed action last frame (caller-stored)
+---@param inAction boolean has a timed action this frame
+---@return boolean inAction store as wasInAction for next frame
+---@return boolean restored whether a pose restore fired this frame
+function SaucedCarts.maintainCartPose(character, wasInAction, inAction)
+    if not character then return false, false end
+    if inAction then return true, false end
+
+    if wasInAction or SaucedCarts.cartPoseDrifted(character) then
+        SaucedCarts.restoreCartPose(character)
+        return false, true
+    end
+    return false, false
+end
+
+-- ============================================================================
 -- INITIALIZATION
 -- ============================================================================
 
