@@ -358,6 +358,28 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
     if srcContainer.setDrawDirty  then srcContainer:setDrawDirty(true)  end
     if destContainer.setDrawDirty then destContainer:setDrawDirty(true) end
 
+    -- Restore loot-respawn eligibility on the SOURCE container. B42's
+    -- LootRespawn only refills a world container when BOTH `explored` AND
+    -- `hasBeenLooted` are set (LootRespawn.java:142 —
+    -- `container.explored && container.isHasBeenLooted()`). Vanilla sets
+    -- `hasBeenLooted=true` only in RemoveInventoryItemFromContainerPacket.
+    -- processServer (:110) and Transaction (:153) — BOTH of which we route
+    -- around: our removal goes through ISTransferAction:transferItem ->
+    -- ItemContainer.DoRemoveItem (touches neither flag) + GameServer.send-
+    -- RemoveItemFromContainer (a pure outbound broadcast, never runs
+    -- processServer). So looting straight into a cart leaves the source at
+    -- hasBeenLooted=false forever and that container silently stops
+    -- respawning loot. Mirror vanilla's processServer here. Server/SP only:
+    -- LootRespawn.update is gated on !GameClient.client, and the flag isn't
+    -- meaningful on a remote client's local container copy. Harmless on
+    -- non-world sources (player inv / cart / bag) — the respawn loop only
+    -- scans containers attached to world IsoObjects, exactly as vanilla
+    -- sets these flags unconditionally on any transfer source.
+    if not isClient() and srcContainer.setHasBeenLooted then
+        srcContainer:setExplored(true)
+        srcContainer:setHasBeenLooted(true)
+    end
+
     -- Refresh content-display furniture sprites (bookcase showing books,
     -- fridge/freezer, stacked crates). Vanilla ISInventoryTransferAction:
     -- transferItem does this via ItemPicker.updateOverlaySprite on the

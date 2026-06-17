@@ -24,6 +24,7 @@ require "SaucedCarts/ContextMenu"
 
 ---@class SaucedCartsDebugModule
 ---@field spawnCart fun(cartType: string) Spawn cart at player position
+---@field spawnLoadedCart fun(cartType?: string, itemType?: string, count?: number) Spawn a cart pre-loaded with loot (save/reload persistence repro)
 ---@field giveCart fun(cartType: string) Add cart to player inventory
 ---@field setCondition fun(condition: number) Set condition of held cart
 ---@field showStatus fun() Show status of held cart

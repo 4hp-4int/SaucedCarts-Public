@@ -2,6 +2,31 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.12 — 2026-06-17 (Loaded cart spawns, B42.19 compat, stairs-drop + loot-respawn fixes)
+
+### New / Improved
+
+**Spawned carts can now come pre-loaded with context-appropriate loot.** Most carts still spawn empty — a loaded one is meant to be a find. New `CartLoot.lua` themes the contents to where the cart spawned: groceries outside homes and in parking lots, food in grocery/convenience rooms, building materials in warehouses and storage, tools in hardware/auto stores, and — ultra-rarely (~1.5% of the carts that load at all) — a survivor's cache of weapons and ammo. New sandbox option **"Loaded Cart Spawns"** (Off / Rare / Some / Common, default Some) controls how often. Off = every cart spawns empty (prior behaviour).
+
+**Cart push pose now restores after container-allowed actions.** Actions that keep the cart equipped while playing their own animation (smoking, barricading) left the cart model bound at the player's side. `maintainCartPose` now restores the pose unconditionally on the action-finished edge instead of relying on drift detection.
+
+### Fixed
+
+**Looting straight from a container into a cart no longer disables that container's loot respawn.** B42 only respawns a container's loot once it's been flagged both *explored* and *looted*; our server-authoritative transfer removed items via a path that set neither, so a looted-into-a-cart container silently stopped respawning forever (workaround was to add then remove an item normally). `performCartTransfer` now mirrors vanilla's server-side remove bookkeeping (`setExplored` + `setHasBeenLooted`) on the source container. MP + SP.
+
+**Dropping a cart while standing on stairs no longer drops it to the floor below.** PZ settles a world item placed on a staircase onto the level beneath, so a cart dropped on stairs fell out of reach. New `resolveCartDropSquare` (Core.lua) redirects the drop to the nearest adjacent solid-floor landing at the same level, wired into every drop path (manual unequip, instant-drop, combat drop, drop-action complete). Falls back to the original square when no landing exists, so no drop is ever blocked.
+
+**Carts no longer spawn inside parked vehicles or boxed-in geometry.** Outdoor spawns use the same vehicle zones the game spawns cars in, so a cart could land inside a van model or wedged between gas-station canopy pillars where you couldn't reach it. `isValidSpawnSquare` now rejects vehicle-intersecting and solid squares and requires two *pathable* adjacent squares (reachability via `isBlockedTo`), not just two open ones.
+
+### Technical
+
+- **B42.19 (buildid 23504596) compatibility.** Mirrored vanilla's `ISInventoryTransferAction:isValid` relaxation (dropped the `allowMissingItems` guard) and documented the new `playTransferCompleteSound` internal. Transfer-pipeline canon re-blessed at buildid 23504596 (15/15 anchors).
+- **Event-fed holder registry (`CartState/HolderRegistry`).** Authoritative for `CartStateHandler`'s per-frame early exit — non-holders cost two table lookups instead of a hand poll. Maintained by `OnEquipPrimary` plus our own cart equip/drop/broke events, with a first-frame hand seed for join/load and a ~5s reconciler.
+- **Loaded-cart placement is V2 dupe-safe.** Empty carts keep the `synchSpawn=true` path; loaded carts use place-then-`transmitCompleteItemToClients` so contents aren't broadcast before the fill. Loot budget is weight-capped per tier and padded with cheap junk only up to the tier's visual fill ratio.
+- **Loot pools are pure/offline-tested helpers** (`decideCartLoad`, `contextForRoom`, `poolFor`, `fillCart`, `padToFillState`) driven by vanilla `ProceduralDistributions` lists. World spawning stays server-only.
+- Save-safe. **No `SCHEMA_VERSION` / `API_VERSION` change** — loaded carts reuse the existing additive `SaucedCarts_fillState` ModData (no migration); `CartLoot` adds new functions without touching `registerCart`.
+- Offline suite green (loot-respawn, cart-loot, and stairs-drop regression tests added).
+
 ## v2.1.11 — 2026-05-31 (Zone-anchored outdoor spawns, wider interior coverage, corpse-loot transfer fix)
 
 ### New / Improved

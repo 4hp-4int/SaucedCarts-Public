@@ -197,6 +197,9 @@ SaucedCarts.Network.registerServerHandler("requestInstantDrop", function(player,
         return
     end
 
+    -- Don't drop the cart onto stairs (it'd fall to the floor below).
+    square = SaucedCarts.resolveCartDropSquare(square) or square
+
     local inventory = player:getInventory()
 
     -- Project damage to decide broke vs survived (don't apply yet)

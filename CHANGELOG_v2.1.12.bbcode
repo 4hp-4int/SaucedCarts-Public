@@ -1,0 +1,25 @@
+[h1]SaucedCarts v2.1.12[/h1]
+[i]Released: 2026-06-17[/i]
+
+[b]Carts can now spawn loaded with loot, updated for Build 42.19, plus fixes for dropping carts on stairs and a loot-respawn bug.[/b]
+
+[h1]What's New[/h1]
+[list]
+[*][b]Carts can now spawn with loot in them.[/b] Most carts you find are still empty — a loaded one is meant to be a lucky find. What's inside fits where the cart turns up: groceries by houses and in parking lots, food in grocery and convenience stores, building materials in warehouses and storage, tools in hardware and auto shops, and — very rarely — a survivor's stash of weapons and ammo.
+[*][b]New sandbox option: "Loaded Cart Spawns"[/b] — Off / Rare / Some / Common (default Some). Controls how often a spawned cart comes pre-loaded. Set it to Off if you'd rather every cart be empty like before.
+[*][b]The cart push pose sticks properly during things like smoking and barricading.[/b] Doing one of those while holding a cart no longer leaves the cart stuck floating at your side.
+[/list]
+
+[h1]Bug Fixes[/h1]
+[list]
+[*][b]Taking items straight from a container into your cart no longer stops that container from restocking.[/b] Previously, looting a shelf directly into a cart quietly switched off that container's loot respawn for good (the only fix was to drop an item in and take it back out). Looting into a cart now leaves the container able to restock normally.
+[*][b]Dropping a cart while standing on stairs no longer sends it to the floor below.[/b] The cart now lands on a solid spot next to you instead of falling out of reach a level down.
+[*][b]Carts no longer spawn inside parked cars or wedged where you can't reach them.[/b] Outdoor carts use the same parking spots the game uses for cars, so they occasionally landed inside a van or boxed in between gas-station pillars. They now only spawn somewhere you can actually walk up to.
+[/list]
+
+[h1]Compatibility[/h1]
+[list]
+[*]Updated for [b]Build 42.19[/b].
+[*][b]Save-safe.[/b] No save-data changes — safe to upgrade mid-save. Existing carts and saves are unaffected.
+[*][b]Addon authors:[/b] the cart-registration API is unchanged.
+[/list]

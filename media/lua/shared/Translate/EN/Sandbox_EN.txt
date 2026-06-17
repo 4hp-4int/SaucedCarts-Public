@@ -46,4 +46,11 @@ Sandbox_EN = {
     Sandbox_SaucedCarts_OutdoorSpawnDensity_option2 = "Low",
     Sandbox_SaucedCarts_OutdoorSpawnDensity_option3 = "Medium",
     Sandbox_SaucedCarts_OutdoorSpawnDensity_option4 = "High",
+
+    Sandbox_SaucedCarts_LoadedCartSpawns = "Loaded Cart Spawns",
+    Sandbox_SaucedCarts_LoadedCartSpawns_tooltip = "How often a spawned cart comes pre-loaded with loot that fits where it spawned — groceries outside homes and lots, materials/tools in warehouses and stores, and (very rarely) a survivor's cache of weapons and ammo. Most carts stay empty, so a loaded one is a find. Off = always empty.",
+    Sandbox_SaucedCarts_LoadedCartSpawns_option1 = "Off",
+    Sandbox_SaucedCarts_LoadedCartSpawns_option2 = "Rare",
+    Sandbox_SaucedCarts_LoadedCartSpawns_option3 = "Some",
+    Sandbox_SaucedCarts_LoadedCartSpawns_option4 = "Common",
 }

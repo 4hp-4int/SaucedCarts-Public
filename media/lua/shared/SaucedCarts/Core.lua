@@ -33,7 +33,7 @@
 SaucedCarts = SaucedCarts or {}
 
 -- Version info
-SaucedCarts.VERSION = "2.1.11"
+SaucedCarts.VERSION = "2.1.12"
 SaucedCarts.MOD_ID = "SaucedCarts"
 SaucedCarts.API_VERSION = 1  -- Increment on breaking API changes (field renames, removed fields, signature changes)
 
@@ -595,6 +595,55 @@ function SaucedCarts.applyMultipliers(cart)
     modData.SaucedCarts_multipliersApplied = true
 
     return true
+end
+
+--- Resolve a safe resting square for a dropped cart.
+---
+--- Stairs squares don't hold dropped world items — PZ settles an item placed on
+--- a staircase onto the floor below, so a cart dropped while standing on stairs
+--- ends up a level down and out of reach. This returns the intended square if
+--- it's safe, otherwise the nearest adjacent walkable solid-floor square at the
+--- same level (the stair landing). Falls back to the original square if no
+--- better neighbour exists (preserves prior behaviour rather than blocking the
+--- drop), so callers can use the result unconditionally.
+---@param square IsoGridSquare|nil intended drop square (usually the player's)
+---@return IsoGridSquare|nil resolved square (nil only if `square` was nil)
+function SaucedCarts.resolveCartDropSquare(square)
+    if not square then return nil end
+
+    -- Would an item dropped here fall to the floor below?
+    local function settles(sq)
+        if sq.HasStairs and sq:HasStairs() then return true end
+        -- Indoors with no solid floor = a hole/ledge over a lower level.
+        if sq.getBuilding and sq:getBuilding() ~= nil
+            and sq.isSolidFloor and not sq:isSolidFloor() then
+            return true
+        end
+        return false
+    end
+
+    if not settles(square) then return square end
+
+    -- Search neighbours (cardinals first, then diagonals) for a solid landing
+    -- at the same level. Don't gate on isBlockedTo — stair-block rules make that
+    -- unreliable from a stair tile, and the landing is physically adjacent.
+    local z = square:getZ()
+    local dirs = {
+        IsoDirections.N, IsoDirections.E, IsoDirections.S, IsoDirections.W,
+        IsoDirections.NE, IsoDirections.SE, IsoDirections.SW, IsoDirections.NW,
+    }
+    for _, dir in ipairs(dirs) do
+        local adj = square:getAdjacentSquare(dir)
+        if adj and adj:getZ() == z
+            and not (adj.HasStairs and adj:HasStairs())
+            and adj.isSolidFloor and adj:isSolidFloor()
+            and adj:isFree(false) then
+            return adj
+        end
+    end
+
+    -- No safe landing found — fall back to the original (no regression).
+    return square
 end
 
 -- ============================================================================

@@ -25,6 +25,7 @@ if isClient() and not isServer() then return end
 require "SaucedCarts/Core"
 require "SaucedCarts/SpawnLocations"
 require "SaucedCarts/CartVisuals"
+require "SaucedCarts/CartLoot"
 
 -- Log load confirmation (helpful for MP debugging)
 SaucedCarts.debug(string.format(
@@ -243,22 +244,34 @@ end
 local function isValidSpawnSquare(square)
     if not square then return false end
 
-    -- Must be walkable (not blocked by furniture, walls, etc.)
-    if not square:isFree(false) then return false end
+    -- Don't spawn inside a parked vehicle. Outdoor carts spawn in vehicle zones
+    -- (the same map zones that spawn cars), so without this a cart lands inside a
+    -- van/car model and the player has to move the vehicle to reach it. Vehicles
+    -- aren't tile objects, so isFree() alone doesn't catch them.
+    if square.isVehicleIntersecting and square:isVehicleIntersecting() then
+        return false
+    end
 
-    -- Must have adequate navigation space (at least 2 adjacent walkable squares)
-    -- This ensures the cart isn't spawned in a corner or blocked area
-    -- Use IsoDirections enum (N, E, S, W)
-    local adjacentFree = 0
+    -- Must be walkable (not blocked by furniture, walls, etc.) and not embedded
+    -- in solid map geometry (e.g. a support column).
+    if not square:isFree(false) then return false end
+    if square.isSolid and square:isSolid() then return false end
+
+    -- Must have adequate navigation space: at least 2 adjacent squares that are
+    -- BOTH free AND reachable from this square (no wall between them). The
+    -- reachability check (isBlockedTo) is what rejects a square boxed in by walls
+    -- or columns — e.g. between the 4 pillars of a gas-station canopy — where the
+    -- neighbours are open but you can't actually path to the cart.
+    local accessible = 0
     local directions = {IsoDirections.N, IsoDirections.E, IsoDirections.S, IsoDirections.W}
     for _, dir in ipairs(directions) do
         local adj = square:getAdjacentSquare(dir)
-        if adj and adj:isFree(false) then
-            adjacentFree = adjacentFree + 1
+        if adj and adj:isFree(false) and not square:isBlockedTo(adj) then
+            accessible = accessible + 1
         end
     end
 
-    if adjacentFree < 2 then return false end
+    if accessible < 2 then return false end
 
     -- Check if square already has a world item (prevent stacking)
     local objects = square:getWorldObjects()
@@ -287,10 +300,21 @@ local function queueSpawn(square, cartType, buildingKey, roomName)
         return false
     end
 
+    -- Resolve the loot context once, here, from the room tag the callers
+    -- already pass: outdoor carts ("outdoor:<ztype>") use the groceries/bags
+    -- theme; interior carts map their room via CartLoot. (See CartLoot.lua.)
+    local context
+    if roomName and string.find(roomName, "^outdoor") then
+        context = "grocery"
+    else
+        context = SaucedCarts.CartLoot.contextForRoom(roomName)
+    end
+
     table.insert(spawnQueue, {
         square = square,
         cartType = cartType,
         buildingKey = buildingKey,
+        context = context,
     })
 
     SaucedCarts.debug(function() return string.format(
@@ -302,6 +326,21 @@ local function queueSpawn(square, cartType, buildingKey, roomName)
         #spawnQueue
     ) end)
     return true
+end
+
+--- Set a spawned cart's visual model + fillState ModData for a fill state.
+---@param cart InventoryItem
+---@param state string "empty"|"partial"|"full"
+local function setCartFillVisual(cart, state)
+    local cartData = SaucedCarts.getCartData(cart)
+    if cartData and cartData.visualModels then
+        local model = cartData.visualModels[state] or cartData.visualModels.empty
+        if model then
+            cart:setStaticModel(model)
+            cart:setWorldStaticModel(model)
+        end
+    end
+    cart:getModData().SaucedCarts_fillState = state
 end
 
 --- Process pending spawn requests
@@ -324,42 +363,69 @@ local function processSpawnQueue()
             local offsetX = 0.3 + ZombRand(40) / 100  -- 0.3-0.7
             local offsetY = 0.3 + ZombRand(40) / 100  -- 0.3-0.7
 
-            -- AddWorldInventoryItem params: (itemType, x, y, z, autoAge, synchSpawn)
-            -- 5th param = autoAge (not used here, pass false)
-            -- 6th param = synchSpawn (true for MP sync to all clients)
-            -- Returns InventoryItem (NOT IsoWorldInventoryObject!)
-            -- NOTE: Do NOT call transmitCompleteItemToClients() after this!
-            -- Double-transmit causes duplicates in self-hosted MP.
-            local cart = request.square:AddWorldInventoryItem(
-                request.cartType,
-                offsetX,
-                offsetY,
-                0,     -- Ground level (z offset)
-                false, -- autoAge
-                true   -- synchSpawn (transmit to clients)
-            )
+            -- Decide whether this cart spawns loaded (mostly empty; see CartLoot).
+            local density = SandboxVars.SaucedCarts and SandboxVars.SaucedCarts.LoadedCartSpawns
+            local load = SaucedCarts.CartLoot.decideCartLoad(density, ZombRand)
+
+            local cart
+            if load.tier == "empty" then
+                -- EMPTY PATH (unchanged): synchSpawn=true transmits the empty cart.
+                -- AddWorldInventoryItem(itemType, x, y, z, autoAge, synchSpawn).
+                -- Do NOT also call transmitCompleteItemToClients() — double-transmit
+                -- dupes the cart in self-hosted MP.
+                cart = request.square:AddWorldInventoryItem(
+                    request.cartType, offsetX, offsetY, 0, false, true)
+                if cart then
+                    SaucedCarts.applyMultipliers(cart)
+                    setCartFillVisual(cart, "empty")
+                    SaucedCarts.debug(function() return string.format(
+                        "Spawned %s at %d,%d,%d (building %s)",
+                        request.cartType, request.square:getX(), request.square:getY(),
+                        request.square:getZ(), request.buildingKey or "outdoor") end)
+                end
+            else
+                -- LOADED PATH: build the item, fill it, then place WITHOUT transmit
+                -- and broadcast the COMPLETE (loaded) item once — the V2 dupe-safe
+                -- place-then-transmit pattern. synchSpawn would broadcast the cart
+                -- empty before we fill it, desyncing contents to clients.
+                local item = instanceItem(request.cartType)
+                if item then
+                    SaucedCarts.applyMultipliers(item)
+                    local placed, weightUsed = SaucedCarts.CartLoot.fillCart(
+                        item, request.context, load.tier, load.count, ZombRand)
+
+                    -- Pad with cheap junk so the cart actually LOOKS loaded: the
+                    -- visual model is capacity-% based and the (deliberately
+                    -- small) loot budget rarely crosses the partial threshold on
+                    -- its own, especially with a big CapacityMultiplier. Capped
+                    -- so a huge cart isn't stuffed. See CartLoot.padToFillState.
+                    local targetRatio = SaucedCarts.CartLoot.fillTargetFor(load.tier)
+                    local junkCount, junkWeight = SaucedCarts.CartLoot.padToFillState(
+                        item, targetRatio, ZombRand)
+
+                    -- Canonical capacity-based visual (same path as in-game fills)
+                    -- now reflects loot + junk. updateCartVisual sets the model +
+                    -- fillState ModData; the contents replicate via the single
+                    -- transmitCompleteItemToClients() below.
+                    SaucedCarts.updateCartVisual(item)
+
+                    -- Item-overload: AddWorldInventoryItem(item, x, y, z, transmit=false)
+                    request.square:AddWorldInventoryItem(item, offsetX, offsetY, 0, false)
+                    if item.transmitCompleteItemToClients then
+                        item:transmitCompleteItemToClients()
+                    end
+                    cart = item
+
+                    SaucedCarts.debug(function() return string.format(
+                        "Loaded %s at %d,%d ctx=%s tier=%s loot=%d(%.1fkg) junk=%d(%.1fkg) -> %s",
+                        request.cartType, request.square:getX(), request.square:getY(),
+                        tostring(request.context), load.tier, placed, weightUsed,
+                        junkCount, junkWeight,
+                        item:getModData().SaucedCarts_fillState or "empty") end)
+                end
+            end
 
             if cart then
-                -- Apply sandbox multipliers (stores raw capacity in ModData)
-                SaucedCarts.applyMultipliers(cart)
-
-                SaucedCarts.debug(function() return string.format(
-                    "Spawned %s at %d,%d,%d (building %s)",
-                    request.cartType,
-                    request.square:getX(),
-                    request.square:getY(),
-                    request.square:getZ(),
-                    request.buildingKey or "outdoor"
-                ) end)
-
-                -- Set empty model directly (new carts are always empty)
-                local cartData = SaucedCarts.getCartData(cart)
-                if cartData and cartData.visualModels and cartData.visualModels.empty then
-                    cart:setStaticModel(cartData.visualModels.empty)
-                    cart:setWorldStaticModel(cartData.visualModels.empty)
-                end
-                cart:getModData().SaucedCarts_fillState = "empty"
-
                 processed = processed + 1
             end
         end

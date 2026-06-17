@@ -57,6 +57,9 @@ function InstantDrop.dropCartSP(player, cartItem)
         return false
     end
 
+    -- Don't drop the cart onto stairs (it'd fall to the floor below).
+    square = SaucedCarts.resolveCartDropSquare(square) or square
+
     -- CRITICAL: Race condition guards against vanilla forceDropHeavyItems()
     -- Cart has heavyitem tag, so many vanilla actions call forceDropHeavyItems():
     -- ISEquipWeaponAction, ISEnterVehicle, ISEquipHeavyItem, ISGrabCorpseAction, etc.

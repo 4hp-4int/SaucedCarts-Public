@@ -70,6 +70,13 @@ local function makeContainer(opts)
     c._drawDirtyCount = 0
     c.setDrawDirty = function(self, v) self._drawDirtyCount = self._drawDirtyCount + 1 end
     c.isDrawDirty = function(self) return self._drawDirtyCount > 0 end
+    -- B42 loot-respawn flags (LootRespawn.java:142 requires both true).
+    c._explored = opts.explored or false
+    c._hasBeenLooted = opts.hasBeenLooted or false
+    c.setExplored = function(self, v) self._explored = v end
+    c.isExplored = function(self) return self._explored end
+    c.setHasBeenLooted = function(self, v) self._hasBeenLooted = v end
+    c.isHasBeenLooted = function(self) return self._hasBeenLooted end
     c.getItems = function(self)
         local list = { _items = self._items }
         list.size = function(s) return #s._items end
@@ -264,6 +271,39 @@ tests["performCartTransfer_marks_both_containers_dirty_container_to_container"] 
     if not Assert.isTrue(src:isDrawDirty(), "source container marked dirty after transfer") then return false end
     return Assert.isTrue(cart:getItemContainer():isDrawDirty(),
         "destination (cart inner) marked dirty after transfer")
+end
+
+-- Regression (2026-06-16): looting straight from a world container into a
+-- cart permanently disabled that container's loot respawn in 42.19 MP.
+-- B42 only respawns a container when BOTH explored AND hasBeenLooted are set
+-- (LootRespawn.java:142). Vanilla sets hasBeenLooted in Remove…Packet.process-
+-- Server / Transaction; our pipeline removes via ISTransferAction:transferItem
+-- -> DoRemoveItem + GameServer.sendRemoveItemFromContainer, neither of which
+-- touches the flag. performCartTransfer must now set both on the source.
+tests["performCartTransfer_marks_source_explored_and_looted"] = function()
+    local item = makeItem({ id = 301 })
+    local src = makeContainer({ typeName = "fridge" })  -- world container, both flags start false
+    src:AddItem(item)
+    local cart = makeCartItem({ parent = { _type = "IsoGridSquare" } })
+    local chr = makeCharacter()
+
+    if not Assert.isFalse(src:isHasBeenLooted(), "precondition: source not yet looted") then return false end
+
+    -- The flag set is server/SP-only (gated on `not isClient()`, mirroring
+    -- vanilla's server-side RemoveInventoryItemFromContainerPacket.process-
+    -- Server). The harness defaults isClient() true, so simulate the
+    -- SP/dedi-server context where LootRespawn actually runs.
+    local origIsClient = _G.isClient
+    _G.isClient = function() return false end
+
+    SaucedCarts.performCartTransfer(chr, item, src, cart:getItemContainer())
+
+    _G.isClient = origIsClient
+
+    if not Assert.isTrue(src:isExplored(),
+        "source container marked explored after looting into cart") then return false end
+    return Assert.isTrue(src:isHasBeenLooted(),
+        "source container marked hasBeenLooted after looting into cart")
 end
 
 tests["performCartTransfer_marks_dest_dirty_on_floor_pickup"] = function()

@@ -129,3 +129,13 @@ option SaucedCarts.OutdoorSpawnDensity
     translation = SaucedCarts_OutdoorSpawnDensity,
     valueTranslation = SaucedCarts_OutdoorSpawnDensity,
 }
+
+option SaucedCarts.LoadedCartSpawns
+{
+    type = enum,
+    numValues = 4,
+    default = 3,
+    page = SaucedCarts,
+    translation = SaucedCarts_LoadedCartSpawns,
+    valueTranslation = SaucedCarts_LoadedCartSpawns,
+}

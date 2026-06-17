@@ -54,6 +54,61 @@ function CartCommands.spawnCart(cartType)
     SaucedCarts.log("Spawned " .. fullType .. " at player position")
 end
 
+--- Spawn a cart at the player's position PRE-LOADED with loot. For testing
+--- world-save persistence (the save/reload data-loss repro): spawn -> save +
+--- quit to desktop (or restart dedi) -> reload -> confirm the cart and its
+--- contents survived. Logs the cart's world id + item count.
+---@param cartType string|nil Cart type name (default: "ShoppingCart")
+---@param itemType string|nil Full item type to fill with (default: "Base.Nails")
+---@param count number|nil How many to add (default: 10)
+function CartCommands.spawnLoadedCart(cartType, itemType, count)
+    cartType = cartType or "ShoppingCart"
+    itemType = itemType or "Base.Nails"
+    count = count or 10
+
+    local player, err = Utils.getPlayer()
+    if not player then
+        SaucedCarts.error(err)
+        return
+    end
+
+    local fullType = Utils.resolveCartType(cartType)
+    if not fullType then
+        SaucedCarts.error("Unknown cart type: " .. cartType)
+        SaucedCarts.log("Available types: " .. Utils.getAvailableCartTypes())
+        return
+    end
+
+    local square = player:getCurrentSquare()
+    if not square then
+        SaucedCarts.error("Player not on valid square")
+        return
+    end
+
+    local item = instanceItem(fullType)
+    if not item then
+        SaucedCarts.error("Failed to create item: " .. fullType)
+        return
+    end
+
+    SaucedCarts.applyMultipliers(item)
+
+    -- Fill the cart's inner container so the repro tests loot loss too.
+    local container = item.getItemContainer and item:getItemContainer()
+    local added = 0
+    if container and container.AddItem then
+        for _ = 1, count do
+            local loot = instanceItem(itemType)
+            if loot and container:AddItem(loot) then added = added + 1 end
+        end
+    end
+
+    square:AddWorldInventoryItem(item, 0.5, 0.5, 0, true)
+    SaucedCarts.log(string.format(
+        "Spawned LOADED %s (id=%s) at player with %d x %s. Save+reload to test persistence.",
+        fullType, tostring(item:getID()), added, itemType))
+end
+
 --- Set the condition of the currently equipped cart
 ---@param condition number Condition percentage (0-100, will be converted to actual value)
 function CartCommands.setCondition(condition)

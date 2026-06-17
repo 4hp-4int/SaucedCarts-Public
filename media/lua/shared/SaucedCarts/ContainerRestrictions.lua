@@ -309,6 +309,9 @@ local function initUnequipHook()
                     return
                 end
 
+                -- Don't leave the cart on stairs (it'd fall to the floor below).
+                square = SaucedCarts.resolveCartDropSquare(square) or square
+
                 -- Apply accumulated durability damage before drop
                 local newCondition = SaucedCarts.Durability.applyAccumulatedDamage(item)
 
@@ -512,6 +515,16 @@ local function initDropActionHook()
                     ISBaseTimedAction.perform(self)
                 end)
                 return
+            end
+        end
+
+        -- Redirect carts off stairs/no-floor squares so they don't fall a level.
+        -- self.sq is where vanilla complete() places the world item.
+        if isCart and not cartBroke and self.sq then
+            local safe = SaucedCarts.resolveCartDropSquare(self.sq)
+            if safe and safe ~= self.sq then
+                SaucedCarts.debug("Drop: redirected cart off stairs to adjacent landing")
+                self.sq = safe
             end
         end
 
