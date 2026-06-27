@@ -1,0 +1,21 @@
+[h1]SaucedCarts v2.1.9[/h1]
+[i]Released: 2026-05-29[/i]
+
+[b]Carts can now spawn outdoors in store parking lots, plus a cleaner, better-performing world-spawning system.[/b]
+
+[h1]What's New[/h1]
+[list]
+[*][b]Outdoor parking-lot spawns.[/b] Carts now occasionally appear in the parking lots of big retail stores (gigamarts, groceries, department stores, warehouses) the way an abandoned cart would in real life. How often carts spawn is unchanged — only [i]where[/i] they can land. New sandbox option [b]"Enable Outdoor Spawns"[/b] (default On) is the master switch.
+[*][b]Addon cart types now mix into shared rooms.[/b] When more than one cart type can appear in the same kind of room, the game now picks from all of them instead of always spawning the first.
+[/list]
+
+[h1]Under the Hood[/h1]
+[list]
+[*][b]World-spawning rework[/b] that mirrors how the game spawns vehicles — lighter on performance and with more honest spawn probabilities. The single-cart-type case behaves exactly as before.
+[/list]
+
+[h1]Compatibility[/h1]
+[list]
+[*][b]Save-safe.[/b] No save-data changes — safe to upgrade mid-save.
+[*][b]Addon authors:[/b] the cart-registration API gains optional outdoor knobs ([i]allowOutdoor[/i] / [i]outdoorWeight[/i]); existing addons load unchanged.
+[/list]
