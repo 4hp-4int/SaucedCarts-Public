@@ -134,7 +134,7 @@ option SaucedCarts.LoadedCartSpawns
 {
     type = enum,
     numValues = 4,
-    default = 3,
+    default = 1,
     page = SaucedCarts,
     translation = SaucedCarts_LoadedCartSpawns,
     valueTranslation = SaucedCarts_LoadedCartSpawns,

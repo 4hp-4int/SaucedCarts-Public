@@ -28,9 +28,12 @@ local CartLoot = SaucedCarts.CartLoot
 -- TUNING
 -- ============================================================================
 
--- LoadedCartSpawns sandbox enum: 1=Off, 2=Rare, 3=Some(default), 4=Common.
--- Value = % chance a spawned cart is loaded (vs empty).
+-- LoadedCartSpawns sandbox enum: 1=Off (default — BETA, opt-in), 2=Rare,
+-- 3=Some, 4=Common. Value = % chance a spawned cart is loaded (vs empty).
 local LOAD_CHANCE = { [1] = 0, [2] = 15, [3] = 40, [4] = 70 }
+-- Nominal density assumed only when decideCartLoad gets a nil density (the
+-- pure-function fallback exercised by tests). Real spawns read the sandbox var,
+-- which now defaults to Off (1) — the loaded-spawns feature ships off by default.
 local LOAD_DEFAULT = 3
 
 -- Of the carts that DO load: % that are a "light" load (rest are "loaded").

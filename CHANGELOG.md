@@ -6,7 +6,7 @@ All notable changes to SaucedCarts are documented here. Latest version first.
 
 ### New / Improved
 
-**Spawned carts can now come pre-loaded with context-appropriate loot.** Most carts still spawn empty — a loaded one is meant to be a find. New `CartLoot.lua` themes the contents to where the cart spawned: groceries outside homes and in parking lots, food in grocery/convenience rooms, building materials in warehouses and storage, tools in hardware/auto stores, and — ultra-rarely (~1.5% of the carts that load at all) — a survivor's cache of weapons and ammo. New sandbox option **"Loaded Cart Spawns"** (Off / Rare / Some / Common, default Some) controls how often. Off = every cart spawns empty (prior behaviour).
+**Spawned carts can now come pre-loaded with context-appropriate loot — shipping as an opt-in BETA, off by default.** New `CartLoot.lua` themes the contents to where the cart spawned: groceries outside homes and in parking lots, food in grocery/convenience rooms, building materials in warehouses and storage, tools in hardware/auto stores, and — ultra-rarely (~1.5% of the carts that load at all) — a survivor's cache of weapons and ammo. New sandbox option **"Loaded Cart Spawns [BETA]"** (Off / Rare / Some / Common, **default Off**) controls how often once enabled. Ships off so every cart spawns empty unless you opt in — the feature is still being tested (same posture as Corpse Storage's BETA rollout).
 
 **Cart push pose now restores after container-allowed actions.** Actions that keep the cart equipped while playing their own animation (smoking, barricading) left the cart model bound at the player's side. `maintainCartPose` now restores the pose unconditionally on the action-finished edge instead of relying on drift detection.
 
