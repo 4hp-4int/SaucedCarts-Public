@@ -2,6 +2,21 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.13 — 2026-07-28 (Door-only E key while pushing a cart)
+
+### New / Improved
+
+**You can now open and close doors with E while pushing a cart.** Previously cart equip set `player:setIgnoreContextKey(true)`, which makes `IsoPlayer.doContext()` — the entire E-key dispatcher — bail before doing anything, doors included. The context key now stays live while pushing: doors resolve through vanilla's own Java-direct `ToggleDoor` path (priority, facing, double doors, garage doors, player-built `IsoThumpable` doors, MP sync — all vanilla code, untouched), while every movement/interaction contextual action that dispatches through the Lua `ContextualActionHandlers` table (climb fence / sheet rope / window, open/close window, sleep/rest, hutch, butcher hook, animal interaction) is gated per-player by the new `Restrictions/ContextActionRestrictions.lua` whenever the acting player is holding a cart. Blocked presses show a throttled "I can't do that while pushing this cart" halo. The controller B-prompt (`ISButtonPrompt`) routes through the same handler table, so gamepads get identical door-only behavior.
+
+### Technical
+
+- **`ClimbOverWall` — the one movement action dispatched Java-direct — stays suppressed** by `setIgnoreAutoVault(true)`, still set on cart equip: decompiled `IsoPlayer.doContextClimbOverWall` bails on the `ignoreAutoVault` flag before considering the climb. No climb path survives with the context key live.
+- **Fail-open gate.** The cart check (`safeIsCart` on the primary hand) is pcall-wrapped; if it ever errors, the vanilla handler runs. A broken check can never lock a cartless player out of vanilla actions.
+- **Curtains stay allowed by design.** Door-curtains toggle via a Java-direct call (`IsoDoor.toggleCurtain`) that Lua can't intercept, so blocking only window curtains would be inconsistent — and neither moves the player.
+- `ignoreContextKey` is a runtime-only `IsoPlayer` field (never serialized), so there's no save migration; unequip still defensively clears it for mixed-version sessions.
+- Save-safe. **No `SCHEMA_VERSION` / `API_VERSION` change.**
+- 10 new offline tests (`OfflineContextActionTests.lua`): wrap coverage, arg passthrough, doors never wrapped, fail-open on a broken cart check, idempotent install, splitscreen per-player gating, blocked-list lock. Suite green at 347/347.
+
 ## v2.1.12 — 2026-06-17 (Loaded cart spawns, B42.19 compat, stairs-drop + loot-respawn fixes)
 
 ### New / Improved
