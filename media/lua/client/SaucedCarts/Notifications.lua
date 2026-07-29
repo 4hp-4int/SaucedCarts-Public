@@ -179,6 +179,14 @@ function Notifications.cantWhileHoldingCart(player, action)
     Notifications.warn(player, text, "cant_while_holding_" .. action)
 end
 
+--- Notify player that an E-key (context key) interaction is blocked while
+--- pushing a cart. Generic wording — the blocked action name is an internal
+--- identifier (e.g. "ClimbThroughWindow"), not player-facing text.
+---@param player IsoPlayer The player
+function Notifications.cantDoThatWithCart(player)
+    Notifications.warn(player, getText("UI_SaucedCarts_CantDoThatWithCart"), "cant_do_that_with_cart")
+end
+
 --- Notify player about orphan carts found
 ---@param player IsoPlayer The player
 ---@param count number Number of orphan carts

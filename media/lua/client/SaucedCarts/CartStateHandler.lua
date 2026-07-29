@@ -163,9 +163,13 @@ local function onPlayerUpdate(player)
         -- Set the cart-push pose animation variables (canonical helper)
         SaucedCarts.applyCartPose(player)
 
-        -- Apply restrictions
-        player:setIgnoreContextKey(true)   -- Block E key / context menu climbing
-        player:setIgnoreAutoVault(true)    -- Block sprint-vault through fences
+        -- Apply restrictions. The E key (context key) stays ENABLED so doors
+        -- still open — Restrictions/ContextActionRestrictions.lua gates every
+        -- non-door contextual action at the Lua dispatch layer instead.
+        -- setIgnoreAutoVault also suppresses the Java-direct ClimbOverWall
+        -- contextual action (doContextClimbOverWall bails on the flag), so
+        -- no climb path survives with the context key live.
+        player:setIgnoreAutoVault(true)    -- Block sprint-vault + E-key wall climb
 
         playerCartState[playerKey] = true
         SaucedCarts.debug("Cart equipped - set animations and restrictions")
@@ -176,8 +180,11 @@ local function onPlayerUpdate(player)
         -- Clear the cart-push pose animation variables (canonical helper)
         SaucedCarts.clearCartPose(player)
 
-        -- Remove restrictions
-        player:setIgnoreContextKey(false)   -- Re-enable E key / context menu climbing
+        -- Remove restrictions. setIgnoreContextKey(false) is a defensive
+        -- clear only: current code never sets it true (E stays enabled while
+        -- pushing; see ContextActionRestrictions), but pre-v2.1.13 sessions
+        -- did — healing here costs nothing and covers mixed states.
+        player:setIgnoreContextKey(false)
         player:setIgnoreAutoVault(false)    -- Re-enable sprint-vault
 
         -- Clear distance tracking (position no longer relevant)

@@ -37,6 +37,7 @@ UI_EN = {
     UI_SaucedCarts_CantDragCart = "I can't fit this cart in there.",
     UI_SaucedCarts_VehicleFull = "The cart won't fit - not enough room.",
     UI_SaucedCarts_CantWhileHoldingCart = "I can't %1 while pushing this cart.",
+    UI_SaucedCarts_CantDoThatWithCart = "I can't do that while pushing this cart.",
     UI_SaucedCarts_OrphansFound = "Found %1 broken cart(s). Right-click to recover items.",
 
     UI_SaucedCarts_CantPickupSleeping = "Cannot pick up while sleeping",
