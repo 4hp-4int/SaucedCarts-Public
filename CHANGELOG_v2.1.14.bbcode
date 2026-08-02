@@ -1,0 +1,15 @@
+[h1]SaucedCarts v2.1.14 — "The Trailer Sees You Now"[/h1]
+
+[b]Fixed: transfers between carts and some modded/admin-spawned vehicles doing nothing until a server restart.[/b]
+If you could move items between your cart and a truck's trunk but NOT its trailer (KI5 rigs especially), and a server restart magically fixed it — this was it. Vehicles spawned at runtime (admin spawn menus and similar) aren't registered in one of the game's internal vehicle lookups until the next restart. The cart's transfer pipeline relied on that lookup and quietly gave up. It now finds those vehicles through a second route, and when a transfer genuinely can't be completed, it refuses cleanly instead of doing nothing (or worse, dropping your items into your backpack).
+
+[b]Fixed: cart transfers into modded vehicle storage being stricter than the game itself.[/b]
+Some modded vehicles (KI5 among them) compute their trunk/bed/rack capacity at runtime; our extra server-side capacity check read the wrong number and blocked transfers vanilla would allow. We now match vanilla's own rules exactly.
+
+[b]Fixed: cart on the ground not changing its appearance as you fill it.[/b]
+The fill-state model (empty / partial / full) now updates immediately when you move items in or out of a cart on the ground — no more pushing it a few steps to make it notice. Other players see the change too.
+
+[b]Better server logs.[/b]
+When a transfer can't complete, dedicated server logs now say exactly why — if something still misbehaves on your server, the log line to send us starts with [b][SaucedCarts] cartTransfer[/b].
+
+No save/database changes — safe to update mid-run. Thanks to the players who reported the trailer behavior with enough detail to chase it down.

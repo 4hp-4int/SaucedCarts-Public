@@ -2,6 +2,32 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.14 — Vehicle transfer resilience + ground-cart visuals
+
+**The "works with the trunk, not the trailer, until restart" fix.** Runtime-spawned
+vehicles (admin `/addvehicle` — `AddVehicleCommand` constructs `BaseVehicle` without
+`VehicleManager.registerVehicle`; only a restart's DB-load path registers them) are
+invisible to `getVehicleById`. `resolveSide`'s vehicle branch fell back to `playerInv`
+and the pre-delegation contains-guard no-op'd every transfer, with `.debug()` bails
+suppressed on dedis. Proven live on a 42.20 dedi against the reporter's exact symptom.
+
+- `classifySide` now sends the vehicle's square; `resolveSide` recovers unregistered
+  vehicles via a `sq:getVehicleContainer()` sweep (chunk vehicle lists, which even
+  unregistered spawns populate).
+- Item lookup is client-routed FIRST (resolved source's `getItemById`), proximity
+  sweeps demoted to fallback — also covers long rigs beyond the old radius.
+- An unresolved vehicle DESTINATION now refuses loudly instead of silently
+  misdelivering cart items into the player's main inventory.
+- Vanilla capacity parity: vehicle-parented destinations are exempt from the
+  server-side `hasRoomFor` hard-refusal, matching `TransactionManager.isConsistent`'s
+  own BaseVehicle exemption. Fixes KI5 item-backed capacities (script 75 /
+  `damnCraft.Trunk` item 25 / uninstalled racks 0) blocking cart transfers.
+- Transfer bail paths promoted to `.log()` — failures are now visible in dedi logs.
+- Ground-cart visual fill state updates on every transfer (dead `onCartContentsChanged`
+  chain replaced by a `performCartTransfer` chokepoint + server `updateGroundCartVisual`
+  broadcast; see `OfflineCartVisualUpdateTests`).
+- New `OfflineVehicleResilienceTests` (6, sensitivity-proven). Suite: 371/371.
+
 ## v2.1.13 — 2026-07-28 (Door-only E key while pushing a cart)
 
 ### New / Improved

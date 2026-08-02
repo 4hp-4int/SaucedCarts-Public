@@ -128,7 +128,19 @@ function ISCartTransferAction.classifySide(container, fallbackCartItem)
         end
     end
     if veh and partIdx and veh.getId then
-        return "vehicle", veh:getId(), nil, nil, nil, dtype, partIdx, nil
+        -- v2.1.14: also send the vehicle's square. Runtime-spawned vehicles
+        -- (admin /addvehicle, debug spawns) are NOT registered in
+        -- VehicleManager's id map until a server restart (AddVehicleCommand
+        -- constructs BaseVehicle directly and never calls registerVehicle;
+        -- the lazy repair in sendVehicles doesn't always fire) — so the
+        -- server's getVehicleById can fail for a vehicle that is standing
+        -- right there. The square gives resolveSide a second discovery
+        -- channel (sq:getVehicleContainer walks chunk vehicle lists, which
+        -- even unregistered spawns populate).
+        local vsq = veh.getSquare and veh:getSquare()
+        local vx, vy, vz
+        if vsq and vsq.getX then vx, vy, vz = vsq:getX(), vsq:getY(), vsq:getZ() end
+        return "vehicle", veh:getId(), vx, vy, vz, dtype, partIdx, nil
     end
     -- World container — bound to an IsoObject on a specific square. Before
     -- v2.1.5, world containers collapsed to "inv" and the server resolveSide

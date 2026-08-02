@@ -338,7 +338,17 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
 
     -- === Container → container (cart ↔ inv, cart ↔ cart) ===
     if not srcContainer or not destContainer then return false end
-    if destContainer.hasRoomFor and not destContainer:hasRoomFor(player, item) then
+    -- v2.1.14 vanilla parity: vanilla's server-side consistency check
+    -- (TransactionManager.isConsistent:264) EXEMPTS destinations parented
+    -- to a BaseVehicle from capacity rejection — the client's own check is
+    -- the only vanilla gate for vehicle containers. Being stricter than
+    -- vanilla broke transfers into modded vehicles whose authoritative
+    -- capacity is item-backed/runtime-set (KI5: script says 75, installed
+    -- damnCraft.Trunk item says 25, uninstalled racks say 0).
+    local destParent = destContainer.getParent and destContainer:getParent()
+    local destIsVehicle = destParent and instanceof and instanceof(destParent, "BaseVehicle")
+    if not destIsVehicle
+        and destContainer.hasRoomFor and not destContainer:hasRoomFor(player, item) then
         SaucedCarts.debug("performCartTransfer: dest has no room")
         return false
     end
@@ -833,7 +843,7 @@ local function handleCartTransfer(player, args)
     -- container resolution) pin which path is failing in ~one repro.
     local cart = findCartNearPlayer(player, args.cartId)
     if not cart then
-        SaucedCarts.debug(function()
+        SaucedCarts.log(function()
             local psq = player.getCurrentSquare and player:getCurrentSquare()
             local sqStr = psq and (psq:getX() .. "," .. psq:getY() .. "," .. psq:getZ()) or "nil"
             local invSize = (player.getInventory and player:getInventory() and player:getInventory().getItems
@@ -847,15 +857,9 @@ local function handleCartTransfer(player, args)
         return
     end
 
-    local item = findItemNearPlayer(player, args.itemId)
-    if not item then
-        SaucedCarts.debug(function() return string.format(
-            "cartTransfer: item %s NOT FOUND for player (cart=%s direction=%s srcKind=%s destKind=%s)",
-            tostring(args.itemId), tostring(args.cartId),
-            tostring(args.direction), tostring(args.srcKind), tostring(args.destKind))
-        end)
-        return
-    end
+    -- v2.1.14: item lookup moved AFTER side resolution — the client already
+    -- told us which container the item is in; looking there first (instead
+    -- of proximity sweeps) survives long rigs and odd positions.
 
     local cartContainer = cart.getItemContainer and cart:getItemContainer()
     local playerInv = player:getInventory()
@@ -914,14 +918,51 @@ local function handleCartTransfer(player, args)
         -- vehicle by id, then resolve the part by index. cartId carries the
         -- vehicle id; objIndex carries the part index.
         if kind == "vehicle" and cartId and objIndex then
-            -- Try the canonical Lua global first; fall back to VehicleManager
-            -- in case `getVehicleById` isn't yet defined at this point in load
-            -- order on some builds.
+            -- CHANNEL 1: the id map. Try the canonical Lua global first;
+            -- fall back to VehicleManager in case `getVehicleById` isn't yet
+            -- defined at this point in load order on some builds.
             local veh
             if getVehicleById then veh = getVehicleById(cartId) end
             if not veh and VehicleManager and VehicleManager.instance
                 and VehicleManager.instance.getVehicleByID then
                 veh = VehicleManager.instance:getVehicleByID(cartId)
+            end
+            -- CHANNEL 2 (v2.1.14): square sweep around the client-supplied
+            -- vehicle position, then around the player. Runtime-spawned
+            -- vehicles (admin /addvehicle — AddVehicleCommand constructs
+            -- BaseVehicle directly and never registers it; healed only by a
+            -- server restart) are invisible to the id map but reachable via
+            -- sq:getVehicleContainer(), which walks chunk vehicle lists.
+            -- Root cause of the "cart works with the trunk but not the
+            -- trailer until the server restarts" reports.
+            if not veh then
+                local centers = {}
+                if sqX and sqY and sqZ then centers[#centers + 1] = { sqX, sqY, sqZ } end
+                local psq = player:getCurrentSquare()
+                if psq then centers[#centers + 1] = { psq:getX(), psq:getY(), psq:getZ() } end
+                local seen = {}
+                for _, ctr in ipairs(centers) do
+                    for dy = -6, 6 do
+                        for dx = -6, 6 do
+                            local sq = getCell() and getCell():getGridSquare(ctr[1] + dx, ctr[2] + dy, ctr[3])
+                            local v = sq and sq.getVehicleContainer and sq:getVehicleContainer()
+                            if v and not seen[tostring(v)] then
+                                seen[tostring(v)] = true
+                                if v.getId and v:getId() == cartId then
+                                    veh = v
+                                    break
+                                end
+                            end
+                        end
+                        if veh then break end
+                    end
+                    if veh then break end
+                end
+                if veh then
+                    SaucedCarts.log(function() return string.format(
+                        "resolveSide: vehicle %s recovered via square sweep (not in id map — runtime-spawned?)",
+                        tostring(cartId)) end)
+                end
             end
             if veh and veh.getPartByIndex then
                 local part = veh:getPartByIndex(objIndex)
@@ -930,9 +971,13 @@ local function handleCartTransfer(player, args)
                     if c then return c, nil end
                 end
             end
-            SaucedCarts.debug(function() return string.format(
-                "resolveSide: vehicle %s part %s NOT FOUND; falling back to playerInv",
+            -- HARD FAIL (v2.1.14): a vehicle side that doesn't resolve must
+            -- NOT silently fall through to playerInv — for direction "out"
+            -- that misdelivers cart items into the player's main inventory.
+            SaucedCarts.log(function() return string.format(
+                "resolveSide: vehicle %s part %s UNRESOLVED (id map + square sweep both missed)",
                 tostring(cartId), tostring(objIndex)) end)
+            return nil, nil, true
         end
         -- v2.1.5/2.1.6: world container — the client told us this side is a
         -- shelf / freezer / fridge / barbecue / wardrobe / etc. bound to an
@@ -1019,20 +1064,52 @@ local function handleCartTransfer(player, args)
     -- Plug in the cart reference (the "main" cart for this transfer) on
     -- whichever side has direction set to it.
     local srcContainer, destContainer, srcSquare, dropSquare
+    local srcFailed, destFailed
     if args.direction == "out" then
         srcContainer = cartContainer
-        destContainer, dropSquare = resolveSide(
+        destContainer, dropSquare, destFailed = resolveSide(
             args.destKind, args.destCartId,
             args.destSqX, args.destSqY, args.destSqZ,
             args.destContType, false, args.destObjIdx, args.destContIdx
         )
     else
-        srcContainer, srcSquare = resolveSide(
+        srcContainer, srcSquare, srcFailed = resolveSide(
             args.srcKind, args.srcCartId,
             args.srcSqX, args.srcSqY, args.srcSqZ,
             args.srcContType, true, args.srcObjIdx, args.srcContIdx
         )
         destContainer = cartContainer
+    end
+
+    -- v2.1.14: a destination that hard-failed to resolve must not be
+    -- silently replaced with the player's inventory — that MISDELIVERS
+    -- cart items into main inv (the old "my stuff went to my backpack"
+    -- reports). Refusing loudly is strictly better: the item stays where
+    -- it was and the log names the failure.
+    if args.direction == "out" and destFailed then
+        SaucedCarts.log(function() return string.format(
+            "cartTransfer (out): destination %s/%s UNRESOLVED — refusing (item stays in cart)",
+            tostring(args.destKind), tostring(args.destCartId)) end)
+        return
+    end
+
+    -- v2.1.14: client-routed item lookup FIRST — the resolved source (or
+    -- the cart, for "out") is where the client says the item lives. The
+    -- proximity sweep becomes the fallback instead of the only channel.
+    local item
+    local routedSrc = (args.direction == "out") and cartContainer or srcContainer
+    if routedSrc and routedSrc.getItemById then
+        item = routedSrc:getItemById(args.itemId)
+    end
+    item = item or findItemNearPlayer(player, args.itemId)
+    if not item then
+        SaucedCarts.log(function() return string.format(
+            "cartTransfer: item %s NOT FOUND (cart=%s direction=%s srcKind=%s destKind=%s srcResolved=%s)",
+            tostring(args.itemId), tostring(args.cartId),
+            tostring(args.direction), tostring(args.srcKind), tostring(args.destKind),
+            tostring(srcContainer ~= nil))
+        end)
+        return
     end
 
     -- DEFENSIVE: handle old clients (pre-v2.1.5) that classify world
@@ -1053,7 +1130,7 @@ local function handleCartTransfer(player, args)
     -- with src==dest, broadcasting a spurious remove+add cycle that hits
     -- clients with "container already has id" (Java AddItem rejecting the
     -- re-add). No-op in that case.
-    if args.direction ~= "out" and srcContainer and item.getContainer then
+    if args.direction ~= "out" and item.getContainer then
         local realSrc = item:getContainer()
         if realSrc and realSrc == destContainer then
             SaucedCarts.debug(function() return string.format(
@@ -1061,14 +1138,24 @@ local function handleCartTransfer(player, args)
                 tostring(args.itemId)) end)
             return
         end
+        -- v2.1.14: recovery no longer requires a resolved srcContainer —
+        -- when the vehicle side hard-fails (runtime-spawned vehicle not in
+        -- the id map), the item's own container IS the source of truth.
         if realSrc and realSrc ~= srcContainer then
-            SaucedCarts.debug(function() return string.format(
+            SaucedCarts.log(function() return string.format(
                 "cartTransfer: client claimed srcKind=%s (%s), but item lives in %s — using real container",
-                tostring(args.srcKind), tostring(srcContainer:getType()),
+                tostring(args.srcKind),
+                tostring(srcContainer and srcContainer.getType and srcContainer:getType() or "unresolved"),
                 tostring(realSrc.getType and realSrc:getType() or "?"))
             end)
             srcContainer = realSrc
         end
+    end
+    if args.direction ~= "out" and not srcContainer then
+        SaucedCarts.log(function() return string.format(
+            "cartTransfer: source %s/%s UNRESOLVED and item container unknown — refusing",
+            tostring(args.srcKind), tostring(args.srcCartId)) end)
+        return
     end
     -- Symmetric idempotence for "out": if item is already in dest (another
     -- container we unloaded to), no-op. For "out" there's no reliable
@@ -1099,7 +1186,9 @@ local function handleCartTransfer(player, args)
         for i = 1, #args.itemIds do
             local id = args.itemIds[i]
             if id ~= args.itemId then
-                local extra = findItemNearPlayer(player, id)
+                local extra = (srcContainer and srcContainer.getItemById
+                        and srcContainer:getItemById(id))
+                    or findItemNearPlayer(player, id)
                 if extra then
                     local already = extra.getContainer and extra:getContainer()
                     if already ~= destContainer then

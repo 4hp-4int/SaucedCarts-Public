@@ -1,0 +1,5 @@
+@Frost, hi! I don't mind at all, please don't hesitate to share feedback and ideas.
+
+I think I can revisit this. My original intention with that behavior was to avoid things like fence jumping while you have a cart in your hands, since I wasn't about to make custom animations for that, lol. Doors though, like you mentioned, can still be opened if you right click the door you're trying to enter, so that has always been a bit inconsistent.
+
+I'm happy to re-evaluate it. I just need to make sure I can enable the behavior for doors only.

@@ -132,14 +132,15 @@ local function initContainerRestrictions()
                         SaucedCarts.debug(function() return "isItemAllowed: allowing cart to floor (type check)" end)
                         return  -- Early exit - floor is always allowed
                     elseif SaucedCarts.isVehicleContainerType(containerType) then
-                        -- Vehicle container detected by type name - check capacity
-                        if vehicleContainerHasRoom(self, item) then
-                            shouldBlock = false
-                            SaucedCarts.debug(function() return "isItemAllowed: allowing cart to vehicle container (type: " .. containerType .. ")" end)
-                        else
-                            shouldBlock = true
-                            SaucedCarts.debug(function() return "isItemAllowed: blocking cart - vehicle at capacity (type: " .. containerType .. ")" end)
-                        end
+                        -- v2.1.14 vanilla parity: vehicle containers are
+                        -- ALLOWED without a server-side capacity block.
+                        -- Vanilla's TransactionManager exempts BaseVehicle-
+                        -- parented destinations from capacity rejection; the
+                        -- client's own hasRoomFor is the vanilla gate. Our
+                        -- extra block used the raw capacity field, which is
+                        -- wrong for modded vehicles with item-backed /
+                        -- runtime-set capacities (KI5).
+                        shouldBlock = false
                         return  -- Early exit - vehicle check complete
                     end
                 end
@@ -159,19 +160,11 @@ local function initContainerRestrictions()
                     -- Player's main inventory is allowed - needed for pickup/equip
                     shouldBlock = false
                 elseif instanceof(parent, "BaseVehicle") then
-                    -- Vehicle containers allowed if there's capacity
-                    if vehicleContainerHasRoom(self, item) then
-                        shouldBlock = false
-                    else
-                        shouldBlock = true
-                    end
+                    -- v2.1.14 vanilla parity: allowed, no server capacity block
+                    shouldBlock = false
                 elseif instanceof(parent, "VehiclePart") then
-                    -- Vehicle part containers (mods) - also check capacity
-                    if vehicleContainerHasRoom(self, item) then
-                        shouldBlock = false
-                    else
-                        shouldBlock = true
-                    end
+                    -- v2.1.14 vanilla parity: allowed, no server capacity block
+                    shouldBlock = false
                 else
                     -- Everything else is blocked (bags, backpacks, furniture, etc.)
                     shouldBlock = true
