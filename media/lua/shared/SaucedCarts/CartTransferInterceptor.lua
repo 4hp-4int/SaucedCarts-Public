@@ -408,6 +408,40 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
     return true
 end
 
+-- ============================================================================
+-- VISUAL REFRESH CHOKEPOINT (v2.1.14)
+-- ============================================================================
+-- performCartTransfer is the single funnel every cart move goes through:
+-- SP local perform, dedi handleCartTransfer, and the dedi's double-perform
+-- else-branch. The event that used to drive visual updates
+-- (onCartContentsChanged, fired from a hook on vanilla
+-- ISInventoryTransferAction.perform in VisualUpdateQueue) went dead when the
+-- interceptor became universal in v2.1.4 — cart transfers never run the
+-- vanilla action, so ground carts only repainted once the pushing
+-- reconciler in CartStateHandler caught the drift. Refreshing here is
+-- server-authoritative: fill state is computed from post-move state, and
+-- updateCartVisual's own no-change short-circuit makes the dedi
+-- double-perform and per-batch-item repeats free.
+do
+    local coreTransfer = SaucedCarts.performCartTransfer
+    SaucedCarts.performCartTransfer = function(player, item, srcContainer, destContainer, dropSquare, srcSquare)
+        local ok = coreTransfer(player, item, srcContainer, destContainer, dropSquare, srcSquare)
+        if ok then
+            pcall(function()
+                local srcCart  = containerToCart(srcContainer)
+                local destCart = containerToCart(destContainer)
+                if srcCart and SaucedCarts.updateCartVisual then
+                    SaucedCarts.updateCartVisual(srcCart, player)
+                end
+                if destCart and destCart ~= srcCart and SaucedCarts.updateCartVisual then
+                    SaucedCarts.updateCartVisual(destCart, player)
+                end
+            end)
+        end
+        return ok
+    end
+end
+
 -- Backwards-compat alias for anything still calling performCartDeposit.
 SaucedCarts.performCartDeposit = function(player, item, cartItem)
     if not player or not item or not cartItem then return false end

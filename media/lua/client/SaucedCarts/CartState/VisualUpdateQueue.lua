@@ -173,16 +173,17 @@ local function onCartContentsChanged(cart, player)
 
     local worldItem = cart:getWorldItem()
     if worldItem and isClient() then
-        -- Ground cart in MP: client pre-calculates fill state and sends to server.
-        -- This avoids race conditions where server state lags behind client prediction.
-        -- The client's local state is correct after ISInventoryTransferAction completes locally.
+        -- Ground cart in MP: ask the server to recalculate and broadcast.
+        -- Do NOT send client-precalculated fillState/modelName: since the
+        -- interceptor became universal (v2.1.4) the client no longer applies
+        -- cart moves locally — the server does and broadcasts — so any
+        -- client-side calculation here is pre-transfer (stale). The server
+        -- handler falls back to its own authoritative calculation when the
+        -- fields are absent. (Primary visual path is now the
+        -- performCartTransfer chokepoint in CartTransferInterceptor; this
+        -- event path is belt-and-suspenders for un-intercepted transfers.)
         local location = SaucedCarts.Network.getGroundCartLocation(cart)
         if location then
-            -- Pre-calculate fill state and model from client's current (post-transfer) state
-            local fillState = SaucedCarts.calculateFillState(cart)
-            local modelName = SaucedCarts.buildCartModelName(cart, fillState)
-            location.fillState = fillState
-            location.modelName = modelName
             SaucedCarts.Network.sendToServer(player, "syncGroundCartVisual", location)
         end
     else

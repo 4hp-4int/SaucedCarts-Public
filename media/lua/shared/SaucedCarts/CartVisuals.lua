@@ -240,10 +240,24 @@ local function updateCartVisual(cart, player)
     -- MP sync: Server-authoritative - only server triggers sync to clients
     -- Clients update locally for responsiveness, server corrects on next sync point
     -- Note: syncItemModData fails for world items (container not replicated to clients)
-    -- Ground carts sync via onCartVisualUpdate event → syncGroundCartVisual broadcast
-    if isServer() and player and not cart:getWorldItem() then
+    -- Ground carts instead broadcast updateGroundCartVisual (received in
+    -- CartStateHandler) so every client repaints the world model.
+    local worldItem = cart:getWorldItem()
+    if isServer() and player and not worldItem then
         syncItemModData(player, cart)
         syncItemFields(player, cart)
+    elseif isServer() and worldItem then
+        local sq = worldItem.getSquare and worldItem:getSquare()
+        if sq and SaucedCarts.Network and SaucedCarts.Network.broadcast then
+            SaucedCarts.Network.broadcast("updateGroundCartVisual", {
+                squareX = sq:getX(),
+                squareY = sq:getY(),
+                squareZ = sq:getZ(),
+                cartId = cart:getID(),
+                fillState = fillState,
+                modelName = modelName,
+            })
+        end
     end
 
     -- Debug logging (guarded to avoid string concat when debug off)
