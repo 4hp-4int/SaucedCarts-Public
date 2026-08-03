@@ -6,6 +6,9 @@ If you could move items between your cart and a truck's trunk but NOT its traile
 [b]Fixed: cart transfers into modded vehicle storage being stricter than the game itself.[/b]
 Some modded vehicles (KI5 among them) compute their trunk/bed/rack capacity at runtime; our extra server-side capacity check read the wrong number and blocked transfers vanilla would allow. We now match vanilla's own rules exactly.
 
+[b]Fixed: Corpse Storage (BETA) broken by the Build 42.20 update.[/b]
+If you have the "Enable Corpse Storage" sandbox option on, loading a corpse into a cart on 42.20 either got blocked with "Can't do this while dragging a corpse" or played the animation and then left the corpse lying on the ground. The 42.20 update changed how the game handles dragged corpses under the hood; the cart load now works with the new system. Small behavior change that comes with it: if the load gets interrupted (you walk away mid-animation), you keep hold of the corpse instead of dropping it.
+
 [b]Fixed: cart on the ground not changing its appearance as you fill it.[/b]
 The fill-state model (empty / partial / full) now updates immediately when you move items in or out of a cart on the ground — no more pushing it a few steps to make it notice. Other players see the change too.
 
