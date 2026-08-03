@@ -31,16 +31,30 @@ suppressed on dedis. Proven live on a 42.20 dedi against the reporter's exact sy
   the 8 "recursive require()" warnings that appeared in every context and
   scared users on heavily-modded servers into filing reports.
 - New `OfflineVehicleResilienceTests` (6, sensitivity-proven). Suite: 371/371.
-- **Corpse Storage [BETA]: loading a corpse into a cart no longer fails with
-  "Can't do this while dragging a corpse."** Recent B42 builds gate the timed-action
-  queue: `ISTimedActionQueue.add` rejects any action queued while `isDraggingCorpse()`
-  unless the action's Lua table sets `allowedWhileDraggingCorpses` — checked at
-  queue-add time, before `:start()` runs. `ISCartLoadCorpseAction` opted out via the
-  Java setter in `:start()`, which the guard never let execute. The flag now lives in
-  `:new()` (vanilla `ISDropCorpseIntoContainer` pattern); `LuaTimedActionNew`'s
-  constructor propagates the same field to the Java-side flag read by
-  `PlayerDraggingCorpse`/`SwipeStatePlayer`, so one field covers both layers.
-  Regression test in `OfflineCorpseStorageTests` (sensitivity-proven). Suite: 372/372.
+- **Corpse Storage [BETA]: repaired on B42.20.** The 42.20 corpse-storage rework
+  (vanilla's own drop-corpse-into-container system) broke our load pipeline three
+  ways, each fixed:
+  1. *"Can't do this while dragging a corpse."* `ISTimedActionQueue.add` now rejects
+     any action queued while `isDraggingCorpse()` unless its Lua table sets
+     `allowedWhileDraggingCorpses` — checked at queue-add, before `:start()` runs,
+     where our opt-out used to live. The flag moved to `:new()` (vanilla
+     `ISDropCorpseIntoContainer` pattern); `LuaTimedActionNew` propagates it to the
+     Java flag read by `PlayerDraggingCorpse`/`SwipeStatePlayer`.
+  2. *Action ran but the corpse stayed on the ground.* `:start()` released the
+     grapple early (for the heave anim); 42.20's `PlayerDraggingCorpse.exit` now
+     `LetGoOfGrappled("Dropped")`s immediately, reverting the wrapper zombie to a
+     ground corpse before the handler could resolve it. The grapple is now held
+     through the action (as vanilla's own container-drop does) and released at the
+     last moment — server handler releases before converting; MP client releases in
+     `:perform` after the command is sent. Bonus: cancelling the action mid-way now
+     leaves you holding the corpse instead of dropping it.
+  3. *`becomeCorpseSilently` no longer exists in 42.20.* Wrapper→corpse conversion
+     falls back to `dieNetwork(nil, nil, false, nil)` — the public replacement,
+     whose `IsoDeadBody` constructor also removes the wrapper from the world. Nil
+     killer means no kill-attribution side effects.
+  Silent resolution-failure bails promoted from `.debug()` to `.log()` so this
+  failure class is visible in SP and dedi logs. 3 regression tests in
+  `OfflineCorpseStorageTests` (sensitivity-proven). Suite: 374/374.
 
 ## v2.1.13 — 2026-07-28 (Door-only E key while pushing a cart)
 

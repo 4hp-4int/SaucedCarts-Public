@@ -362,15 +362,32 @@ end
 -- if the first hasn't completed yet).
 local inFlight = {}
 
+--- Convert a living (or reanimated-wrapper) character into an IsoDeadBody.
+--- Pre-B42.20: becomeCorpseSilently. B42.20 removed it; the replacement is
+--- dieNetwork(killer, weapon, isGory, listener) — public, returns the
+--- IsoDeadBody, and its IsoDeadBody(died) constructor removes the source
+--- character from world/square itself (IsoDeadBody.java:388-389). nil
+--- killer means no attribution: no kill-count increment, onKilled no-ops.
+local function killToCorpse(char)
+    if char.becomeCorpseSilently then
+        local ok, body = pcall(function() return char:becomeCorpseSilently() end)
+        if ok then return body end
+        return nil
+    end
+    if char.dieNetwork then
+        local ok, body = pcall(function() return char:dieNetwork(nil, nil, false, nil) end)
+        if ok then return body end
+    end
+    return nil
+end
+
 local function resolveDeadBody(grappledTarget)
     if not grappledTarget then return nil end
     if instanceof(grappledTarget, "IsoDeadBody") then
         return grappledTarget
     end
-    if instanceof(grappledTarget, "IsoGameCharacter")
-        and grappledTarget.becomeCorpseSilently then
-        local ok, body = pcall(function() return grappledTarget:becomeCorpseSilently() end)
-        if ok then return body end
+    if instanceof(grappledTarget, "IsoGameCharacter") then
+        return killToCorpse(grappledTarget)
     end
     return nil
 end
@@ -551,7 +568,10 @@ function CorpseStorage.handleLoadCorpseToCart(player, args)
             -- Look it up directly — doesn't depend on live grapple state.
             local zombie = findGrappleZombieByOnlineId(tonumber(ghostBodyId))
             if not zombie then
-                SaucedCarts.debug(function()
+                -- .log, not .debug: this bail is the classic "action runs,
+                -- corpse stays on the ground" symptom and must be visible
+                -- in non--debug SP and dedi logs.
+                SaucedCarts.log(function()
                     return "loadCorpseToCart: no grapple-zombie with onlineId=" ..
                         tostring(ghostBodyId) .. " in cell"
                 end)
@@ -572,10 +592,7 @@ function CorpseStorage.handleLoadCorpseToCart(player, args)
             -- walk. Letting go while the wrapper is still alive lets vanilla
             -- clean up properly, then we kill it for the corpse spawn.
             releaseGrapple(player)
-            if zombie.becomeCorpseSilently then
-                local okB, body = pcall(function() return zombie:becomeCorpseSilently() end)
-                deadBody = okB and body or nil
-            end
+            deadBody = killToCorpse(zombie)
         else
             -- ghostKind == "body": the grappled target was already a
             -- dead body (rare — would have been reanimated otherwise).
@@ -594,7 +611,7 @@ function CorpseStorage.handleLoadCorpseToCart(player, args)
         end
 
         if not deadBody then
-            SaucedCarts.debug(function()
+            SaucedCarts.log(function()
                 return "loadCorpseToCart: resolution failed " ..
                     "(kind=" .. tostring(ghostKind) .. " id=" .. tostring(ghostBodyId) .. ")"
             end)
@@ -603,7 +620,7 @@ function CorpseStorage.handleLoadCorpseToCart(player, args)
 
         local corpseItem = deadBody.getItem and deadBody:getItem()
         if not corpseItem then
-            SaucedCarts.debug("loadCorpseToCart: deadBody:getItem() returned nil")
+            SaucedCarts.log("loadCorpseToCart: deadBody:getItem() returned nil")
             return false
         end
 

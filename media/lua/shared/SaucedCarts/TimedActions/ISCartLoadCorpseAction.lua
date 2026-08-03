@@ -121,19 +121,22 @@ function ISCartLoadCorpseAction:waitToStart()
 end
 
 function ISCartLoadCorpseAction:start()
-    -- Capture ghost info BEFORE releasing the grapple — getGrapplingTarget
-    -- returns nil once setDoGrappleLetGo fires. Stash on self for :perform.
+    -- Capture ghost info for :perform while the grapple is guaranteed live.
     self._ghostId, self._ghostKind, self._ghostX, self._ghostY, self._ghostZ =
         captureGhost(self.character)
 
-    -- Release grapple immediately on the LOCAL VM only. The drag-corpse
-    -- state was suppressing our Loot anim — releasing early lets the
-    -- "heaving corpse into cart" motion actually play during the timed
-    -- action. Server-side grapple is left engaged so the load handler at
-    -- :perform can still resolve via id (see C2).
-    if not isServer() and self.character.setDoGrappleLetGo then
-        pcall(function() self.character:setDoGrappleLetGo() end)
-    end
+    -- Do NOT release the grapple here. B42.20's PlayerDraggingCorpse state
+    -- exits on release and immediately LetGoOfGrappled("Dropped")s — the
+    -- wrapper zombie reverts to a ground corpse, so by :perform there is
+    -- nothing left to resolve (SP shares the VM; in MP the replicated
+    -- release kills the server-side wrapper the same way). We instead hold
+    -- the grapple through the action — vanilla's own ISDropCorpseIntoContainer
+    -- does exactly this — and release at the last moment: the server handler
+    -- releases before converting, and the MP client releases in :perform
+    -- after the command is sent. Cost: the Loot anim stays suppressed by the
+    -- drag state (cosmetic; matches vanilla's drop-into-container feel).
+    -- Bonus: cancelling the action mid-way now leaves the player still
+    -- holding the corpse instead of dropping it.
 
     self:setActionAnim("Loot")
     self:setAnimVariable("LootPosition", "Low")
@@ -190,8 +193,17 @@ function ISCartLoadCorpseAction:perform()
 
         if isClient() then
             SaucedCarts.Network.sendToServer(self.character, "loadCorpseToCart", payload)
+            -- Release the LOCAL grapple only after the command is on the
+            -- wire — the server resolves its own wrapper by the captured
+            -- id. The local wrapper reverts to a client-side ghost body;
+            -- the server's removeGhostCorpse broadcast purges it.
+            if self.character.setDoGrappleLetGo then
+                pcall(function() self.character:setDoGrappleLetGo() end)
+            end
         else
-            -- SP / dedi-server path: invoke the handler directly.
+            -- SP / dedi-server path: invoke the handler directly. The
+            -- handler releases the grapple itself, in the proven order
+            -- (release while wrapper still alive, then convert).
             SaucedCarts.CorpseStorage.handleLoadCorpseToCart(self.character, payload)
         end
     end

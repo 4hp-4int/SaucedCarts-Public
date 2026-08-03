@@ -1120,4 +1120,57 @@ tests["load_action_is_allowed_while_dragging_corpse"] = function()
         "vanilla queue-add drag-corpse gate does not reject the load action")
 end
 
+tests["start_does_not_release_grapple"] = function()
+    -- B42.20's PlayerDraggingCorpse.exit LetGoOfGrappled("Dropped")s the
+    -- moment the grapple releases — the wrapper reverts to a ground corpse
+    -- and the handler has nothing left to resolve ("action runs, corpse
+    -- stays on the ground"). :start must therefore HOLD the grapple; the
+    -- release moved to :perform (MP client) / the server handler.
+    require "SaucedCarts/TimedActions/ISCartLoadCorpseAction"
+    local origIO = patchInstanceof()
+    local deadBody = makeDeadBody()
+    local player = makeDraggingPlayer(deadBody)
+    local grappleable = player:getGrappleable()
+    local cart = makeRegisteredCart()
+    local action = ISCartLoadCorpseAction:new(player, cart)
+    -- Offline stand-in for the Java-side action object that
+    -- ISBaseTimedAction:setActionAnim/setAnimVariable delegate to.
+    action.action = { setActionAnim = function() end, setAnimVariable = function() end }
+
+    action:start()
+    _G.instanceof = origIO
+
+    if not Assert.equal(grappleable.letGoCount, 0,
+        ":start does NOT release the grapple") then return false end
+    return Assert.equal(action._ghostKind, "body",
+        "ghost still captured in :start while the grapple is live")
+end
+
+tests["resolveDeadBody_dieNetwork_fallback_B4220"] = function()
+    -- B42.20 removed becomeCorpseSilently entirely. killToCorpse must fall
+    -- back to dieNetwork(nil, nil, false, nil) — public, Lua-exposed,
+    -- returns the IsoDeadBody (and its ctor removes the source character
+    -- from world/square itself).
+    local origIO = patchInstanceof()
+    local deadBody = makeDeadBody()
+    local living = makeLivingGrappled({ deadBody = deadBody })
+    living.becomeCorpseSilently = nil          -- the 42.20 API shape
+    living._dieNetworkCalls = 0
+    living.dieNetwork = function(self, killer, weapon, isGory, listener)
+        self._dieNetworkCalls = self._dieNetworkCalls + 1
+        self._dieNetworkKiller = killer
+        return deadBody
+    end
+
+    local resolved = CS._resolveDeadBody(living)
+    _G.instanceof = origIO
+
+    if not Assert.equal(resolved, deadBody,
+        "dieNetwork fallback resolves the dead body") then return false end
+    if not Assert.equal(living._dieNetworkCalls, 1,
+        "dieNetwork invoked exactly once") then return false end
+    return Assert.isNil(living._dieNetworkKiller,
+        "nil killer — no kill attribution side effects")
+end
+
 return tests
