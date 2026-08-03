@@ -25,6 +25,7 @@ local Assert = PZTestKit.Assert
 local F = PZTestKit.Fixtures
 
 require "SaucedCarts/Core"
+require "SaucedCarts/CartTransferInterceptor"
 require "SaucedCarts/Durability"
 
 local Durability = SaucedCarts.Durability

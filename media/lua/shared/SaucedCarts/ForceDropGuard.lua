@@ -31,12 +31,13 @@
 --          it globally.
 -- ============================================================================
 --
--- LOAD ORDER: Required from Core.lua at the end of its load. Do NOT add
--- `require "SaucedCarts/Core"` here — that would trigger a recursive
--- require warning because Core hasn't finished loading when we're loaded.
--- The SaucedCarts namespace, SaucedCarts.isCart, and SaucedCarts.debug
--- are already defined by the time this file runs.
+-- LOAD ORDER: PZ's dir scan loads this file; the require below guarantees
+-- Core initializes first. (Safe since v2.1.14 — Core no longer requires
+-- submodules back, so no recursive-require cycle. The old "do NOT require
+-- Core here" convention is dead.)
 -- ============================================================================
+
+require "SaucedCarts/Core"
 
 local ForceDropGuard = {}
 

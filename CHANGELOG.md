@@ -26,6 +26,10 @@ suppressed on dedis. Proven live on a 42.20 dedi against the reporter's exact sy
 - Ground-cart visual fill state updates on every transfer (dead `onCartContentsChanged`
   chain replaced by a `performCartTransfer` chokepoint + server `updateGroundCartVisual`
   broadcast; see `OfflineCartVisualUpdateTests`).
+- Require-cycle cleanup: Core no longer requires its submodules back (PZ's
+  dir scan loads them; every module now declares its own dependencies). Kills
+  the 8 "recursive require()" warnings that appeared in every context and
+  scared users on heavily-modded servers into filing reports.
 - New `OfflineVehicleResilienceTests` (6, sensitivity-proven). Suite: 371/371.
 
 ## v2.1.13 — 2026-07-28 (Door-only E key while pushing a cart)

@@ -17,11 +17,12 @@
 --   modData.SaucedCarts_batteryCharge = 0.0-1.0
 --   modData.SaucedCarts_isLightActive = true|false
 --
--- LOAD ORDER: This file is loaded by Core.lua (via Durability).
---             Do NOT add require "SaucedCarts/Core" here (causes recursive require warning).
---             Dedicated servers may load files in non-deterministic order,
---             so we defensively initialize the namespace.
+-- LOAD ORDER: PZ's dir scan loads this file; the require below guarantees
+--             Core initializes first. (Safe since v2.1.14 — Core no longer
+--             requires submodules back, so no recursive-require cycle.)
 -- ============================================================================
+
+require "SaucedCarts/Core"
 
 -- Defensive init: dedicated server LoadDirBase may load this before Core.lua
 SaucedCarts = SaucedCarts or {}

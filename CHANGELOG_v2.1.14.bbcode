@@ -9,6 +9,9 @@ Some modded vehicles (KI5 among them) compute their trunk/bed/rack capacity at r
 [b]Fixed: cart on the ground not changing its appearance as you fill it.[/b]
 The fill-state model (empty / partial / full) now updates immediately when you move items in or out of a cart on the ground — no more pushing it a few steps to make it notice. Other players see the change too.
 
+[b]Fixed: eight "recursive require()" warnings at load.[/b]
+They were harmless (everything initialized fine) but they looked scary in console logs and got reported a lot. Gone now.
+
 [b]Better server logs.[/b]
 When a transfer can't complete, dedicated server logs now say exactly why — if something still misbehaves on your server, the log line to send us starts with [b][SaucedCarts] cartTransfer[/b].
 

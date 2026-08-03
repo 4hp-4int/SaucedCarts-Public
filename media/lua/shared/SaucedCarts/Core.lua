@@ -816,43 +816,14 @@ end
 -- Register initialization event
 Events.OnGameStart.Add(onGameStart)
 
--- Load container restrictions module (registers its own OnGameStart handler)
-require "SaucedCarts/ContainerRestrictions"
-
--- Load capacity override for InventoryContainer trait support
-require "SaucedCarts/CapacityOverride"
-
--- Load upgrade system
-require "SaucedCarts/Upgrades"
-
--- Load guard against vanilla forceDropHeavyItems stale-hand-ref dupe
-require "SaucedCarts/ForceDropGuard"
-
--- Load diagnostics (runs on both client and server, exposes SaucedCarts.capacityReport)
-require "SaucedCarts/Diagnostics"
-
--- Load transfer interceptor for ground-cart deposits. Narrowly replaces
--- ISInventoryTransferAction ONLY for transfers whose destination is a
--- SaucedCarts cart NOT parented to an IsoGameCharacter. Every other
--- transfer path (including in-hand cart deposit) still uses vanilla.
-require "SaucedCarts/CartTransferInterceptor"
-
--- Generic per-attribute sync framework — collapses the per-feature
--- ad-hoc network handlers / server registry / late-joiner replay we kept
--- rewriting (cart visual, ghost cleanup, etc.). MUST load before any
--- module that calls Sync.register. Currently no consumers; kept as
--- scaffolding for future per-attribute MP sync needs.
-require "SaucedCarts/Sync"
-
--- Load corpse storage pipeline — custom action + server handler for
--- loading a dragged corpse (via getGrapplingTarget) into a cart container.
--- Bypasses vanilla canHumanCorpseFit's 19-string allowlist.
-require "SaucedCarts/CorpseStorage"
-
--- Hook ISGrabCorpseItem so right-click "Grab" on cart-stored corpses
--- runs our rot short-circuit (silent drop past removalAt). Must load
--- AFTER CorpseStorage — references CorpseStorage helpers at call time.
-require "SaucedCarts/GrabCorpseInterceptor"
+-- v2.1.14: Core no longer requires its submodules. PZ's directory scan
+-- loads every file under media/lua/{shared,client,server}/ regardless, and
+-- every submodule now declares its own dependencies at the top (including
+-- "SaucedCarts/Core"). The old tail-requires here created 8 harmless-but-
+-- scary "recursive require()" warnings in every context (Core -> module ->
+-- Core), which generated user bug reports on heavily modded servers.
+-- Inter-module order is enforced where it matters by each module's own
+-- requires (e.g. GrabCorpseInterceptor requires CorpseStorage).
 
 SaucedCarts.debug("Core module loaded (v" .. SaucedCarts.VERSION .. ")")
 

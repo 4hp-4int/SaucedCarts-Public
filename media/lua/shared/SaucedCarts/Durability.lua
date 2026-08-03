@@ -12,12 +12,15 @@
 --         which runs on the server, ensuring server-authoritative condition changes.
 --
 -- LOAD ORDER: This file is loaded by Core.lua (via ContainerRestrictions).
---             Do NOT add require "SaucedCarts/Core" here (causes recursive require warning).
+--             (v2.1.14: Core no longer requires submodules back — the old
+--             "do NOT require Core" convention is dead.)
 --             Dedicated servers may load files in non-deterministic order,
 --             so we defensively initialize the namespace.
 -- ============================================================================
 
 -- Defensive init: dedicated server LoadDirBase may load this before Core.lua
+require "SaucedCarts/Core"
+
 SaucedCarts = SaucedCarts or {}
 SaucedCarts.Config = SaucedCarts.Config or {}
 

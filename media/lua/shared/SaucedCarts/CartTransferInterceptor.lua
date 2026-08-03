@@ -29,6 +29,7 @@
 require "SaucedCarts/Core"
 require "SaucedCarts/Network"
 require "SaucedCarts/TimedActions/ISCartTransferAction"
+require "SaucedCarts/CorpseStorage"
 
 -- ============================================================================
 -- SHARED HELPERS

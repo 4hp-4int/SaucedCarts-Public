@@ -19,10 +19,14 @@
 --   1. isItemAllowed hook - Server-authoritative container validation
 --   2. ISUnequipAction hook - Force drop on unequip (runs in complete())
 --
--- LOAD ORDER: This file is loaded by Core.lua - SaucedCarts namespace already exists.
---             Do NOT add require "SaucedCarts/Core" here (causes recursive require warning).
+-- LOAD ORDER: PZ's dir scan loads this file; the requires below guarantee
+--             Core/Network initialize first. (Safe since v2.1.14 — Core no
+--             longer requires submodules back, so no recursive-require
+--             cycle. The old "do NOT require Core here" convention is dead.)
 -- ============================================================================
 
+require "SaucedCarts/Core"
+require "SaucedCarts/Network"
 require "SaucedCarts/Durability"
 
 ---@class SaucedCartsContainerRestrictions

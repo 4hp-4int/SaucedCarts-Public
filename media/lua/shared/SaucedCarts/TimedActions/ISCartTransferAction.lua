@@ -27,6 +27,7 @@
 --   "out"  -> item moves OUT of the cart (cart -> player inv or nearby)
 -- ============================================================================
 
+require "SaucedCarts/Network"
 require "TimedActions/ISBaseTimedAction"
 require "SaucedCarts/Core"
 

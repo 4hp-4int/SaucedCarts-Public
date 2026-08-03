@@ -46,6 +46,7 @@ if not (PZTestKit and PZTestKit.Assert) then return end
 
 local Assert = PZTestKit.Assert
 
+require "SaucedCarts/CartTransferInterceptor"
 require "SaucedCarts/TimedActions/ISCartTransferAction"
 
 -- ============================================================================
