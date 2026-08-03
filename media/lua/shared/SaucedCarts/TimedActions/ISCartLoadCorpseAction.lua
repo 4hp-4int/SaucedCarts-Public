@@ -121,12 +121,6 @@ function ISCartLoadCorpseAction:waitToStart()
 end
 
 function ISCartLoadCorpseAction:start()
-    -- Allow this action to proceed while dragging a corpse — vanilla's
-    -- default denies timed actions while grappling.
-    if self.action and self.action.setAllowedWhileDraggingCorpses then
-        self.action:setAllowedWhileDraggingCorpses(true)
-    end
-
     -- Capture ghost info BEFORE releasing the grapple — getGrapplingTarget
     -- returns nil once setDoGrappleLetGo fires. Stash on self for :perform.
     self._ghostId, self._ghostKind, self._ghostX, self._ghostY, self._ghostZ =
@@ -223,6 +217,15 @@ function ISCartLoadCorpseAction:new(character, cart, time)
     o.stopOnWalk = true
     o.stopOnRun  = true
     o.forceProgressBar = true
+    -- Must be set HERE, not in :start(). ISTimedActionQueue.add/addAfter
+    -- read this Lua field at queue-add time and reject the action with
+    -- "Can't do this while dragging a corpse" halo text before :start()
+    -- ever runs (the player is by definition still grappling when the
+    -- load is queued). LuaTimedActionNew's constructor also propagates
+    -- this field to the Java-side flag read by PlayerDraggingCorpse /
+    -- SwipeStatePlayer, so one field covers both layers. Same pattern as
+    -- vanilla ISDropCorpseIntoContainer/ISBuryCorpse.
+    o.allowedWhileDraggingCorpses = true
     return o
 end
 

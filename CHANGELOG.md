@@ -31,6 +31,16 @@ suppressed on dedis. Proven live on a 42.20 dedi against the reporter's exact sy
   the 8 "recursive require()" warnings that appeared in every context and
   scared users on heavily-modded servers into filing reports.
 - New `OfflineVehicleResilienceTests` (6, sensitivity-proven). Suite: 371/371.
+- **Corpse Storage [BETA]: loading a corpse into a cart no longer fails with
+  "Can't do this while dragging a corpse."** Recent B42 builds gate the timed-action
+  queue: `ISTimedActionQueue.add` rejects any action queued while `isDraggingCorpse()`
+  unless the action's Lua table sets `allowedWhileDraggingCorpses` — checked at
+  queue-add time, before `:start()` runs. `ISCartLoadCorpseAction` opted out via the
+  Java setter in `:start()`, which the guard never let execute. The flag now lives in
+  `:new()` (vanilla `ISDropCorpseIntoContainer` pattern); `LuaTimedActionNew`'s
+  constructor propagates the same field to the Java-side flag read by
+  `PlayerDraggingCorpse`/`SwipeStatePlayer`, so one field covers both layers.
+  Regression test in `OfflineCorpseStorageTests` (sensitivity-proven). Suite: 372/372.
 
 ## v2.1.13 — 2026-07-28 (Door-only E key while pushing a cart)
 

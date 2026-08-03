@@ -1093,4 +1093,31 @@ tests["handler_stamps_deathTime_on_load"] = function()
         "rot ticker can resume on unload via setDeathTime")
 end
 
+-- ============================================================================
+-- Vanilla drag-corpse queue guard opt-out
+-- ============================================================================
+-- ISTimedActionQueue.add/addAfter reject any queued action while the local
+-- player isDraggingCorpse unless the action's Lua table sets
+-- allowedWhileDraggingCorpses — halo text "Can't do this while dragging a
+-- corpse", action never starts. Loading a corpse REQUIRES an active grapple,
+-- so the flag must be present at construction time: vanilla reads the field
+-- at queue-add, before :start() runs (setting it in :start was dead code —
+-- the exact bug this test pins).
+
+tests["load_action_is_allowed_while_dragging_corpse"] = function()
+    require "SaucedCarts/TimedActions/ISCartLoadCorpseAction"
+    local deadBody = makeDeadBody()
+    local player = makeDraggingPlayer(deadBody)
+    local cart = makeRegisteredCart()
+    local action = ISCartLoadCorpseAction:new(player, cart)
+
+    if not Assert.isTrue(action.allowedWhileDraggingCorpses == true,
+        "allowedWhileDraggingCorpses set on the action table at :new time") then return false end
+
+    -- Replicate vanilla ISTimedActionQueue.add's gate predicate verbatim.
+    local rejected = player:isDraggingCorpse() and not action.allowedWhileDraggingCorpses
+    return Assert.isTrue(not rejected,
+        "vanilla queue-add drag-corpse gate does not reject the load action")
+end
+
 return tests
