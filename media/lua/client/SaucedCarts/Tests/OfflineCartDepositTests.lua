@@ -1593,4 +1593,78 @@ tests["findItemNearPlayer_scans_dead_body_container"] = function()
         "item inside a dead body on the ground is located by findItemNearPlayer")
 end
 
+-- ============================================================================
+-- v2.1.15 regression: floor → cart refused by the v2.1.14 unresolved-source
+-- gate. resolveSide("floor") returns (nil container, source square) BY
+-- CONTRACT — performCartTransfer's floor branch works from the square's world
+-- item, so nil srcContainer is the NORMAL floor shape. The gate must only
+-- refuse when both container AND square are unknown. Live symptom (player
+-- report 2026-08-03, dedi log):
+--   "cartTransfer: source floor/nil UNRESOLVED and item container unknown — refusing"
+-- ============================================================================
+
+tests["handle_cart_transfer_in_from_floor_not_refused"] = function()
+    local target = makeItem({ id = 9191 })
+    -- Ground world-item at (11,10,0), one tile from the player.
+    local worldObj = { _class = "IsoWorldInventoryObject" }
+    worldObj.getItem = function(self) return target end
+    local objs = { _o = { worldObj } }
+    objs.size = function(s) return #s._o end
+    objs.get  = function(s, i) return s._o[i + 1] end
+    local floorSq = {
+        getX = function() return 11 end, getY = function() return 10 end, getZ = function() return 0 end,
+        getWorldObjects = function(self) return objs end,
+        getObjects = function(self) return nil end,
+        getVehicleContainer = function(self) return nil end,
+    }
+    local playerSq = {
+        getX = function() return 10 end, getY = function() return 10 end, getZ = function() return 0 end,
+        getWorldObjects = function() return nil end, getObjects = function() return nil end,
+        getVehicleContainer = function(self) return nil end,
+    }
+
+    local chr = makeCharacter()
+    chr._inv = makeContainer({ parent = chr })
+    chr.getCurrentSquare = function(self) return playerSq end
+
+    local cart = makeCartItem({ id = 313, parent = chr })
+    chr._inv:AddItem(cart)
+
+    local realGetCell, realInstanceof = getCell, instanceof
+    getCell = function()
+        return { getGridSquare = function(self, gx, gy, gz)
+            if gx == 11 and gy == 10 then return floorSq end
+            if gx == 10 and gy == 10 then return playerSq end
+            return nil
+        end }
+    end
+    instanceof = function(o, cls) return type(o) == "table" and o._class == cls end
+
+    local origPerform = SaucedCarts.performCartTransfer
+    local called, observedSrc, observedSrcSquare
+    SaucedCarts.performCartTransfer = function(p, it, src, dest, dropSq, srcSq)
+        called = true
+        observedSrc, observedSrcSquare = src, srcSq
+        return true
+    end
+
+    local ok, err = pcall(SaucedCarts.CartTransferInterceptor.handleCartTransfer, chr, {
+        itemId    = 9191,
+        cartId    = 313,
+        direction = "in",
+        srcKind   = "floor",
+        srcSqX = 11, srcSqY = 10, srcSqZ = 0,
+    })
+
+    SaucedCarts.performCartTransfer = origPerform
+    getCell, instanceof = realGetCell, realInstanceof
+
+    if not Assert.isTrue(ok, "handler did not crash: " .. tostring(err)) then return false end
+    if not Assert.isTrue(called == true,
+        "floor→cart NOT refused — the unresolved-source gate must exempt the floor contract") then return false end
+    if not Assert.isNil(observedSrc, "src container is nil per the floor contract") then return false end
+    return Assert.equal(observedSrcSquare, floorSq,
+        "source square passed through to performCartTransfer")
+end
+
 return tests

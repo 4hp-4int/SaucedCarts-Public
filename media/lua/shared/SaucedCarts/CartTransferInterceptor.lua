@@ -1152,7 +1152,14 @@ local function handleCartTransfer(player, args)
             srcContainer = realSrc
         end
     end
-    if args.direction ~= "out" and not srcContainer then
+    -- v2.1.15: refuse only when BOTH container and square are unknown.
+    -- resolveSide("floor") returns (nil container, source square) BY
+    -- CONTRACT — performCartTransfer's floor branch works from the square's
+    -- world item, so a nil srcContainer with a live srcSquare is the normal
+    -- floor→cart shape, not a failure. The v2.1.14 gate checked only
+    -- srcContainer and refused every MP ground→cart pickup ("source
+    -- floor/nil UNRESOLVED" in server logs).
+    if args.direction ~= "out" and not srcContainer and not srcSquare then
         SaucedCarts.log(function() return string.format(
             "cartTransfer: source %s/%s UNRESOLVED and item container unknown — refusing",
             tostring(args.srcKind), tostring(args.srcCartId)) end)

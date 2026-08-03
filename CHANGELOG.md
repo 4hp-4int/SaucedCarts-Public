@@ -2,6 +2,24 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.15 — Hotfix: ground→cart pickups refused on MP (v2.1.14 regression)
+
+v2.1.14's unresolved-source refusal gate (added so unresolvable *vehicle* sides
+refuse loudly instead of misdelivering) checked only `srcContainer` — but
+`resolveSide("floor")` returns `(nil container, source square)` **by contract**;
+`performCartTransfer`'s floor branch works from the square's world item. Every
+MP ground→cart pickup whose item wasn't inside a real container was refused
+server-side with `cartTransfer: source floor/nil UNRESOLVED ... — refusing`.
+SP was unaffected (SP doesn't route through `handleCartTransfer`).
+
+- The gate now refuses only when **both** the source container and the source
+  square are unknown — the vehicle hard-fail case it was built for.
+- New end-to-end regression test `handle_cart_transfer_in_from_floor_not_refused`
+  drives `handleCartTransfer` with `srcKind="floor"` (the coverage hole: all
+  prior floor tests hit `performCartTransfer` directly, below the gate).
+  Sensitivity-proven against v2.1.14. Suite: 375/375.
+- Save-safe. No `SCHEMA_VERSION` / `API_VERSION` change.
+
 ## v2.1.14 — Vehicle transfer resilience + ground-cart visuals
 
 **The "works with the trunk, not the trailer, until restart" fix.** Runtime-spawned

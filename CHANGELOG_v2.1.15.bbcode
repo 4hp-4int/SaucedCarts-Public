@@ -1,0 +1,6 @@
+[h1]SaucedCarts v2.1.15 — Hotfix[/h1]
+
+[b]Fixed: picking up items from the ground into a cart doing nothing on multiplayer servers.[/b]
+A v2.1.14 change made cart transfers refuse loudly when the game can't work out where an item is coming from — better than silently losing track of it, but the check was too eager: items lying loose on the ground legitimately have no "source container", and the server was refusing every ground-to-cart pickup. If your server logs show lines like [b][SaucedCarts] cartTransfer: source floor/nil UNRESOLVED[/b], this is the fix. Single player was not affected.
+
+No save/database changes — safe to update mid-run. Thanks for the fast report with the exact log line; it made this a same-day fix.
