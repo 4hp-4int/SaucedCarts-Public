@@ -292,46 +292,23 @@ local function installGhostCell(opts)
     return env
 end
 
-tests["client_purges_stranded_original_body_before_removing_wrapper"] = function()
-    -- v2.1.16 regression. The zombie branch used to remove ONLY the wrapper
-    -- and return, stranding the pre-grab IsoDeadBody on every client that
-    -- hadn't yet run vanilla's ZombieOnGroundState cleanup — which is the
-    -- one thing that could have removed it, and which needs the wrapper
-    -- alive to run. The stranded body kept counting toward CorpseCount, so
-    -- corpse sickness never cleared even though the corpse was in the cart.
-    local env = installGhostCell({ onlineId = 999, bodyId = 555,
-        bodyX = 103, bodyY = 98 })
-
-    CS.handleRemoveGhostCorpse({ bodyId = 999, kind = "zombie",
-        originalBodyId = 555, x = 100, y = 100, z = 0 })
-
-    env.restore()
-
-    if not Assert.isTrue(env.removedBody == env.ghostBody,
-        "stranded body located by id and removed from its square") then return false end
-    if not Assert.isTrue(env.removedRemote == true,
-        "removeCorpse called with bRemote=true (we are the chain terminator)") then return false end
-    -- Body gone means vanilla has nothing left to do, so the wrapper can go
-    -- immediately — no deferral needed.
-    if not Assert.isTrue(env.removed.fromWorld,
-        "wrapper zombie still purged once the body is handled") then return false end
-    return Assert.isTrue(env.removed.fromSquare, "removeFromSquare called on local zombie")
-end
-
-tests["client_defers_wrapper_purge_when_body_not_located"] = function()
-    -- No body ids in the payload (pre-v2.1.16 server), or a drag longer than
-    -- the sweep radius. We must NOT rip the wrapper out immediately —
-    -- vanilla's ZombieOnGroundState -> IsoDeadBody.removeDeadBody is the
-    -- only remaining cleanup and it reads the wrapper's reanimatedBodyId.
-    -- Purge lands on the deferred sweep instead.
+tests["client_never_purges_wrapper_synchronously"] = function()
+    -- THE v2.1.16 FIX. The zombie branch used to remove the wrapper the
+    -- instant the broadcast landed. That wrapper carries reanimatedBodyId,
+    -- which vanilla's ZombieOnGroundState reads to purge this client's
+    -- stranded ghost body (ZombieOnGroundState.java:56, :115) — so killing
+    -- it early killed the only cleanup, leaving a body on the ground while
+    -- the corpse sat in the cart. That body kept counting toward CorpseCount,
+    -- so corpse sickness never cleared either.
+    --
+    -- Contract: the wrapper MUST survive the handler call.
     local env = installGhostCell({ onlineId = 999 })
 
     CS.handleRemoveGhostCorpse({ bodyId = 999, kind = "zombie",
         x = 0, y = 0, z = 0 })
 
     local purgedEarly = env.removed.fromWorld
-    -- Drain the deferral (production drains via Events.OnTick).
-    CS._flushGhostPurges()
+    CS._flushGhostPurges()   -- production drains via Events.OnTick
     env.restore()
 
     if not Assert.isTrue(purgedEarly == false,
@@ -341,65 +318,53 @@ tests["client_defers_wrapper_purge_when_body_not_located"] = function()
     return Assert.isTrue(env.removed.fromSquare, "removeFromSquare called on deferred purge")
 end
 
-tests["client_deferred_sweep_retries_body_purge_before_giving_up"] = function()
-    -- The deferred pass sweeps for the body one more time. Covers the case
-    -- where vanilla's cleanup didn't fire either and we're the last resort.
-    local env = installGhostCell({ onlineId = 999, bodyId = 777,
-        bodyX = 40, bodyY = 40 })
+tests["client_defers_regardless_of_extra_payload_fields"] = function()
+    -- v2.1.16 briefly shipped an ObjectID-ish sweep driven by extra payload
+    -- fields, dropped because IsoMovingObject.getID() is a per-VM counter and
+    -- could never match cross-VM (see ROAD NOT TAKEN in CorpseStorage.lua).
+    -- A server still sending those fields must not change client behavior:
+    -- unknown keys are ignored and the deferral still governs.
+    local env = installGhostCell({ onlineId = 999, bodyId = 555,
+        bodyX = 103, bodyY = 98 })
 
-    -- Centre is out of sweep range of the body (radius 10), so the first
-    -- pass misses and the purge defers.
     CS.handleRemoveGhostCorpse({ bodyId = 999, kind = "zombie",
-        originalBodyId = 777, x = 0, y = 0, z = 0 })
-    local foundEarly = env.removedBody ~= nil
+        originalBodyId = 555, loadedBodyId = 557, x = 100, y = 100, z = 0 })
 
-    -- Second pass sweeps the same centre — still a miss, but it must not
-    -- crash and must still retire the wrapper.
+    local purgedEarly = env.removed.fromWorld
     CS._flushGhostPurges()
     env.restore()
 
-    if not Assert.isTrue(foundEarly == false,
-        "body outside sweep radius is not found on the first pass") then return false end
-    return Assert.isTrue(env.removed.fromWorld,
-        "wrapper always retired after the deferral, even if the body is unreachable")
+    if not Assert.isTrue(purgedEarly == false,
+        "stale id fields do not re-enable a synchronous wrapper purge") then return false end
+    if not Assert.isTrue(env.removedBody == nil,
+        "no body is removed by id — that path is gone, vanilla owns the ghost") then return false end
+    return Assert.isTrue(env.removed.fromWorld, "wrapper still retired on the deferral")
 end
 
-tests["extract_original_body_id_parses_reanimated_wrapper_name"] = function()
-    -- reanimate() stamps the source body into the wrapper's name
-    -- (IsoDeadBody.java:1937: setName("ReanimatedCorpse_" + this)). That
-    -- name is the ONLY surviving reference to the original body's id once
-    -- the body has been pulled from the world — and the extractor that
-    -- reads it sat unused from v2.1.5 to v2.1.16, which is why clients
-    -- could never purge their stranded copy.
-    local origIO = patchInstanceof()
-
-    -- Real toString shapes: IsoMovingObject.toString for the zombie,
-    -- IsoDeadBody.toString nested inside its name.
-    local wrapper = setmetatable({
-        _type = "IsoZombie",
-        isReanimatedForGrappleOnly = function() return true end,
-    }, { __tostring = function()
-        return "IsoZombie{  Name:ReanimatedCorpse_IsoDeadBody{  Name:null,  ID:4242," ..
-            "  ObjectID:DeadBody-17,  wasZombie:true,  deathTime:990.0 },  ID:31 }"
-    end })
-
-    local got = CS._extractOriginalBodyIdFromGrappled(wrapper)
-
-    -- A plain zombie (not a grapple wrapper) must yield nil — we only ever
-    -- want to purge bodies we know were reanimated for dragging.
-    local plain = setmetatable({
-        _type = "IsoZombie",
-        isReanimatedForGrappleOnly = function() return false end,
-    }, { __tostring = function() return "IsoZombie{  Name:null,  ID:31 }" end })
-    local gotPlain = CS._extractOriginalBodyIdFromGrappled(plain)
-
-    _G.instanceof = origIO
-
-    if not Assert.equal(got, 4242,
-        "original IsoDeadBody id parsed out of the wrapper name, not the wrapper's own ID:31") then
-        return false
+tests["client_deferral_survives_missing_zombie_at_expiry"] = function()
+    -- By the time the timer expires vanilla may have removed the wrapper
+    -- itself. Draining must be a safe no-op, not an error, and must not
+    -- leave the entry stuck in the queue.
+    local zomList = { size = function() return 0 end, get = function() return nil end }
+    local prevGetCell = _G.getCell
+    _G.getCell = function()
+        return {
+            getZombieList = function() return zomList end,
+            getObjectList = function() return { remove = function() end } end,
+            getGridSquare = function() return nil end,
+        }
     end
-    return Assert.isTrue(gotPlain == nil, "non-grapple zombie yields no body id")
+
+    local ok = pcall(function()
+        CS.handleRemoveGhostCorpse({ bodyId = 4242, kind = "zombie", x = 0, y = 0, z = 0 })
+        CS._flushGhostPurges()
+    end)
+    local drained = #CS._pendingGhostPurges
+
+    _G.getCell = prevGetCell
+
+    if not Assert.isTrue(ok, "draining a vanished wrapper does not error") then return false end
+    return Assert.equal(drained, 0, "queue is emptied even when the wrapper is already gone")
 end
 
 tests["client_receiving_removeGhostCorpse_with_unknown_id_is_safe_noop"] = function()

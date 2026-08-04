@@ -4,6 +4,51 @@ All notable changes to SaucedCarts are documented here. Latest version first.
 
 ## v2.1.16 — unreleased
 
+### MP: corpses loaded into a cart stayed lying on the ground for other players
+
+Reported in-session: the corpse went into the cart *and* stayed on the ground.
+Confirmed with two clients against a live dedi.
+
+Grabbing a corpse runs `IsoDeadBody.reanimate()`, which calls `removeFromWorld()`
+on the source body (`IsoDeadBody.java:2049`). That sends no packet — unlike
+`IsoGridSquare.removeCorpse`, which broadcasts `RemoveCorpseFromMap` — so every
+client keeps its own copy of the body. Vanilla's cleanup for this lives entirely
+inside the grapple-wrapper zombie: `ZombieOnGroundState` (`:56`, `:115`) calls
+`IsoDeadBody.removeDeadBody(ownerZombie...reanimatedBodyId)`, reading the source
+body's id off the wrapper.
+
+Our `removeGhostCorpse` handler destroyed that wrapper the instant the broadcast
+landed — removing the only object that could still identify the ghost. On the
+loading client vanilla had usually already run at grab time, so it looked fine;
+on an observer whose wrapper hadn't yet ticked `ZombieOnGroundState`, the body
+was stranded permanently. It also kept counting toward `CorpseCount`
+(`IsoDeadBody.removeFromWorld` is what decrements it), which feeds
+`BodyDamage.GetBaseCorpseSickness` — so the corpse sickness never cleared either,
+per-client, even though the corpse was in the cart.
+
+- The zombie branch of `handleRemoveGhostCorpse` no longer purges synchronously.
+  The wrapper is queued and retired 60 ticks later via `Events.OnTick`, giving
+  vanilla its window first. That deferral *is* the fix.
+- Net **−124 lines** in `CorpseStorage.lua`. A first pass also broadcast the
+  body ids for clients to sweep for directly; that was removed after live
+  testing showed 12 sweeps across two clients with 0 matches.
+  `IsoMovingObject.getID()` is a static per-VM counter
+  (`IsoMovingObject.java:95`, `:161`), so a server-side id can never match a
+  client-side one. The `ROAD NOT TAKEN` block in `CorpseStorage.lua` records
+  what an `ObjectID`-keyed version would need if vanilla's cleanup ever stops
+  being sufficient.
+- `extractOriginalBodyIdFromGrappled` deleted. Dead since v2.1.5, and it parsed
+  `ID:` where only the adjacent `ObjectID:` would have worked.
+- Known, untouched: the `kind="body"` path has the same cross-VM `getID()`
+  confusion — `captureGhost` sends a client-local id that the server feeds to
+  `findBodyAtSquare`. Rare; it needs an already-dead grapple target.
+- `OfflineCorpseObserverTests.lua` reworked — the previous tests asserted the
+  removed sweep contract. Now locks the real invariant: the wrapper must survive
+  the handler call, stale id fields in the payload must not resurrect a
+  synchronous purge, and draining an already-vanished wrapper must no-op.
+  Suite: 413/413.
+- Save-safe. No `SCHEMA_VERSION` / `API_VERSION` change.
+
 ### MP: a cart equipped outside "Push Cart" rendered as a held weapon to everyone else
 
 Reported: *"in multiplayer, when my friends use 'Take in both hands' instead of
