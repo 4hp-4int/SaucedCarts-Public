@@ -172,8 +172,23 @@ local function onPlayerUpdate(player)
         player:setIgnoreAutoVault(true)    -- Block sprint-vault + E-key wall climb
 
         playerCartState[playerKey] = true
+
+        -- MP: announce the new hand state to the server so observers get the
+        -- push pose. Driven from THIS transition (hands are the truth), not
+        -- from SaucedCarts.Events.onCartEquip alone — that event fires only
+        -- from our own ISCartEquipAction / ISCartPickupAction. The cart script
+        -- sets RequiresEquippedBothHands, so vanilla also offers "Equip in
+        -- Both Hands" (ISInventoryPaneContextMenu.lua:428); equipping that way
+        -- — or via hotbar / keybind / another mod — produced the same hand
+        -- state but fired no event, so the server never broadcast
+        -- updateCartAnimation and observers never added the player to
+        -- RemotePlayer's re-application loop. The engine's Weapon=UNARMED
+        -- overwrite then stuck and the cart rendered as a held weapon clipping
+        -- the ground. Throttle.send is level-triggered, so for our own flow
+        -- (event listener already fired) this is a no-op.
+        Throttle.send(player, true)
+
         SaucedCarts.debug("Cart equipped - set animations and restrictions")
-        -- Note: MP animation sync handled by onCartEquip event listener
 
     -- State transition: just unequipped a cart
     elseif not hasCart and hadCart then
@@ -193,8 +208,13 @@ local function onPlayerUpdate(player)
         playerWasInAction[playerKey] = nil
 
         playerCartState[playerKey] = nil  -- Use nil for consistency (both nil and false are falsy)
+
+        -- MP: announce the cleared hand state (see the equip branch above for
+        -- why this is transition-driven and not event-driven). Covers every
+        -- unequip path our onCartDrop/onCartBroke events don't reach.
+        Throttle.send(player, false)
+
         SaucedCarts.debug("Cart unequipped - cleared animations and restrictions")
-        -- Note: MP animation sync handled by onCartDrop/onCartBroke event listeners
     end
 
     -- Continuous enforcement while holding cart

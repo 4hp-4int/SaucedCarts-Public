@@ -601,7 +601,11 @@ local function removeCartTransferOptions(player, context, items)
 
             safeRemoveOption(context, "ContextMenu_PutItemsInContainer")
 
-            -- Remove vanilla equip options - use Push Cart instead
+            -- Remove vanilla equip options - use Push Cart instead.
+            -- ContextMenu_Equip_Two_Hands is vanilla's real key for the
+            -- both-hands option; the two below don't exist in B42 and only
+            -- matched English clients via safeRemoveOption's literals.
+            safeRemoveOption(context, "ContextMenu_Equip_Two_Hands")
             safeRemoveOption(context, "ContextMenu_Equip_both_hands")
             safeRemoveOption(context, "ContextMenu_EquipBothHands")
             safeRemoveOption(context, "ContextMenu_Equip")
@@ -640,7 +644,9 @@ local function removeWorldCartGrabOptions(player, context, worldObjects, test)
             safeRemoveOption(context, "ContextMenu_Grab_half")
             safeRemoveOption(context, "ContextMenu_Grab_all")
 
-            -- Remove vanilla equip options
+            -- Remove vanilla equip options (see removeCartTransferOptions for
+            -- why ContextMenu_Equip_Two_Hands is the load-bearing key)
+            safeRemoveOption(context, "ContextMenu_Equip_Two_Hands")
             safeRemoveOption(context, "ContextMenu_Equip_both_hands")
             safeRemoveOption(context, "ContextMenu_EquipBothHands")
             safeRemoveOption(context, "ContextMenu_Equip")

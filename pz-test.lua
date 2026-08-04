@@ -19,6 +19,26 @@
 -- crash at line 5 trying to set `ISInventoryPage.putSoundContainer = nil`.
 if not ISInventoryPage then ISInventoryPage = {} end
 
+-- PZAPI.ModOptions: Hotkeys.lua registers the Push/Drop Cart keybind at file
+-- load time (it has to — the options screen only sees bindings created during
+-- load). CartStateHandler requires Hotkeys, and OfflineAnimationSyncTests
+-- requires CartStateHandler to drive a real OnPlayerUpdate frame. Faithful
+-- enough for load: create() returns an options object whose addKeyBind()
+-- returns a binding that reports its default key.
+if not Keyboard then Keyboard = { KEY_V = 47 } end
+if not PZAPI then PZAPI = {} end
+if not PZAPI.ModOptions then
+    PZAPI.ModOptions = {
+        create = function(self, id, title)
+            return {
+                addKeyBind = function(_, name, label, defaultKey, tooltip)
+                    return { getValue = function() return defaultKey end }
+                end,
+            }
+        end,
+    }
+end
+
 
 return {
     -- Cross-mod: none required.
@@ -58,6 +78,13 @@ return {
         -- transferInvolvesCart discriminator; the hook itself installs on
         -- OnGameStart (never fires offline), so the real class isn't needed.
         "ISUI/ISInventoryPane",
+        -- ContextMenu.lua / Hotkeys.lua require this at load, and both are
+        -- pulled in transitively by CartStateHandler (which
+        -- OfflineAnimationSyncTests loads to drive a real OnPlayerUpdate
+        -- frame). Those files only patch/queue the drop action at runtime;
+        -- the offline drop coverage in OfflineDropActionTests uses its own
+        -- faithful reimplementation rather than the vanilla class.
+        "TimedActions/ISDropWorldItemAction",
     },
 
     -- Preload SaucedCarts namespace so tests can inspect it without each

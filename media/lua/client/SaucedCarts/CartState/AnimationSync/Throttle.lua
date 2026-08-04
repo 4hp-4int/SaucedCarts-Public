@@ -21,6 +21,7 @@ local Throttle = {}
 -- =============================================================================
 
 local lastAnimSyncTime = {}      -- playerKey -> timestamp
+local lastAnimSyncState = {}     -- playerKey -> last state announced (nil = never)
 local pendingAnimSync = {}       -- playerKey -> { hasCart, sendAt, player }
 local pendingAnimSyncCount = 0   -- Fast empty check (avoids next() which Kahlua may not have)
 local ANIM_SYNC_COOLDOWN_MS = 250
@@ -38,6 +39,21 @@ function Throttle.send(player, hasCart)
     if not onlineId then return end  -- SP, no sync needed
 
     local key = onlineId
+
+    -- Level-triggered: only a CHANGE is worth a packet. The same state now
+    -- arrives from two sources — our own onCartEquip/onCartDrop events and
+    -- the hand-state transition in CartStateHandler — and both the server's
+    -- equippedState table and every observer's RemotePlayer tracking are
+    -- level-triggered too, so a repeat announcement is pure noise. A pending
+    -- (queued) entry is the latest intent, so it wins over the last send.
+    local known = lastAnimSyncState[key]
+    local pending = pendingAnimSync[key]
+    if pending then known = pending.hasCart end
+    if known == hasCart then
+        SaucedCarts.debug(function() return "Throttle: skipped duplicate (hasCart=" .. tostring(hasCart) .. ")" end)
+        return
+    end
+
     local now = getTimestampMs()
     local lastSent = lastAnimSyncTime[key] or 0
 
@@ -48,6 +64,7 @@ function Throttle.send(player, hasCart)
             hasCart = hasCart,
         })
         lastAnimSyncTime[key] = now
+        lastAnimSyncState[key] = hasCart
         if pendingAnimSync[key] then
             pendingAnimSync[key] = nil
             pendingAnimSyncCount = pendingAnimSyncCount - 1
@@ -98,6 +115,7 @@ local function processPendingAnimSyncs()
                     hasCart = pending.hasCart,
                 })
                 lastAnimSyncTime[key] = now
+                lastAnimSyncState[key] = pending.hasCart
                 SaucedCarts.debug(function() return "Throttle: sent queued (hasCart=" .. tostring(pending.hasCart) .. ")" end)
             end
             pendingAnimSync[key] = nil
@@ -114,6 +132,7 @@ end
 ---@param key any Player key (online ID)
 function Throttle.cleanup(key)
     lastAnimSyncTime[key] = nil
+    lastAnimSyncState[key] = nil
     if pendingAnimSync[key] then
         pendingAnimSync[key] = nil
         pendingAnimSyncCount = pendingAnimSyncCount - 1
@@ -123,8 +142,17 @@ end
 --- Reset all throttle state (debug/testing)
 function Throttle.reset()
     lastAnimSyncTime = {}
+    lastAnimSyncState = {}
     pendingAnimSync = {}
     pendingAnimSyncCount = 0
+end
+
+--- Last state announced for a player key (nil = never announced).
+--- Exposed for tests / pz-shell probes.
+---@param key any Player key (online ID)
+---@return boolean|nil
+function Throttle.getLastState(key)
+    return lastAnimSyncState[key]
 end
 
 --- Get pending count (for debugging)

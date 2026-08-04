@@ -404,7 +404,17 @@ local function onFillInventoryObjectContextMenu(player, context, items)
             if not processedCarts[cartId] then
                 processedCarts[cartId] = true
 
-                -- Remove vanilla equip options for carts
+                -- Remove vanilla equip options for carts.
+                -- ContextMenu_Equip_Two_Hands is the ONLY key vanilla actually
+                -- uses for the both-hands option (ISInventoryPaneContextMenu
+                -- .lua:427-429; our cart script sets RequiresEquippedBothHands
+                -- so tests.force2Hands always offers it). The two keys below it
+                -- don't exist in B42 — getText returns the key string itself,
+                -- so they only ever matched by accident via the English
+                -- literals further down, which left the option live on every
+                -- localized client. Keyed removal is language-proof: getText
+                -- returns the same localized string vanilla used to add it.
+                context:removeOptionByName(getText("ContextMenu_Equip_Two_Hands"))
                 context:removeOptionByName(getText("ContextMenu_Equip_both_hands"))
                 context:removeOptionByName(getText("ContextMenu_EquipBothHands"))
                 context:removeOptionByName(getText("ContextMenu_Equip"))

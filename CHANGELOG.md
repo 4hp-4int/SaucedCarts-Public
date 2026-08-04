@@ -2,6 +2,43 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.16 — unreleased
+
+### MP: a cart equipped outside "Push Cart" rendered as a held weapon to everyone else
+
+Reported: *"in multiplayer, when my friends use 'Take in both hands' instead of
+Push, the cart is displayed wrong (carried like a weapon and clips through the
+ground)"*. The cart script sets `RequiresEquippedBothHands`, so vanilla offers its
+own **Equip in Both Hands** option (`ISInventoryPaneContextMenu.lua:428`). That
+produces the same hand state our own `ISCartEquipAction` does, so the cart worked
+— it just looked wrong to *other* players.
+
+The animation broadcast was gated on `SaucedCarts.Events.onCartEquip`, which fires
+only from `ISCartEquipAction` / `ISCartPickupAction`. Any other equip path sent no
+`syncCartAnimation`, so the server never broadcast `updateCartAnimation` and
+observers never added the player to `RemotePlayer`'s re-application loop — leaving
+the engine's `Weapon=UNARMED` overwrite (it returns UNARMED for any
+non-`HandWeapon`) in place. The equipping player was unaffected because their own
+pose is polled off hand state, which is why it only ever looked broken to someone
+else.
+
+- `CartStateHandler` now announces off the hand-state **transition** — the path
+  every equip route reaches — rather than relying on our own event alone.
+- `Throttle.send` is level-triggered: a repeat of the state already announced is
+  dropped, so the event listener and the transition can both fire without doubling
+  packets. The server's `equippedState` and each observer's tracking are
+  set-to-state, not toggles, so only changes are worth sending.
+- The vanilla both-hands option is now stripped by its real key,
+  `ContextMenu_Equip_Two_Hands`. The keys used before
+  (`ContextMenu_Equip_both_hands`, `ContextMenu_EquipBothHands`) don't exist in
+  B42 — `getText` returns the key string itself — so the option only ever
+  disappeared on English clients, by accident, through the literal-text fallback.
+  Keyed removal is language-proof.
+- New `OfflineAnimationSyncTests.lua` (10 tests) drives a real `OnPlayerUpdate`
+  frame with a cart in hand and no event fired. Sensitivity-proven: 3 fail against
+  pre-fix code. Suite: 404/404.
+- Save-safe. No `SCHEMA_VERSION` / `API_VERSION` change.
+
 ## v2.1.15 — Hotfix: ground→cart pickups refused on MP (v2.1.14 regression)
 
 v2.1.14's unresolved-source refusal gate (added so unresolvable *vehicle* sides
