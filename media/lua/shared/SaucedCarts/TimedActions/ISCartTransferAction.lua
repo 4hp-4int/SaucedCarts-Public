@@ -434,6 +434,12 @@ function ISCartTransferAction:perform()
                         self.srcContainer, self.destContainer, dropSquare, srcSquare
                     )
                 end
+                -- Flush the coalesced broadcast repair once for the batch.
+                -- No-op in SP (marking is gated on isServer); this covers the
+                -- dedi running its own copy of this action.
+                if SaucedCarts.flushContainerResync then
+                    SaucedCarts.flushContainerResync()
+                end
             end
         end
     end

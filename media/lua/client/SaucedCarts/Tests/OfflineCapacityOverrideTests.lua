@@ -437,4 +437,111 @@ tests["applyMultipliers_weight_reduction_propagates_to_inner_container"] = funct
     return true
 end
 
+-- ============================================================================
+-- cartHasRoomFor — THE LOAD GATE (v2.1.16)
+-- ============================================================================
+-- Previously untestable: this logic lived inline inside the
+-- __classmetatables override, which needs real Java classes. It was
+-- extracted precisely so the rule that decides "can this item go in the
+-- cart" is pinned. A silent wrong answer here reads to players as "the mod
+-- is broken" — the equipParent gate shipped exactly that way.
+
+--- Character whose own inventory is deliberately over capacity, which is the
+--- normal state for someone hauling a loaded cart (the cart's weight counts
+--- toward their encumbrance).
+local function makeOverEncumberedChr(opts)
+    opts = opts or {}
+    local chr = { _type = "IsoPlayer" }
+    local inv = F.container({ typeName = "none", parent = chr, capacity = 50 })
+    inv.getCapacityWeight = function() return opts.invWeight or 73.5 end
+    inv.getEffectiveCapacity = function() return opts.invCapacity or 50 end
+    inv.contains = function(self, item) return opts.containsItem == item end
+    -- Real ItemContainer exposes getVehiclePart (nil unless it IS a vehicle
+    -- part container). cartHasRoomFor consults it for the vehicle-parent
+    -- capacity rule, so a mock without it fakes an error, not a verdict.
+    inv.getVehiclePart = function() return opts.vehiclePart end
+    chr.getInventory = function() return inv end
+    chr.getVehicle = function() return opts.vehicle end
+    chr.hasTrait = function() return false end
+    return chr
+end
+
+local function makeLooseItem(weight)
+    local it = F.item({ id = 9100, fullType = "Base.Nails", weight = weight or 0.05 })
+    it.getUnequippedWeight = function() return weight or 0.05 end
+    it.hasTag = function() return false end
+    return it
+end
+
+--- Wire a cart so it looks EQUIPPED: getEquipParent returns the character.
+--- That is the precondition for vanilla's equipParent gate.
+local function makeEquippedCart(chr, opts)
+    local cart = makeRegisteredCart(opts)
+    cart.getEquipParent = function() return chr end
+    cart.getMaxItemSize = function() return 0 end
+    cart.getContainer = function() return chr:getInventory() end
+    local c = cart:getItemContainer()
+    c.isItemAllowed = function() return true end
+    c.getCapacityWeight = function() return (opts and opts.used) or 0 end
+    return cart, c
+end
+
+--- THE REGRESSION. Workshop report 2026-08-04, reproduced on the dedi:
+--- cart 21.1/50 used, item weighing 0.05, refused because the PLAYER was at
+--- 71.91/50. Every transfer from a trunk/bag/shelf into an equipped cart
+--- died there, no matter how empty the cart was.
+tests["cartHasRoomFor_ignores_the_players_own_encumbrance"] = function()
+    local chr = makeOverEncumberedChr({ invWeight = 71.91, invCapacity = 50 })
+    local cart, cont = makeEquippedCart(chr, { used = 21.1 })
+    local nails = makeLooseItem(0.05)
+
+    Assert.notNil(cart:getEquipParent(), "cart is equipped (gate precondition)")
+    return Assert.isTrue(CO._cartHasRoomFor(cont, chr, nails),
+        "item accepted despite the player being over their own capacity")
+end
+
+--- The exemption must not become "always yes": the cart's own capacity is
+--- still the limit.
+tests["cartHasRoomFor_still_enforces_the_carts_own_capacity"] = function()
+    local chr = makeOverEncumberedChr()
+    local _, cont = makeEquippedCart(chr, { used = 99 })
+    return Assert.isFalse(CO._cartHasRoomFor(cont, chr, makeLooseItem(50)),
+        "refused when the CART is genuinely full")
+end
+
+tests["cartHasRoomFor_weight_overload_enforces_capacity"] = function()
+    local chr = makeOverEncumberedChr()
+    local _, cont = makeEquippedCart(chr, { used = 0 })
+    Assert.isTrue(CO._cartHasRoomFor(cont, chr, 10), "small weight fits")
+    return Assert.isFalse(CO._cartHasRoomFor(cont, chr, 100000),
+        "absurd weight refused")
+end
+
+--- A ground cart (no equipParent) was never affected by the gate; prove the
+--- change did not disturb it.
+tests["cartHasRoomFor_ground_cart_unaffected"] = function()
+    local chr = makeOverEncumberedChr()
+    local cart, cont = makeEquippedCart(chr, { used = 0 })
+    cart.getEquipParent = function() return nil end
+    return Assert.isTrue(CO._cartHasRoomFor(cont, chr, makeLooseItem(0.05)),
+        "ground cart accepts the item")
+end
+
+--- Non-carts must fall through to vanilla entirely (nil = "not mine").
+tests["cartHasRoomFor_returns_nil_for_non_carts"] = function()
+    local plain = F.container({ typeName = "bag", capacity = 20 })
+    return Assert.isNil(CO._cartHasRoomFor(plain, makeOverEncumberedChr(), makeLooseItem()),
+        "non-cart container is not handled here")
+end
+
+--- Container restrictions still veto: isItemAllowed is consulted before any
+--- capacity maths (this is the hook that keeps carts out of bags).
+tests["cartHasRoomFor_respects_isItemAllowed"] = function()
+    local chr = makeOverEncumberedChr()
+    local _, cont = makeEquippedCart(chr, { used = 0 })
+    cont.isItemAllowed = function() return false end
+    return Assert.isFalse(CO._cartHasRoomFor(cont, chr, makeLooseItem(0.05)),
+        "a disallowed item is refused regardless of room")
+end
+
 return tests

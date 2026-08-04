@@ -39,6 +39,82 @@ else.
   pre-fix code. Suite: 404/404.
 - Save-safe. No `SCHEMA_VERSION` / `API_VERSION` change.
 
+### MP: items moved between a cart and a bag inside a vehicle trunk vanished
+
+Reported: *"moving items from a container such as a bag, while the bag is inside
+of a trunk of a vehicle, directly into the shopping cart — the action does not
+complete, and when you take that container out of the trunk the items you tried
+moving have completely disappeared and are not in the shopping cart."* Confirmed
+in both directions during triage.
+
+The move itself was always correct; the server put the item exactly where it
+belonged. Nobody was ever told about it. We sync our server-authoritative moves
+with `GameServer.sendAddItemToContainer` / `sendRemoveItemFromContainer`
+(`GameServer.java:2391`, `:2451`), and both route a packet through three branches
+with no `else`: a character owner, a non-nil `getParent()`, or a containing item
+that has a world item. A bag sitting inside a trunk matches none of them — its
+inner container is built with the no-arg `new ItemContainer()` so `parent` is nil,
+`getCharacter()` walks up and terminates at the vehicle, and the bag has no world
+item because it is in a trunk rather than on the ground. The packet is dropped
+silently, with no error and no log.
+
+That produced the exact two symptoms. Loading a cart, the *removal* went missing,
+so the client kept showing a phantom copy in the bag and the transfer read as
+never having completed — the copy died the moment the bag re-synced, which is when
+you pull it out of the trunk. Unloading a cart, the *addition* went missing, so
+the item left the cart and never arrived anywhere visible.
+
+- `repairContainerUpdate` re-sends whatever vanilla dropped, addressed at the
+  nested container itself. `ContainerID.set` already builds a correct
+  `ObjectInVehicle` id for a container inside a vehicle, and the client resolves it
+  straight to that bag's live `ItemContainer` (`ContainerID.java:461-480`) — only
+  the coordinate dispatch was missing, so the container is lent the vehicle as a
+  parent for the duration of one send and given it straight back. Nothing is
+  rebound, so open loot windows keep working and every nearby client is corrected,
+  not just the one who moved the item.
+- Containers nested inside **world objects** (a bag on a shelf) have no equivalent
+  vanilla id — `setObject` derives `containerIndex` from
+  `o.getContainerIndex(container)`, which is `-1` for a container the object does
+  not directly own. Those fall back to refreshing the whole containing item, plus
+  vanilla's `Commands.ui.DirtyUI` so the mover's panels re-resolve. This path does
+  rebind, and only the initiator's windows are refreshed.
+- `resolveSide`'s `bag` branch now refuses instead of silently substituting the
+  player's main inventory, matching what the vehicle branch got in v2.1.14. The old
+  fallback misdelivered cart contents into the player's pockets when a bag could
+  not be located.
+- New `OfflineBagInVehicleTests.lua` (20 tests). The test kit's
+  `Fixtures.containerSyncSpy` now reproduces GameServer's dispatch *and* the
+  receiving side, so a test can tell "packet sent" apart from "client actually
+  changed" — the distinction that hid this bug. A guard test fails if anyone
+  routes the repair back through `sendItemsInContainer`, whose client handler
+  discards any item id the destination already holds.
+
+### Loading an equipped cart failed once you were carrying enough
+
+Same report, second half: *"this maybe could be if the shopping cart is close to
+full but not full."* Vanilla's `ItemContainer.hasRoomFor`
+(`ItemContainer.java:216-224`) requires an item entering a container you have
+equipped to also fit your *character's* carry capacity, unless it is already in
+your inventory. For a worn bag that is right — its contents are on your back. For
+a cart it inverts the feature: the cart's weight counts toward your encumbrance,
+so the fuller the cart, the closer you sit to your cap, and past it every transfer
+from a trunk, bag, shelf or corpse into the equipped cart was refused no matter
+how much room the cart had. Measured on the test server: cart 21.1/50 used, item
+weighing 0.05, refused because the player was at 71.91/50.
+
+- Carts are now exempt from that check. Their own capacity is still the limit and
+  is still enforced. Only carts ever reached the code, so nothing else changes.
+- The refusal was logged with `.debug()`, which dedicated servers suppress, so it
+  was invisible in exactly the situation where it mattered. It now logs with the
+  container type and weight.
+- `cartHasRoomFor` was extracted out of the `__classmetatables` override so it can
+  be tested offline at all; the override needs real Java classes, which is why the
+  rule deciding whether you can load your cart had no coverage. Six new tests in
+  `OfflineCapacityOverrideTests.lua`, sensitivity-proven by reinstating the old
+  gate.
+
+- Suite: 414/414. Save-safe. No `SCHEMA_VERSION` / `API_VERSION` change.
+
 ## v2.1.15 — Hotfix: ground→cart pickups refused on MP (v2.1.14 regression)
 
 v2.1.14's unresolved-source refusal gate (added so unresolvable *vehicle* sides

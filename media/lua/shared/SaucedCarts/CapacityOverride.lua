@@ -96,6 +96,122 @@ local function getCartRawCapacity(container)
     return math.floor(cartData.capacity * capMult / 100)
 end
 
+--- Cart-aware hasRoomFor. Returns nil when `self` is not a cart container,
+--- which tells the metatable override to fall through to vanilla.
+---
+--- Extracted from the `__classmetatables` override so it is reachable
+--- offline: the override itself needs real Java classes, which meant this
+--- predicate — the thing that decides whether a player can load their cart
+--- at all — had no test coverage. It shipped a gameplay-breaking gate for a
+--- full report cycle partly because of that.
+---
+--- Java has two overloads:
+---   hasRoomFor(chr, InventoryItem) - item checks, then delegates to weight
+---   hasRoomFor(chr, float)         - weight-based capacity checks
+--- Lua receives both here via type dispatch on weightOrItem.
+---@param self ItemContainer
+---@param chr IsoGameCharacter|nil
+---@param weightOrItem InventoryItem|number
+---@return boolean|nil
+local function cartHasRoomFor(self, chr, weightOrItem)
+    local rawCap = getCartRawCapacity(self)
+    if not rawCap then return nil end
+
+    local addWeight
+    local itemRef  -- nil when called with weight overload
+    if type(weightOrItem) == "number" then
+        addWeight = weightOrItem
+    else
+        itemRef = weightOrItem
+        addWeight = weightOrItem:getUnequippedWeight()
+    end
+
+    -- ============================================================
+    -- ITEM-PHASE CHECKS (only when called with InventoryItem)
+    -- Mirrors Java's hasRoomFor(chr, InventoryItem)
+    -- ============================================================
+    if itemRef then
+        -- HEAVY_ITEM in vehicle: block heavy items from entering
+        -- character-parented containers while character is in a vehicle
+        if TAG_HEAVY_ITEM and chr and chr:getVehicle()
+            and itemRef:hasTag(TAG_HEAVY_ITEM)
+            and instanceof(self:getParent(), "IsoGameCharacter")
+        then
+            return false
+        end
+
+        -- isItemAllowed: delegates to Java (includes ContainerRestrictions hook chain)
+        if not self:isItemAllowed(itemRef) then
+            return false
+        end
+
+        -- equipParent capacity check: DELIBERATELY NOT APPLIED to carts.
+        --
+        -- Vanilla (ItemContainer.java:216-224) requires an item entering
+        -- a container you have equipped to ALSO fit your character's
+        -- own carry capacity, unless it is already in your inventory.
+        -- For a worn bag that is right: the bag's contents count toward
+        -- your encumbrance.
+        --
+        -- For a cart it inverts the entire feature. A cart's weight
+        -- counts toward the player's inventory weight, so the fuller
+        -- the cart gets the closer the player sits to their cap — and
+        -- past it, EVERY transfer from a trunk, bag, shelf or corpse
+        -- into the equipped cart is refused, no matter how much room
+        -- the cart itself has. Field shape (Workshop report
+        -- 2026-08-04, reproduced on the dedi): cart 21.1/50 used,
+        -- item weighing 0.05, refused because the player was at
+        -- 71.91/50. The point of a cart is to haul what you cannot
+        -- carry; gating loading on what you can carry defeats it.
+        --
+        -- Same carve-out reasoning as the ground-weight limit skipped
+        -- below: a vanilla rule whose premise does not hold for a
+        -- wheeled container. The cart's own capacity remains the
+        -- limit, and it is enforced by the weight-phase check below.
+        --
+        -- Only carts reach this code at all — getCartRawCapacity has
+        -- already returned non-nil above, so nothing else is affected.
+    end
+
+    -- ============================================================
+    -- WEIGHT-PHASE CHECKS (both overloads reach here)
+    -- Mirrors Java's hasRoomFor(chr, float)
+    -- ============================================================
+
+    local ci = self:getContainingItem()
+
+    -- MaxItemSize check
+    if ci then
+        local maxSize = ci:getMaxItemSize()
+        if maxSize > 0 and addWeight > maxSize then
+            return false
+        end
+    end
+
+    -- Ground weight limit: SKIPPED for carts.
+    -- Items going into a cart are not "on the floor" — they're inside the
+    -- cart's container. PZ's floor weight limit (50kg per tile) is for loose
+    -- items, not for container contents. The cart itself counts toward the
+    -- tile limit, but its contents (with weight reduction) should not block
+    -- transfers into the cart. The cart's own capacity is the only limit.
+
+    -- Vehicle container parent check (with floatingPointCorrection)
+    if ci and ci:getContainer() then
+        local vehiclePart = ci:getContainer():getVehiclePart()
+        if vehiclePart then
+            local parentCap = ci:getContainer():getEffectiveCapacity(chr)
+            if floatingPointCorrection(ci:getContainer():getCapacityWeight() + addWeight) > parentCap then
+                return false
+            end
+        end
+    end
+
+    -- Main capacity check (with floatingPointCorrection on current weight)
+    local effectiveCap = computeEffectiveCapacity(
+        rawCap, chr, self:getParent(), self:getType())
+    return floatingPointCorrection(self:getCapacityWeight()) + addWeight <= effectiveCap
+end
+
 local function initCapacityOverride()
     if overrideInitialized then
         SaucedCarts.debug("CapacityOverride already initialized, skipping")
@@ -183,96 +299,7 @@ local function initCapacityOverride()
     --   hasRoomFor(chr, float)         - weight-based capacity checks
     -- Lua receives both in one function via type dispatch on weightOrItem.
     itemContMeta.__index.hasRoomFor = function(self, chr, weightOrItem)
-        local success, customResult = pcall(function()
-            local rawCap = getCartRawCapacity(self)
-            if not rawCap then return nil end
-
-            local addWeight
-            local itemRef  -- nil when called with weight overload
-            if type(weightOrItem) == "number" then
-                addWeight = weightOrItem
-            else
-                itemRef = weightOrItem
-                addWeight = weightOrItem:getUnequippedWeight()
-            end
-
-            -- ============================================================
-            -- ITEM-PHASE CHECKS (only when called with InventoryItem)
-            -- Mirrors Java's hasRoomFor(chr, InventoryItem)
-            -- ============================================================
-            if itemRef then
-                -- HEAVY_ITEM in vehicle: block heavy items from entering
-                -- character-parented containers while character is in a vehicle
-                if TAG_HEAVY_ITEM and chr and chr:getVehicle()
-                    and itemRef:hasTag(TAG_HEAVY_ITEM)
-                    and instanceof(self:getParent(), "IsoGameCharacter")
-                then
-                    return false
-                end
-
-                -- isItemAllowed: delegates to Java (includes ContainerRestrictions hook chain)
-                if not self:isItemAllowed(itemRef) then
-                    return false
-                end
-
-                -- equipParent capacity check: when cart is equipped, items
-                -- transferred in must also fit in the parent character's inventory
-                local ci = self:getContainingItem()
-                if ci then
-                    local equipParent = ci:getEquipParent()
-                    if equipParent and equipParent:getInventory() then
-                        local parentInv = equipParent:getInventory()
-                        -- Only check if item is NOT already in parent inventory
-                        if not parentInv:contains(itemRef) then
-                            if not chr
-                                or floatingPointCorrection(parentInv:getCapacityWeight())
-                                    + addWeight > parentInv:getEffectiveCapacity(chr)
-                            then
-                                return false
-                            end
-                        end
-                    end
-                end
-            end
-
-            -- ============================================================
-            -- WEIGHT-PHASE CHECKS (both overloads reach here)
-            -- Mirrors Java's hasRoomFor(chr, float)
-            -- ============================================================
-
-            local ci = self:getContainingItem()
-
-            -- MaxItemSize check
-            if ci then
-                local maxSize = ci:getMaxItemSize()
-                if maxSize > 0 and addWeight > maxSize then
-                    return false
-                end
-            end
-
-            -- Ground weight limit: SKIPPED for carts.
-            -- Items going into a cart are not "on the floor" — they're inside the
-            -- cart's container. PZ's floor weight limit (50kg per tile) is for loose
-            -- items, not for container contents. The cart itself counts toward the
-            -- tile limit, but its contents (with weight reduction) should not block
-            -- transfers into the cart. The cart's own capacity is the only limit.
-
-            -- Vehicle container parent check (with floatingPointCorrection)
-            if ci and ci:getContainer() then
-                local vehiclePart = ci:getContainer():getVehiclePart()
-                if vehiclePart then
-                    local parentCap = ci:getContainer():getEffectiveCapacity(chr)
-                    if floatingPointCorrection(ci:getContainer():getCapacityWeight() + addWeight) > parentCap then
-                        return false
-                    end
-                end
-            end
-
-            -- Main capacity check (with floatingPointCorrection on current weight)
-            local effectiveCap = computeEffectiveCapacity(
-                rawCap, chr, self:getParent(), self:getType())
-            return floatingPointCorrection(self:getCapacityWeight()) + addWeight <= effectiveCap
-        end)
+        local success, customResult = pcall(cartHasRoomFor, self, chr, weightOrItem)
 
         if success and customResult ~= nil then
             return customResult
@@ -430,6 +457,7 @@ SaucedCarts.CapacityOverride = CapacityOverride
 CapacityOverride._computeEffectiveCapacity = computeEffectiveCapacity
 CapacityOverride._floatingPointCorrection  = floatingPointCorrection
 CapacityOverride._getCartRawCapacity       = getCartRawCapacity
+CapacityOverride._cartHasRoomFor           = cartHasRoomFor
 CapacityOverride._rawCapKey                = RAW_CAP_KEY
 
 SaucedCarts.debug("CapacityOverride module loaded")

@@ -66,6 +66,239 @@ local function classifyTransfer(srcContainer, destContainer)
 end
 
 -- ============================================================================
+-- BROADCAST ADDRESSABILITY REPAIR (v2.1.16)
+-- ============================================================================
+-- We sync our server-authoritative moves with GameServer.sendAddItemToContainer
+-- / sendRemoveItemFromContainer (GameServer.java:2391, :2451). Both route a
+-- packet through exactly three branches and have NO else:
+--
+--   1. container:getCharacter() is an IsoPlayer   -> send to that player
+--   2. container:getParent() ~= nil               -> sendToRelative(parent x,y)
+--   3. containing item has a world item           -> sendToRelative(item x,y)
+--
+-- A container matching none is UNADDRESSABLE and the packet is dropped with
+-- no error and no log. A bag nested inside a vehicle part or a world object
+-- lands in that hole every time: its inner container is built with the no-arg
+-- `new ItemContainer()` so `parent` is nil, `getCharacter()`
+-- (ItemContainer.java:3314) walks up and terminates at the non-character
+-- owner, and the bag has no world item because it is inside a trunk rather
+-- than on the ground.
+--
+-- Symptom (Workshop report 2026-08-04): moving items from a bag sitting in a
+-- vehicle trunk into a cart. The server performs the move correctly, but no
+-- client is ever told the item left the bag, so the source pane never
+-- changes — the transfer reads as "the action didn't complete". The stale
+-- copy survives until the bag re-syncs, i.e. the moment it is taken out of
+-- the trunk, at which point the items appear to vanish.
+--
+-- Repair: walk up to the nearest ADDRESSABLE ancestor container and refresh
+-- the item that links the subtree to it, via sendReplaceItemInContainer.
+-- That item's byte data carries its own contents, so refreshing the bag
+-- sitting in the trunk rebuilds everything nested inside it. See
+-- flushContainerResync for why this channel and not sendItemsInContainer.
+--
+-- Carts on the ground, equipped carts and bags in the player's inventory all
+-- satisfy a branch already and are left entirely on the vanilla path.
+
+--- True when vanilla's broadcast helpers can address `container`.
+--- Mirrors the Java branch order exactly. Fail-safe: on any error we claim
+--- addressable, so a surprise can only cost us a repair, never cause a
+--- spurious flood of resync packets.
+---@param container ItemContainer|nil
+---@return boolean
+local function isBroadcastAddressable(container)
+    if not container then return true end
+    local ok, addressable = pcall(function()
+        local chr = container.getCharacter and container:getCharacter()
+        if chr and instanceof(chr, "IsoPlayer") then return true end
+        if container.getParent and container:getParent() ~= nil then return true end
+        local ci = container.getContainingItem and container:getContainingItem()
+        if ci and ci.getWorldItem and ci:getWorldItem() ~= nil then return true end
+        return false
+    end)
+    if not ok then return true end
+    return addressable and true or false
+end
+
+--- Walk from an unaddressable container up to the nearest ADDRESSABLE
+--- ancestor container, and return that ancestor together with the item that
+--- links the subtree to it.
+---
+--- Refreshing that one link item re-serialises everything nested inside it,
+--- because an InventoryContainer's byte data carries its own contents. So a
+--- bag three levels down inside a trunk is fixed by refreshing the outermost
+--- bag sitting directly in the trunk.
+---@param container ItemContainer
+---@return ItemContainer|nil ancestor  addressable container holding `link`
+---@return InventoryItem|nil link      the item to refresh inside `ancestor`
+local function resolveResyncTarget(container)
+    if not container then return nil, nil end
+    local cur = container
+    -- Bounded walk: a malformed cycle must not hang the server tick.
+    for _ = 1, 16 do
+        local link = cur.getContainingItem and cur:getContainingItem()
+        if not link then return nil, nil end
+        local up = link.getContainer and link:getContainer()
+        if not up then return nil, nil end
+        if isBroadcastAddressable(up) then
+            return up, link
+        end
+        cur = up
+    end
+    return nil, nil
+end
+
+-- Coalescing buffer. A batched transfer (a stack of nails out of one bag)
+-- calls performCartTransfer once per item; without coalescing that is one
+-- refresh packet per item. Keyed by the link item so repeat marks collapse.
+-- Kahlua has no `next`, so emptiness is tracked by counter.
+local pendingResync = {}
+local pendingResyncCount = 0
+local pendingResyncPlayer = nil
+
+--- Nearest BaseVehicle owning an ancestor of `container`, or nil.
+--- Only vehicles matter here: see repairContainerUpdate for why.
+---@param container ItemContainer
+---@return BaseVehicle|nil
+local function vehicleAncestorOf(container)
+    local cur = container
+    for _ = 1, 16 do
+        local link = cur.getContainingItem and cur:getContainingItem()
+        if not link then return nil end
+        local up = link.getContainer and link:getContainer()
+        if not up then return nil end
+        local parent = up.getParent and up:getParent()
+        if parent and instanceof and instanceof(parent, "BaseVehicle") then
+            return parent
+        end
+        cur = up
+    end
+    return nil
+end
+
+--- Note that `container` needs a refresh, if it needs one at all.
+--- Cheap and idempotent; the actual packets go out on flush.
+---@param container ItemContainer|nil
+---@param player IsoPlayer|nil  who to nudge into repainting their panels
+local function markContainerForResync(container, player)
+    if not isServer() then return end
+    if isBroadcastAddressable(container) then return end
+    pendingResyncPlayer = player or pendingResyncPlayer
+    local ok, ancestor, link = pcall(resolveResyncTarget, container)
+    if not ok or not ancestor or not link then
+        SaucedCarts.log(function() return string.format(
+            "resync: container type=%s is unaddressable and has no addressable "
+            .. "ancestor — clients will not see this side of the move",
+            tostring(container.getType and container:getType() or "?")) end)
+        return
+    end
+    local key = tostring(link)
+    if pendingResync[key] then return end
+    pendingResync[key] = { ancestor = ancestor, link = link }
+    pendingResyncCount = pendingResyncCount + 1
+end
+
+--- Push every pending refresh to clients. Safe to call when nothing is
+--- pending, and safe to call late: a refresh always transmits current truth.
+---
+--- CHANNEL CHOICE — this is the whole reason the repair works. The obvious
+--- candidate, sendItemsInContainer, is useless here: the client's handler
+--- (AddInventoryItemToContainerPacket.processClient:87-90) SKIPS any item
+--- whose id the destination already holds, logging "Error: Dupe item ID".
+--- Resyncing a trunk that already contains the bag therefore changes nothing
+--- on the client and just spams that error — the nested bag's contents are
+--- never refreshed.
+---
+--- ReplaceInventoryItemInContainerPacket.processClient (:67-69) instead does
+--- removeItemWithID(old) then addItem(new) with NO dedup guard, so replacing
+--- the link item with itself rebuilds it from fresh byte data — contents and
+--- all. One packet, so there is no remove-then-add ordering hazard, and it
+--- needs nothing of the client beyond stock vanilla.
+function SaucedCarts.flushContainerResync()
+    if pendingResyncCount == 0 then return end
+    local batch = pendingResync
+    local player = pendingResyncPlayer
+    pendingResync, pendingResyncCount, pendingResyncPlayer = {}, 0, nil
+    if type(sendReplaceItemInContainer) ~= "function" then return end
+    for _, entry in pairs(batch) do
+        pcall(function()
+            sendReplaceItemInContainer(entry.ancestor, entry.link, entry.link)
+        end)
+    end
+
+    -- Repaint the initiator's inventory panels.
+    --
+    -- The replace above is correct but REBINDS: the client's handler does
+    -- removeItemWithID + addItem, so the bag becomes a NEW object. An open
+    -- loot panel still points at the old bag's ItemContainer, which is now
+    -- detached — right data, dead panel, and the item only appears after
+    -- clicking away and back.
+    --
+    -- Commands.ui.DirtyUI (client ServerCommands.lua:138-140) runs
+    -- ISInventoryPage.dirtyUI() -> refreshBackpacks() on the player and loot
+    -- panels, which RE-RESOLVES the container list and picks up the new bag.
+    -- It is stock vanilla client code, so this works against unmodified and
+    -- not-yet-updated clients too.
+    --
+    -- Targeted at the initiator via the 4-arg form: they are the one with a
+    -- panel open on the affected container, and refreshBackpacks for every
+    -- player on every cart transfer would be a needless broadcast.
+    if player and type(sendServerCommand) == "function" then
+        pcall(function() sendServerCommand(player, "ui", "DirtyUI", {}) end)
+    end
+end
+
+--- Re-send one add/remove that vanilla's dispatch silently dropped.
+--- Call AFTER vanilla has had its go: when the container is addressable this
+--- is a no-op, because vanilla already delivered.
+---
+--- TWO CHANNELS, because vanilla's own addressing is uneven:
+---
+--- 1. PRECISE (vehicles). ContainerID.set builds a proper nested id for a
+---    container inside a vehicle — ObjectInVehicle, carrying (vehicleId,
+---    partIndex, containingItemId) — and the client resolves it straight to
+---    `inventoryContainer.getItemContainer()` (ContainerID.java:461-480),
+---    i.e. its LIVE bag container. Nothing is rebound, so an open loot panel
+---    keeps working and vanilla's own dirtying applies.
+---    The only thing missing is dispatch: GameServer picks broadcast coords
+---    from `container.getParent()`, which is nil for a bag's inner
+---    container. So we lend it the vehicle as a parent for the duration of
+---    the call. That does NOT affect the id — ContainerID.set derives it
+---    from the true outermost container, not from our loan.
+---
+--- 2. FALLBACK (everything else, e.g. a bag on a shelf). Vanilla has no
+---    nested id for these: setObject computes containerIndex via
+---    `o.getContainerIndex(container)`, which is -1 for a container the
+---    object does not directly own. So there is no packet that can name the
+---    bag, and we fall back to refreshing the whole link item — which
+---    rebinds, hence the DirtyUI nudge in flushContainerResync.
+---@param send function  sendAddItemToContainer or sendRemoveItemFromContainer
+local function repairContainerUpdate(send, container, item, player)
+    if not isServer() or not container or not item then return end
+    if type(send) ~= "function" then return end
+    -- Vanilla could reach it: it has already sent the real packet.
+    if isBroadcastAddressable(container) then return end
+
+    local veh = vehicleAncestorOf(container)
+    if veh and container.setParent then
+        local original = container.getParent and container:getParent()
+        local sent = false
+        pcall(function()
+            container:setParent(veh)
+            send(container, item)
+            sent = true
+        end)
+        -- Restore unconditionally: leaving a borrowed parent behind would
+        -- make this container look addressable (and mis-owned) forever.
+        pcall(function() container:setParent(original) end)
+        if sent then return end
+        SaucedCarts.log("repairContainerUpdate: precise send failed, falling back to refresh")
+    end
+
+    markContainerForResync(container, player)
+end
+
+-- ============================================================================
 -- ACTUAL MOVE (SP + SERVER-AUTHORITATIVE)
 -- ============================================================================
 
@@ -120,6 +353,7 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
         if isServer() and type(sendAddItemToContainer) == "function" then
             sendAddItemToContainer(destContainer, item)
         end
+        repairContainerUpdate(sendAddItemToContainer, destContainer, item, player)
         -- Mark dirty AFTER the mutation so the inventory panel repaints.
         if destContainer.setDrawDirty then destContainer:setDrawDirty(true) end
         SaucedCarts.debug(function() return string.format(
@@ -155,6 +389,7 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
             if isServer() and type(sendRemoveItemFromContainer) == "function" then
                 sendRemoveItemFromContainer(srcContainer, item)
             end
+            repairContainerUpdate(sendRemoveItemFromContainer, srcContainer, item, player)
             -- Inventory panel refresh on the source side.
             if srcContainer.setDrawDirty then srcContainer:setDrawDirty(true) end
         end
@@ -350,7 +585,16 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
     local destIsVehicle = destParent and instanceof and instanceof(destParent, "BaseVehicle")
     if not destIsVehicle
         and destContainer.hasRoomFor and not destContainer:hasRoomFor(player, item) then
-        SaucedCarts.debug("performCartTransfer: dest has no room")
+        -- .log not .debug: a silent capacity refusal on a dedi is
+        -- indistinguishable from "the mod is broken" (this exact bail hid
+        -- the equipParent gate for an entire report cycle).
+        SaucedCarts.log(function() return string.format(
+            "performCartTransfer: dest type=%s has no room for item %s "
+            .. "(capacityWeight=%.2f)",
+            tostring(destContainer.getType and destContainer:getType() or "?"),
+            tostring(item.getID and item:getID() or "?"),
+            (destContainer.getCapacityWeight and destContainer:getCapacityWeight()) or -1)
+        end)
         return false
     end
 
@@ -359,6 +603,15 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
     if isServer() and type(sendAddItemToContainer) == "function" then
         sendAddItemToContainer(destContainer, item)
     end
+
+    -- Repair either side that vanilla's helpers could not address. The
+    -- source side is the reported case: a bag nested in a vehicle trunk
+    -- gets its removal packet silently dropped, leaving every client
+    -- showing an item the server has already moved.
+    -- vanilla's transferItem already broadcast the remove, and we sent the
+    -- add above; both drop silently for a container vanilla cannot address.
+    repairContainerUpdate(sendRemoveItemFromContainer, srcContainer, item, player)
+    repairContainerUpdate(sendAddItemToContainer, destContainer, item, player)
 
     -- Mark both containers dirty so the inventory panel repaints on its
     -- next tick. Without this, SP (and client-authoritative MP) transfers
@@ -909,9 +1162,18 @@ local function handleCartTransfer(player, args)
                 local c = bagItem:getItemContainer()
                 if c then return c, nil end
             end
-            SaucedCarts.debug(function() return string.format(
-                "resolveSide: bag item %s NOT FOUND in inv or nearby; falling back to playerInv",
+            -- HARD FAIL (v2.1.16): same reasoning as the vehicle branch in
+            -- v2.1.14. Substituting playerInv here is never right — the bag
+            -- is a real container the client pointed at, and pretending it
+            -- was the main inventory either misdelivers cart items into the
+            -- player's pockets (direction "out") or hands performCartTransfer
+            -- a source that doesn't hold the item (direction "in", the old
+            -- v2.1.4 dupe shape). Refusing lets direction "in" fall back to
+            -- the item's own container, which IS authoritative.
+            SaucedCarts.log(function() return string.format(
+                "resolveSide: bag item %s NOT FOUND in inv or nearby — refusing to substitute playerInv",
                 tostring(cartId)) end)
+            return nil, nil, true
         end
         -- Vehicle kind — VehiclePart container on a BaseVehicle (trunk,
         -- glovebox, seats, trailer bed). Mirrors vanilla ContainerID.find-
@@ -1213,6 +1475,10 @@ local function handleCartTransfer(player, args)
             end
         end
     end
+
+    -- One anchored resync per affected container for the WHOLE command,
+    -- after the batch loop — not one per item.
+    SaucedCarts.flushContainerResync()
 end
 
 if SaucedCarts.Network and SaucedCarts.Network.registerServerHandler then
@@ -1279,6 +1545,12 @@ SaucedCarts.CartTransferInterceptor = {
     findInventoryItemRecursive = findInventoryItemRecursive,
     handleCartTransfer = handleCartTransfer,
     isInstalled = function() return interceptionInstalled end,
+    -- Broadcast repair internals. Exposed so live pz-shell probes can check
+    -- them against REAL Java objects — the offline harness can prove the
+    -- call shape but not that PZ's own validation accepts the pairing.
+    isBroadcastAddressable = isBroadcastAddressable,
+    resolveResyncTarget = resolveResyncTarget,
+    vehicleAncestorOf = vehicleAncestorOf,
 }
 
 SaucedCarts.debug("CartTransferInterceptor module loaded")
