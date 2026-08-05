@@ -4,60 +4,58 @@ All notable changes to SaucedCarts are documented here. Latest version first.
 
 ## v2.1.17 — unreleased
 
-### Dedicated servers: we were truncating `<server>_SandboxVars.lua` every boot
+### Dedicated servers: we no longer rewrite `<server>_SandboxVars.lua` at all
 
-Reported on the Workshop (PZ 42.20.1 dedicated Linux, ~245 mods): the file
-shrank from 86007 to 39873 bytes on every restart, ending mid-file after the
-last option written with no closing brace — while our log line claimed success.
+Three servers reported the same thing on 42.20.1: the file shrank on every
+boot, ended part-way through with no closing brace, and on the next restart
+failed to parse — so the server came up with no sandbox configuration until an
+admin restored it by hand. It affected every mod's settings on the box, not
+just ours, and our own log line reported success over the wreckage.
 
-`SandboxFileComments` reloads the translator post-boot and asks PZ's own writer
-to regenerate the file, which restores the tooltip comments mod options
-otherwise never get. Three vanilla facts turn that into a destructive operation
-(line numbers below are from the 42.20.0 decompile, buildid `24569316`; they
-shift between builds — a reporter's 42.20.1 trace shows the same frames at
-`Translator.java:506/518` and `SandboxOptions.java:1062/1686/1447`):
+Since v2.1.13 we reloaded the translator on `OnServerStarted` and called
+`saveServerLuaFile()` so PZ would regenerate the file with tooltip comments for
+mod options — which a dedicated server otherwise never gets, because its
+Translator lazy-loads before mods register. On 42.20.1 that turned destructive:
 
-1. `writeLuaFile` opens `new FileWriter(file)` (`SandboxOptions.java:878`) —
-   the existing file is truncated before a single byte is written.
-2. It calls `getTooltip()` per option (`:907`, `:936`) **unguarded**. The enum
-   value-translation loop directly below each call has its own `try/catch`; the
-   tooltip call does not.
-3. Every `getTooltip()` overload (`:1376`, `:1473`, `:1585`, `:1714`, `:1947`)
-   resolves through `Translator.getTextOrNull` → `.formatted()`. Since the 42.20
-   percent patch, a tooltip carrying a bare `%` raises
-   `UnknownFormatConversionException` — the type
-   `reportMissingArgumentsFromPastAbuse` does *not* catch.
+- `writeLuaFile` opens `new FileWriter(file)`, truncating the existing file
+  before a byte is written.
+- It resolves `getTooltip()` per option, unguarded.
+- Since the 42.20 percent patch every translated string goes through
+  `String.formatted`, so a tooltip carrying a stray `%` — a mod writing the
+  C-style `%i` is the observed case — raises `UnknownFormatConversionException`,
+  which `Translator` does not catch.
 
-So one badly-escaped tooltip in any installed mod aborts the write mid-file.
-try-with-resources flushes the partial content, and the outer catch (`:967`)
-swallows the exception and returns `false`. We discarded that return and logged
-success over a broken file — which is why the report shows both.
+The write dies mid-file, try-with-resources flushes the partial content, and PZ
+swallows the exception and returns `false`.
 
-PZ's own boot write is unaffected precisely because mod translations aren't
-loaded yet at that point, which is the gap this feature exists to close. Closing
-it is what arms the bug.
+**Every mitigation was tried and none hold.** Pre-flighting each `getTooltip()`
+from Lua does not work — verified by live repro on 42.20.1, where the throwing
+option does not surface as a catchable Lua error the way it does inside Java, so
+the pre-flight passes and the file still truncates. Repair afterwards is
+impossible: 42.20 restricts `getFileWriter` to `ini/cfg/txt/log`, so a `.lua`
+cannot be written from Lua at all. Temp-file-and-rename fails for the same
+reason, and `saveServerLuaFile` takes a server *name* rather than a path, so its
+destination cannot be redirected. "Only rewrite when comments are missing"
+doesn't help either — on a stock dedicated boot they are missing every time.
 
-We cannot repair the damage from Lua: 42.20 restricts `getFileWriter` to
-`ini/cfg/txt/log`, and `getFileReader` rejects relative paths and roots at
-`Zomboid/Lua/`, so a `.lua` under `Zomboid/Server/` is neither readable nor
-writable. Backup-restore and read-back verification are both impossible, so the
-fix is entirely preventive:
+So the trade was explanatory comments in a config file against destroying every
+mod's settings on the server on every boot, through a vanilla writer we don't
+control and can't guard. We now take neither the risk nor the feature.
 
-- **Necessity guard.** Probe whether mod translations already resolve
-  server-side *before* reloading. If they do, PZ's own write already had
-  comments and we skip entirely. This also self-disables the feature if a future
-  build fixes the load ordering, with no version sniffing.
-- **Pre-flight.** Resolve every option's tooltip via `getNumOptions` /
-  `getOptionByIndex` before writing. If any throws, skip the rewrite and log the
-  offending option by name — on a 245-mod server that name is the only practical
-  way to find the culprit.
-- **Fail closed.** If option introspection isn't available, decline to write.
-  Silently not healing beats silently truncating an admin's config.
-- **Honour the return value**, and never log success over a `false`.
-- `OnServerStarted` is now wrapped so this can't disturb other listeners.
+The translator reload is kept: it writes nothing, it's the same call vanilla's
+own debug "Reload translations" menu item uses, and it makes server-side
+`getText` resolve mod strings for the rest of the session.
 
-Ten new tests in `OfflineSandboxFileCommentsTests.lua` (18 total in that file),
-eight of which fail against the pre-fix module. Suite 432/432.
+If the comments are wanted back, the safe route is a companion reference file —
+`getFileWriter` permits `.txt`, so the option list with tooltips and enum maps
+can be emitted alongside the save without ever touching the admin's own file.
+That's a follow-up feature, not an emergency fix.
+
+**If your file is already truncated:** start the server once with SaucedCarts
+disabled. PZ writes a complete file itself at boot and your settings come back.
+
+Seven tests in `OfflineSandboxFileCommentsTests.lua`, the load-bearing one
+asserting `saveServerLuaFile` is never called. Suite 421/421.
 
 ## v2.1.16
 
