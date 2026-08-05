@@ -4,6 +4,47 @@ All notable changes to SaucedCarts are documented here. Latest version first.
 
 ## v2.1.16 — unreleased
 
+### Carts left on the ground were deleted by the server's world cleanup
+
+Reported on the Workshop (B42.20 dedicated MP): carts vanish during world
+cleanup, and with no way to stash one in a bag or a regular container there was
+nowhere safe to leave it.
+
+Vanilla's world-item cleanup is not a periodic sweep. It's a filter inside
+`IsoGridSquare.load` (`IsoGridSquare.java:3297-3314`) that discards matching
+`IsoWorldInventoryObject`s as the chunk is deserialized, driven by the
+`HoursForWorldItemRemoval` / `WorldItemRemovalList` /
+`ItemRemovalListBlacklistToggle` sandbox options. The whole condition is gated
+on `&& !worldItem.isIgnoreRemoveSandbox()`, and that flag is serialized
+(`IsoWorldInventoryObject.java:487` write, `:430` read), so setting it once at
+drop time survives save and load.
+
+Vanilla sets the flag on every player-initiated drop — `ISDropWorldItemAction`
+(`:85`), `ISDropVehicleItemAction` (`:51`), `ItemSpawner.java:37` — so
+player-handled items are exempt by design and the option only sweeps spawned
+clutter. We dropped carts through raw `AddWorldInventoryItem` without it, which
+made carts the only player-dropped object in the game that vanilla cleanup
+would eat. A cart that broke was worse still: its entire payload went to the
+floor equally unprotected.
+
+- New `SaucedCarts.markDropPersistent(dropped)` in `Core.lua` is the single
+  place that applies the exemption, nil-safe and error-swallowing so it can
+  never abort a drop that otherwise worked.
+- Applied to all five drop paths: the MP server-authoritative drop
+  (`AnimationSync.lua`), the SP combat drop (`InstantDrop.lua`), the unequip
+  force-drop (`ContainerRestrictions.lua`), and both cart-break paths — payload
+  and salvage (`Durability.lua`). The unload-item-from-cart path
+  (`CartTransferInterceptor.lua`) already did this.
+- Deliberately not applied to `WorldSpawning.lua`'s loot spawns. Fresh,
+  unhandled loot being sweepable is the vanilla contract.
+
+`OfflineWorldCleanupTests.lua` (9 tests, all 9 fail against pre-fix code).
+Suite 422/422. Save-safe, no `SCHEMA_VERSION` / `API_VERSION` change.
+
+This does not cover carts stored inside a vehicle. Nothing in vanilla can
+delete a vehicle container's contents — that report needs the reporting
+server's cleanup mod identified before it can be diagnosed.
+
 ### MP: corpses loaded into a cart stayed lying on the ground for other players
 
 Reported in-session: the corpse went into the cart *and* stayed on the ground.

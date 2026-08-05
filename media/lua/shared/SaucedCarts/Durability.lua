@@ -162,7 +162,11 @@ local function dropSalvage(square)
                 -- Spread items slightly for visual variety
                 local xOff = ZombRandFloat(0.3, 0.7)
                 local yOff = ZombRandFloat(0.3, 0.7)
-                square:AddWorldInventoryItem(item, xOff, yOff, 0, true)
+                -- markDropPersistent: this debris came out of a player-handled
+                -- cart, so it must be exempt from the sandbox world-item cleanup
+                -- like any other player drop.
+                SaucedCarts.markDropPersistent(
+                    square:AddWorldInventoryItem(item, xOff, yOff, 0, true))
             end
         end
     end
@@ -219,7 +223,12 @@ function SaucedCarts.Durability.dropContentsAndDestroy(cart, player, square)
                     end)
                 else
                     container:DoRemoveItem(item)
-                    square:AddWorldInventoryItem(item, 0.5, 0.5, 0, true)
+                    -- markDropPersistent: a broken cart dumps its whole payload
+                    -- here. Without the exemption the entire cargo is deleted on
+                    -- the next chunk load on cleanup-enabled servers — the worst
+                    -- single instance of this bug.
+                    SaucedCarts.markDropPersistent(
+                        square:AddWorldInventoryItem(item, 0.5, 0.5, 0, true))
                 end
                 droppedCount = droppedCount + 1
             end

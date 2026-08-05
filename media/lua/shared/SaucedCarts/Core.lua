@@ -646,6 +646,39 @@ function SaucedCarts.resolveCartDropSquare(square)
     return square
 end
 
+--- Exempt a just-dropped world item from the sandbox world-item cleanup.
+---
+--- Servers that set HoursForWorldItemRemoval (especially with
+--- ItemRemovalListBlacklistToggle = true, i.e. "remove everything NOT listed")
+--- delete matching ground items. The sweep is not a timer — it's a filter
+--- inside IsoGridSquare.load (IsoGridSquare.java:3297-3314) that discards
+--- matching IsoWorldInventoryObjects as the chunk is deserialized. The whole
+--- condition is gated on `&& !worldItem.isIgnoreRemoveSandbox()`, and the flag
+--- is serialized (IsoWorldInventoryObject.java:487 write / :430 read), so
+--- setting it once at drop time survives save/load.
+---
+--- Vanilla sets this on EVERY player-initiated drop — ISDropWorldItemAction.lua:85,
+--- ISDropVehicleItemAction.lua:51, ItemSpawner.java:37 — so player-handled items
+--- are exempt by design and the option only sweeps spawned clutter. Every path
+--- of ours that puts a cart (or a cart's cargo) on the ground must do the same,
+--- otherwise carts are the only player-dropped object in the game that vanilla
+--- cleanup eats. Deliberately NOT applied to WorldSpawning's loot spawns: fresh
+--- unhandled loot being sweepable IS the vanilla contract.
+---
+---@param dropped InventoryItem|nil Return value of IsoGridSquare:AddWorldInventoryItem
+---@return boolean marked True if the flag was set
+function SaucedCarts.markDropPersistent(dropped)
+    if not dropped then return false end
+    local ok, marked = pcall(function()
+        if not dropped.getWorldItem then return false end
+        local worldItem = dropped:getWorldItem()
+        if not worldItem or not worldItem.setIgnoreRemoveSandbox then return false end
+        worldItem:setIgnoreRemoveSandbox(true)
+        return true
+    end)
+    return ok and marked or false
+end
+
 -- ============================================================================
 -- CART-PUSH POSE ANIMATION VARIABLES
 -- ============================================================================

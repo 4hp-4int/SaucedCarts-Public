@@ -282,6 +282,11 @@ SaucedCarts.Network.registerServerHandler("requestInstantDrop", function(player,
     local dropY = player:getY() - math.floor(player:getY())
     local worldItem = square:AddWorldInventoryItem(cart, dropX, dropY, 0, true)
 
+    -- Exempt from the sandbox world-item cleanup, exactly as vanilla does for
+    -- every player-initiated drop. Without this a cart parked on the ground is
+    -- deleted on the next chunk load on servers running HoursForWorldItemRemoval.
+    SaucedCarts.markDropPersistent(worldItem)
+
     -- Apply damage now that cart is safely on the ground
     local newCondition = SaucedCarts.Durability.applyAccumulatedDamage(cart)
 

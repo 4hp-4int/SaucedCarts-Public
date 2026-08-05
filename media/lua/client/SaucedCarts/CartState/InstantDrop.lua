@@ -143,6 +143,10 @@ function InstantDrop.dropCartSP(player, cartItem)
     local dropY = player:getY() - math.floor(player:getY())
     local worldItem = square:AddWorldInventoryItem(cartItem, dropX, dropY, 0, true)
 
+    -- Exempt from the sandbox world-item cleanup (vanilla does this on every
+    -- player-initiated drop — see SaucedCarts.markDropPersistent).
+    SaucedCarts.markDropPersistent(worldItem)
+
     -- Fire drop event
     if SaucedCarts._fireEvent then
         SaucedCarts._fireEvent(SaucedCarts.Events.onCartDrop, player, cartItem, square)

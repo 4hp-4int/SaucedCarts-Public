@@ -356,6 +356,10 @@ local function initUnequipHook()
                 -- already handles transmission. Double-transmit causes duplicates in self-hosted MP.
                 local worldItem = square:AddWorldInventoryItem(item, 0, 0, 0, true)
 
+                -- Exempt from the sandbox world-item cleanup (vanilla does this
+                -- on every player-initiated drop — see markDropPersistent).
+                SaucedCarts.markDropPersistent(worldItem)
+
                 -- Fire drop event
                 if SaucedCarts._fireEvent then
                     SaucedCarts._fireEvent(SaucedCarts.Events.onCartDrop, character, item, square)
