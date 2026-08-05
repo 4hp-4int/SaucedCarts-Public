@@ -4,6 +4,32 @@ All notable changes to SaucedCarts are documented here. Latest version first.
 
 ## v2.1.16 — unreleased
 
+### Sandbox options threw a translation error on the latest PZ patch
+
+The patch that added mod `.json` translation support also changed percent
+handling: *"Mod translations should use `%%` to display `%` characters."*
+
+Every `getText` now runs its result through `String.formatted` —
+`Translator.getText` calls `reportMissingArgumentsFromPastAbuse`, which calls
+`text.formatted(fixupArgs(args))` whether or not any arguments were passed. So
+every translated string is now a format string, and a bare `%` is read as a
+conversion specifier. `Translator.formatFixer` rewrites `%1` into `%1$s` and
+leaves `%%` alone, and it *is* applied to mod files (`tryFillMapFromMods` passes
+it through), so existing `%1` placeholders are unaffected. Only literal percent
+characters had to change.
+
+Two strings were affected, both in the Weight Reduction sandbox option:
+
+- The tooltip's `5% of normal` parsed as the specifier `'% o'` and raised
+  `MissingFormatArgumentException`. That one is caught and logged as a warning.
+- The option name `Weight Reduction %` has a trailing `%`, which raises
+  `UnknownFormatConversionException` — a type `reportMissingArgumentsFromPastAbuse`
+  does *not* catch, so it propagated into Lua. That is the accompanying stack
+  trace in the report.
+
+Both now use `%%`, in `Sandbox.json` and `Sandbox_EN.txt`. The `%1` / `%2`
+placeholders in `UI.json` / `UI_EN.txt` are correct as-is and were left alone.
+
 ### Carts left on the ground were deleted by the server's world cleanup
 
 Reported on the Workshop (B42.20 dedicated MP): carts vanish during world
