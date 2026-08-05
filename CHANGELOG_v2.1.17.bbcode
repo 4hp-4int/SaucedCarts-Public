@@ -1,0 +1,19 @@
+[h1]SaucedCarts v2.1.17[/h1]
+
+[b]Fixed: on dedicated servers, we were cutting your sandbox settings file in half on every startup.[/b]
+Two server admins reported the same thing on 42.20.1: <server>_SandboxVars.lua shrank on every restart and ended part-way through, missing its closing brace — and our own log line cheerfully said it had succeeded. This one is entirely ours and we're sorry; it hit the file admins use to configure every mod on the server.
+
+The feature at fault exists for a good reason. On a dedicated server the game writes that settings file before mods have registered their translations, so every mod's options land in it bare — no explanatory comment, no "1 = Off, 2 = Rare" value map — leaving you editing blind. Since v2.1.13 we've been loading the translations after startup and asking the game to write the file again, which fills all of that back in for every mod you have installed, not just ours.
+
+What we missed is that the game's writer empties the file before it starts writing, and looks up each option's description as it goes. The latest patch changed how the game reads percent signs in text, and a description containing a stray percent sign now raises an error the game doesn't expect there. The write stops dead at that option, and what has been written so far is all that's left. Because the failure is reported quietly through a return value we weren't checking, we logged success over the wreckage.
+
+We can't repair the file afterwards — the game no longer lets mods write .lua files at all — so the fix is to never start a write we can't finish. Before rewriting anything we now resolve every option's description first, and if any of them fails we leave your file completely untouched and log which option caused it, so you can tell which mod needs fixing. We also skip the rewrite entirely when the game has already written the comments itself, we honour the game's own success flag instead of assuming, and if we can't verify the write is safe on your build, we simply don't do it. A version of this that doesn't heal anything is a much better neighbour than one that shortens your config.
+
+[b]If your file is already truncated:[/b] start the server once with SaucedCarts disabled. The game writes a complete file on its own at boot, and your settings will be restored from it. Then update and re-enable — nothing further is needed.
+
+[b]Also worth knowing:[/b] the underlying trigger is a mod translation with an unescaped percent sign, and it isn't specific to us. If you see similar errors from other mods since 42.20.1, that's the same cause; since that patch a literal percent has to be written twice over in translation files.
+
+[h1]Compatibility[/h1]
+[list]
+[*][b]Save-safe.[/b] No save or database changes, no settings migration. Safe to apply mid-run.
+[/list]

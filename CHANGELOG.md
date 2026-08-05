@@ -2,7 +2,7 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
-## v2.1.16 — unreleased
+## v2.1.17 — unreleased
 
 ### Dedicated servers: we were truncating `<server>_SandboxVars.lua` every boot
 
@@ -12,7 +12,10 @@ last option written with no closing brace — while our log line claimed success
 
 `SandboxFileComments` reloads the translator post-boot and asks PZ's own writer
 to regenerate the file, which restores the tooltip comments mod options
-otherwise never get. Three vanilla facts turn that into a destructive operation:
+otherwise never get. Three vanilla facts turn that into a destructive operation
+(line numbers below are from the 42.20.0 decompile, buildid `24569316`; they
+shift between builds — a reporter's 42.20.1 trace shows the same frames at
+`Translator.java:506/518` and `SandboxOptions.java:1062/1686/1447`):
 
 1. `writeLuaFile` opens `new FileWriter(file)` (`SandboxOptions.java:878`) —
    the existing file is truncated before a single byte is written.
@@ -55,6 +58,8 @@ fix is entirely preventive:
 
 Ten new tests in `OfflineSandboxFileCommentsTests.lua` (18 total in that file),
 eight of which fail against the pre-fix module. Suite 432/432.
+
+## v2.1.16
 
 ### Sandbox options threw a translation error on the latest PZ patch
 
