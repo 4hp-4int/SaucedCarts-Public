@@ -17,6 +17,8 @@ We kept the harmless half — the mod still refreshes translations after startup
 
 [b]Also worth knowing:[/b] the underlying trigger is a mod translation with an unescaped percent sign, and it isn't specific to us. If you're seeing other odd errors since 42.20.1, that's a likely cause — since that patch a literal percent has to be written twice over in translation files.
 
+[b]And some good news:[/b] the build 42.20.2 that just went out fixes that trigger on the game's side — it now catches the error instead of letting it escape, so a mod with a stray percent sign will log a warning rather than break things around it. Updating your server is worth doing regardless of this mod. We're still removing our rewrite, because servers on 42.20.0 and 42.20.1 are still exposed and because the part of the game that empties the file before writing it is unchanged — it just has one fewer way to go wrong.
+
 [h1]Compatibility[/h1]
 [list]
 [*][b]Save-safe.[/b] No save or database changes, no settings migration. Safe to apply mid-run.
