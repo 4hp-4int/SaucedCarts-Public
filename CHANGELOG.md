@@ -4,6 +4,58 @@ All notable changes to SaucedCarts are documented here. Latest version first.
 
 ## v2.1.16 — unreleased
 
+### Dedicated servers: we were truncating `<server>_SandboxVars.lua` every boot
+
+Reported on the Workshop (PZ 42.20.1 dedicated Linux, ~245 mods): the file
+shrank from 86007 to 39873 bytes on every restart, ending mid-file after the
+last option written with no closing brace — while our log line claimed success.
+
+`SandboxFileComments` reloads the translator post-boot and asks PZ's own writer
+to regenerate the file, which restores the tooltip comments mod options
+otherwise never get. Three vanilla facts turn that into a destructive operation:
+
+1. `writeLuaFile` opens `new FileWriter(file)` (`SandboxOptions.java:878`) —
+   the existing file is truncated before a single byte is written.
+2. It calls `getTooltip()` per option (`:907`, `:936`) **unguarded**. The enum
+   value-translation loop directly below each call has its own `try/catch`; the
+   tooltip call does not.
+3. Every `getTooltip()` overload (`:1376`, `:1473`, `:1585`, `:1714`, `:1947`)
+   resolves through `Translator.getTextOrNull` → `.formatted()`. Since the 42.20
+   percent patch, a tooltip carrying a bare `%` raises
+   `UnknownFormatConversionException` — the type
+   `reportMissingArgumentsFromPastAbuse` does *not* catch.
+
+So one badly-escaped tooltip in any installed mod aborts the write mid-file.
+try-with-resources flushes the partial content, and the outer catch (`:967`)
+swallows the exception and returns `false`. We discarded that return and logged
+success over a broken file — which is why the report shows both.
+
+PZ's own boot write is unaffected precisely because mod translations aren't
+loaded yet at that point, which is the gap this feature exists to close. Closing
+it is what arms the bug.
+
+We cannot repair the damage from Lua: 42.20 restricts `getFileWriter` to
+`ini/cfg/txt/log`, and `getFileReader` rejects relative paths and roots at
+`Zomboid/Lua/`, so a `.lua` under `Zomboid/Server/` is neither readable nor
+writable. Backup-restore and read-back verification are both impossible, so the
+fix is entirely preventive:
+
+- **Necessity guard.** Probe whether mod translations already resolve
+  server-side *before* reloading. If they do, PZ's own write already had
+  comments and we skip entirely. This also self-disables the feature if a future
+  build fixes the load ordering, with no version sniffing.
+- **Pre-flight.** Resolve every option's tooltip via `getNumOptions` /
+  `getOptionByIndex` before writing. If any throws, skip the rewrite and log the
+  offending option by name — on a 245-mod server that name is the only practical
+  way to find the culprit.
+- **Fail closed.** If option introspection isn't available, decline to write.
+  Silently not healing beats silently truncating an admin's config.
+- **Honour the return value**, and never log success over a `false`.
+- `OnServerStarted` is now wrapped so this can't disturb other listeners.
+
+Ten new tests in `OfflineSandboxFileCommentsTests.lua` (18 total in that file),
+eight of which fail against the pre-fix module. Suite 432/432.
+
 ### Sandbox options threw a translation error on the latest PZ patch
 
 The patch that added mod `.json` translation support also changed percent
