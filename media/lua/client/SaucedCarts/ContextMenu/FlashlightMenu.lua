@@ -13,9 +13,39 @@ require "SaucedCarts/Upgrades"
 require "SaucedCarts/TimedActions/ISInstallFlashlightAction"
 require "SaucedCarts/TimedActions/ISInsertBatteryAction"
 require "SaucedCarts/TimedActions/ISRemoveBatteryAction"
+require "SaucedCarts/TimedActions/ISRemoveFlashlightAction"
 
 ---@class SaucedCartsFlashlightMenu
 local FlashlightMenu = {}
+
+-- ----------------------------------------------------------------------------
+-- base:flashlight tag resolution
+-- ----------------------------------------------------------------------------
+-- InventoryItem exposes ONLY hasTag(ItemTag) — there is no hasTag(String)
+-- overload, and Kahlua's missing-overload RuntimeException is NOT containable
+-- by pcall (2026-08-07: the recursive flashlight sweep crashed the context
+-- menu on a Base.IDcard exactly this way). Resolve the ItemTag object once,
+-- the way vanilla does (ISMapSymbolDialog.lua:45), and only ever pass THAT
+-- to hasTag. Lazy so we never race script/tag registration at Lua load.
+local flashlightTag, flashlightTagResolved = nil, false
+
+local function getFlashlightTag()
+    if flashlightTagResolved then return flashlightTag end
+    flashlightTagResolved = true
+    if ItemTag and ItemTag.get and ResourceLocation and ResourceLocation.of then
+        local ok, tag = pcall(function()
+            return ItemTag.get(ResourceLocation.of("base:flashlight"))
+        end)
+        if ok and tag then flashlightTag = tag end
+    end
+    return flashlightTag
+end
+
+--- Test seam: the offline kit has no ItemTag/ResourceLocation globals, so
+--- tests inject a sentinel here and key their mock _tags tables off it.
+function FlashlightMenu._setFlashlightTag(tag)
+    flashlightTag, flashlightTagResolved = tag, true
+end
 
 -- ============================================================================
 -- LOCAL HELPERS
@@ -30,6 +60,44 @@ local function getTextOrFallback(key, fallback)
     return (text == key) and fallback or text
 end
 
+--- Vanilla handheld lights, matched by type regardless of tags/category.
+local EXPLICIT_FLASHLIGHT_TYPES = {
+    ["Base.Torch"] = true,
+    ["Base.HandTorch"] = true,
+    ["Base.FlashLight_AngleHead"] = true,
+    ["Base.FlashLight_AngleHead_Army"] = true,
+    ["Base.Flashlight_Crafted"] = true,
+    ["Base.PenLight"] = true,
+}
+
+--- True if the item's light comes from a mounted weapon part rather than from
+--- the item itself.
+---
+--- This is the whole reason the loose heuristics below are fenced off.
+--- HandWeapon delegates every light getter to its attached part:
+---
+---   isTorchCone()    -> activeLight.isTorchCone()    || super   (HandWeapon.java:2600)
+---   getLightDistance()-> activeLight.getLightDistance()          (HandWeapon.java:2610)
+---   canBeActivated() -> activeLight.canBeActivated()             (HandWeapon.java:2615)
+---
+--- Base.GunLight is a WeaponPart with ActivatedItem = true and
+--- LightDistance = 15, so an M1911 with one mounted is indistinguishable from
+--- a flashlight by any light property. A player lost exactly that pistol to
+--- "Install Flashlight" - the install consumes the item outright.
+---@param item InventoryItem
+---@return boolean
+local function isWeaponWithMountedLight(item)
+    if not instanceof(item, "HandWeapon") then return false end
+    if not item.getActiveLight then
+        -- Older build without the accessor: can't distinguish, so don't gamble
+        -- with an item we're about to destroy.
+        return true
+    end
+    local success, part = pcall(function() return item:getActiveLight() end)
+    if not success then return true end
+    return part ~= nil
+end
+
 --- Check if an item is a flashlight that can be installed on a cart
 ---@param item InventoryItem
 ---@return boolean
@@ -41,30 +109,55 @@ local function isInstallableFlashlight(item)
         return false
     end
 
+    -- A gun wearing a light is a gun.
+    if isWeaponWithMountedLight(item) then
+        return false
+    end
+
     local fullType = item:getFullType()
     if not fullType then return false end
 
     -- Check explicit vanilla flashlight types
     -- Base.Torch = big flashlight, Base.HandTorch = small flashlight
-    if fullType == "Base.Torch" or fullType == "Base.HandTorch" then
-        return true
-    end
-    if fullType == "Base.FlashLight_AngleHead" or fullType == "Base.FlashLight_AngleHead_Army" then
-        return true
-    end
-    if fullType == "Base.Flashlight_Crafted" then
+    if EXPLICIT_FLASHLIGHT_TYPES[fullType] then
         return true
     end
 
-    -- Check for torch cone capability (most flashlights have this)
-    if item.isTorchCone then
-        local success, result = pcall(function() return item:isTorchCone() end)
-        if success and result then
+    -- B42 tags handheld lights with base:flashlight (drainable.txt; note
+    -- Torch/HandTorch carry no tag — they're caught by the explicit types
+    -- and LightSource category instead). Best signal for modded lights.
+    -- MUST pass the resolved ItemTag, never a string — see getFlashlightTag.
+    local tag = getFlashlightTag()
+    if tag and item.hasTag then
+        local success, tagged = pcall(function() return item:hasTag(tag) end)
+        if success and tagged then
             return true
         end
     end
 
-    -- Check for light distance (flashlights emit light)
+    -- DisplayCategory = LightSource is what vanilla marks handheld lights with.
+    if item.getDisplayCategory then
+        local success, category = pcall(function() return item:getDisplayCategory() end)
+        if success and category == "LightSource" then
+            return true
+        end
+    end
+
+    -- Fallback for untagged/uncategorised modded lights. Weapons never reach
+    -- this: a HandWeapon with no mounted light is still a weapon, and one with
+    -- a mounted light was rejected up top. Both cone AND distance are required
+    -- so lighters (LightDistance = 5, TorchCone = false) don't qualify.
+    if instanceof(item, "HandWeapon") then
+        return false
+    end
+
+    local hasCone = false
+    if item.isTorchCone then
+        local success, result = pcall(function() return item:isTorchCone() end)
+        hasCone = success and result == true
+    end
+    if not hasCone then return false end
+
     if item.getLightDistance then
         local success, result = pcall(function() return item:getLightDistance() end)
         if success and result and result > 0 then
@@ -201,7 +294,8 @@ local function buildRequirementsTooltip(playerObj, flashlightName)
     end
 
     table.insert(lines, " ")
-    table.insert(lines, "<RGB:1,0.5,0>Warning: Flashlight is permanently consumed!")
+    table.insert(lines, "<RGB:1,0.5,0>" .. getTextOrFallback("UI_SaucedCarts_InstallFlashlightWarning",
+        "The flashlight is consumed. Removing it later returns a stock one."))
 
     return table.concat(lines, " <LINE> ")
 end
@@ -381,6 +475,18 @@ local function onInstallFlashlight(items, player, cart, flashlight, materialInfo
     ISTimedActionQueue.add(action)
 end
 
+--- Handle remove flashlight
+---@param items table Items from context
+---@param player number Player index
+---@param cart InventoryItem The cart
+local function onRemoveFlashlight(items, player, cart)
+    local playerObj = getSpecificPlayer(player)
+    if not playerObj or not cart then return end
+
+    local action = ISRemoveFlashlightAction.FromCart(playerObj, cart)
+    ISTimedActionQueue.add(action)
+end
+
 --- Handle insert battery
 ---@param items table Items from context
 ---@param player number Player index
@@ -445,12 +551,30 @@ function FlashlightMenu.addInstallOnCartOption(context, playerObj, flashlight)
 
     local installText = getTextOrFallback("UI_SaucedCarts_InstallOnCart", "Install on Cart")
 
+    -- onInstallFlashlight bails without materialInfo, so this has to be
+    -- resolved here too - passing it was previously missed and the option
+    -- did nothing at all when clicked.
+    local hasMaterial, materialInfo = hasAttachmentMaterial(playerObj)
+    local flashlightName = flashlight:getDisplayName() or "Flashlight"
+
+    --- Attach the requirements tooltip / availability state to one option
+    local function configureOption(option)
+        local tooltip = ISWorldObjectContextMenu.addToolTip()
+        tooltip:setVisible(false)
+        tooltip.description = buildRequirementsTooltip(playerObj, flashlightName)
+        option.toolTip = tooltip
+        if not hasMaterial then
+            option.notAvailable = true
+        end
+    end
+
     if #carts == 1 then
         -- Single cart: add directly
         local cart = carts[1]
         local optionText = installText .. " (" .. cart.name .. ")"
-        local option = context:addOption(optionText, {}, onInstallFlashlight, playerObj:getPlayerNum(), cart.item, flashlight)
+        local option = context:addOption(optionText, {}, onInstallFlashlight, playerObj:getPlayerNum(), cart.item, flashlight, materialInfo)
         option.iconTexture = cart.item:getTexture()
+        configureOption(option)
     else
         -- Multiple carts: submenu
         local parentOption = context:addOption(installText)
@@ -459,8 +583,9 @@ function FlashlightMenu.addInstallOnCartOption(context, playerObj, flashlight)
 
         for _, cart in ipairs(carts) do
             local locationText = cart.isEquipped and " (equipped)" or " (ground)"
-            local option = submenu:addOption(cart.name .. locationText, {}, onInstallFlashlight, playerObj:getPlayerNum(), cart.item, flashlight)
+            local option = submenu:addOption(cart.name .. locationText, {}, onInstallFlashlight, playerObj:getPlayerNum(), cart.item, flashlight, materialInfo)
             option.iconTexture = cart.item:getTexture()
+            configureOption(option)
         end
     end
 end
@@ -534,6 +659,27 @@ function FlashlightMenu.buildFlashlightSubmenu(submenu, playerObj, cart, isWorld
                 flashlightSubmenu:addOption(removeText, {}, onRemoveBattery, playerObj:getPlayerNum(), cart)
             end
 
+            -- Remove Flashlight (undoes the install, hands the light back)
+            local flashlightData = SaucedCarts.Upgrades.getFlashlightData(cart)
+            local removeText = getTextOrFallback("UI_SaucedCarts_RemoveFlashlight", "Remove Flashlight")
+            local removeOption = flashlightSubmenu:addOption(removeText, {}, onRemoveFlashlight, playerObj:getPlayerNum(), cart)
+            removeOption.iconTexture = getTexture("Item_Torch")
+
+            local removeTooltip = ISWorldObjectContextMenu.addToolTip()
+            removeTooltip:setVisible(false)
+            local removeLines = {}
+            table.insert(removeLines, "<RGB:1,1,0>" .. getTextOrFallback("UI_SaucedCarts_RemoveFlashlightReturns", "Returns:"))
+            table.insert(removeLines, "<RGB:0.2,0.9,0.2> - 1x " ..
+                ((flashlightData and flashlightData.originalName) or "Flashlight"))
+            if hasBattery then
+                table.insert(removeLines, "<RGB:0.2,0.9,0.2> - 1x Battery (" .. math.floor(charge * 100) .. "%)")
+            end
+            table.insert(removeLines, " ")
+            table.insert(removeLines, "<RGB:0.7,0.7,0.7>" .. getTextOrFallback("UI_SaucedCarts_RemoveFlashlightNote",
+                "Comes back stock. Attachments, ammo and condition are not restored, and the tape is not recovered."))
+            removeTooltip.description = table.concat(removeLines, " <LINE> ")
+            removeOption.toolTip = removeTooltip
+
             -- Battery status (info only)
             local batteryPercent = math.floor(charge * 100)
             local statusText = getTextOrFallback("UI_SaucedCarts_BatteryStatus", "Battery") .. ": " .. batteryPercent .. "%"
@@ -550,28 +696,59 @@ function FlashlightMenu.buildFlashlightSubmenu(submenu, playerObj, cart, isWorld
             end
             statusOption.toolTip = statusTooltip
         else
-            -- No flashlight installed - show install option
-            local flashlight = flashlights[1]
-            local flashlightName = flashlight:getDisplayName() or "Flashlight"
+            -- No flashlight installed - show install option(s).
+            --
+            -- NEVER auto-pick from `flashlights`. The chosen item is destroyed,
+            -- and this used to take flashlights[1] straight off a recursive
+            -- inventory sweep - whichever candidate the walk happened to reach
+            -- first. Anything with more than one candidate goes to a submenu so
+            -- the player names the item they're giving up.
             local installText = getTextOrFallback("UI_SaucedCarts_InstallFlashlight", "Install Flashlight")
-            installText = installText .. " (" .. flashlightName .. ")"
 
             -- Check attachment material requirements
             local hasMaterial, materialInfo = hasAttachmentMaterial(playerObj)
 
-            local installOption = flashlightSubmenu:addOption(installText, {}, onInstallFlashlight, playerObj:getPlayerNum(), cart, flashlight, materialInfo)
-            installOption.iconTexture = getTexture("Item_Torch")
+            -- Stable ordering so the list doesn't reshuffle between openings
+            table.sort(flashlights, function(a, b)
+                local an, bn = a:getDisplayName() or "", b:getDisplayName() or ""
+                if an == bn then return a:getID() < b:getID() end
+                return an < bn
+            end)
 
-            -- Build detailed tooltip showing all requirements with status
-            local tooltip = ISWorldObjectContextMenu.addToolTip()
-            tooltip:setVisible(false)
-            tooltip.description = buildRequirementsTooltip(playerObj, flashlightName)
+            --- Attach the install handler + requirements tooltip to one option
+            local function configureInstallOption(option, flashlight, flashlightName)
+                option.iconTexture = flashlight:getTexture() or getTexture("Item_Torch")
 
-            if not hasMaterial then
-                installOption.notAvailable = true
+                local tooltip = ISWorldObjectContextMenu.addToolTip()
+                tooltip:setVisible(false)
+                tooltip.description = buildRequirementsTooltip(playerObj, flashlightName)
+                option.toolTip = tooltip
+
+                if not hasMaterial then
+                    option.notAvailable = true
+                end
             end
 
-            installOption.toolTip = tooltip
+            if #flashlights == 1 then
+                local flashlight = flashlights[1]
+                local flashlightName = flashlight:getDisplayName() or "Flashlight"
+                local option = flashlightSubmenu:addOption(
+                    installText .. " (" .. flashlightName .. ")",
+                    {}, onInstallFlashlight, playerObj:getPlayerNum(), cart, flashlight, materialInfo)
+                configureInstallOption(option, flashlight, flashlightName)
+            else
+                local parentOption = flashlightSubmenu:addOption(installText)
+                parentOption.iconTexture = getTexture("Item_Torch")
+                local pickSubmenu = ISContextMenu:getNew(flashlightSubmenu)
+                flashlightSubmenu:addSubMenu(parentOption, pickSubmenu)
+
+                for _, flashlight in ipairs(flashlights) do
+                    local flashlightName = flashlight:getDisplayName() or "Flashlight"
+                    local option = pickSubmenu:addOption(flashlightName, {}, onInstallFlashlight,
+                        playerObj:getPlayerNum(), cart, flashlight, materialInfo)
+                    configureInstallOption(option, flashlight, flashlightName)
+                end
+            end
         end
     elseif canHaveFlashlight then
         -- Can have flashlight but no flashlight available - show greyed option

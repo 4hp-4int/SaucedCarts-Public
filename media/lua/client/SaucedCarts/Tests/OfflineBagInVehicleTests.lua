@@ -638,9 +638,18 @@ tests["sync_repair_also_dirties_the_initiators_inventory_ui"] = function()
     local cart = makeCartItem({ id = 47 })
     s.player:getInventory():AddItem(cart)
 
+    -- Mirror handleCartTransfer's real tail: move, flush the coalesced
+    -- repair, THEN refresh. The DirtyUI send used to live inside
+    -- flushContainerResync; it now belongs to the caller, so that an
+    -- ordinary transfer (nothing pending to flush) still gets a refresh —
+    -- see OfflineProximityRefreshTests. Ordering still matters: the nudge
+    -- must land after the replace packet that rebinds the bag.
     local spy = withSyncSpy(function()
-        return SaucedCarts.performCartTransfer(s.player, nails,
+        local r = SaucedCarts.performCartTransfer(s.player, nails,
             bag:getItemContainer(), cart:getItemContainer())
+        SaucedCarts.flushContainerResync()
+        SaucedCarts.requestInventoryRefresh(s.player)
+        return r
     end)
 
     Assert.equal(#spy:callsFor("replace"), 1, "a refresh was sent")
@@ -652,7 +661,11 @@ tests["sync_repair_also_dirties_the_initiators_inventory_ui"] = function()
         "targeted at the initiator, not broadcast")
 end
 
---- ...and an addressable transfer must not spam DirtyUI at all.
+--- ...and an addressable transfer must not produce a nudge from the REPAIR
+--- path — nothing rebound, so nothing needs re-resolving. (The one refresh
+--- per transfer command that handleCartTransfer now sends unconditionally is
+--- a separate, caller-owned concern; see OfflineProximityRefreshTests. This
+--- body deliberately does not call requestInventoryRefresh.)
 tests["sync_addressable_transfer_sends_no_ui_nudge"] = function()
     local player = makeCharacter({ square = makeSquare({}) })
     local cart = makeCartItem({ id = 46 })

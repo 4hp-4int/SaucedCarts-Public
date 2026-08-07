@@ -324,10 +324,11 @@ if isClient() then
             SaucedCarts.Upgrades.disableCartLight(cart)
         end
 
-        -- Update visual
-        if SaucedCarts.updateCartVisual then
-            SaucedCarts.updateCartVisual(cart, targetPlayer)
-        end
+        -- No model repaint here: toggling the light changes neither fillState
+        -- nor upgradeKey, so an updateCartVisual call is a provable no-op —
+        -- light rendering rides the enable/disableCartLight item fields above.
+        -- If a light-on model variant is ever added, getUpgradeKey must learn
+        -- isLightActive and this handler must repaint with force=true.
 
         SaucedCarts.debug(function() return "UpgradeSync: applied light update - active=" .. tostring(args.isActive) end)
     end)
@@ -514,13 +515,25 @@ if isClient() then
         if cart then
             local modData = cart:getModData()
 
-            -- Force visual update by clearing previous upgrade key
-            -- This ensures updateCartVisual detects a change
-            modData.SaucedCarts_upgradeKey = nil
+            -- Uninstall: apply the teardown locally rather than waiting on
+            -- syncItemModData, which never lands for ground carts (their
+            -- container isn't replicated). Without this the client keeps
+            -- rendering the flashlight model and offering its menu.
+            if args.upgradeType == "flashlightRemoved" then
+                SaucedCarts.Upgrades.disableCartLight(cart)
+                modData.SaucedCarts_hasFlashlight = nil
+                modData.SaucedCarts_flashlightData = nil
+                modData.SaucedCarts_batteryCharge = nil
+                modData.SaucedCarts_isLightActive = nil
+            end
 
-            -- Update visual (includes resetEquippedHandsModels if equipped)
+            -- Broadcast handlers always repaint: this client's ModData may
+            -- have synced without any model ever being applied locally, so
+            -- the differ's memo cannot be trusted here. force=true instead
+            -- of mutating SaucedCarts_upgradeKey (the old clear made
+            -- removal read as nil==nil "no change" — stale mesh).
             if SaucedCarts.updateCartVisual then
-                SaucedCarts.updateCartVisual(cart, targetPlayer)
+                SaucedCarts.updateCartVisual(cart, targetPlayer, true)
             end
 
             SaucedCarts.debug(function() return "UpgradeSync: upgradeInstalled visual refresh for " ..
@@ -631,9 +644,13 @@ if isClient() then
                             end
                         end
 
-                        -- Update visual
+                        -- Late-joiner repaint MUST force: this cart's ModData
+                        -- (including the differ's SaucedCarts_upgradeKey memo)
+                        -- replicated from the server, where the model WAS
+                        -- painted — so the memo can read "already applied"
+                        -- on a client that has never painted at all.
                         if SaucedCarts.updateCartVisual then
-                            SaucedCarts.updateCartVisual(cart, targetPlayer)
+                            SaucedCarts.updateCartVisual(cart, targetPlayer, true)
                         end
 
                         applied = applied + 1

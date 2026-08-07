@@ -10,6 +10,7 @@
 --   SaucedCartsDebug.toggleFlashlight()
 --   SaucedCartsDebug.setBatteryCharge(0.5)
 --   SaucedCartsDebug.installFlashlight()
+--   SaucedCartsDebug.removeFlashlight()
 -- ============================================================================
 
 if isServer() then return {} end
@@ -156,6 +157,53 @@ function FlashlightCommands.installFlashlight()
     modData.SaucedCarts_isLightActive = false
 
     print("[SaucedCarts] Flashlight installed (debug, full battery)")
+end
+
+--- Instantly uninstall the flashlight from the held cart (bypasses timed
+--- action). Recovery hatch: hands back the item the install consumed, which is
+--- how an admin unwinds a mis-click on a live server.
+function FlashlightCommands.removeFlashlight()
+    local player = getSpecificPlayer(0)
+    if not player then
+        print("[SaucedCarts] No player found")
+        return
+    end
+
+    local cart = SaucedCarts.getHeldCart(player)
+    if not cart then
+        print("[SaucedCarts] No cart equipped")
+        return
+    end
+
+    if not SaucedCarts.Upgrades.hasFlashlight(cart) then
+        print("[SaucedCarts] Cart has no flashlight installed")
+        return
+    end
+
+    local data, charge = SaucedCarts.Upgrades.removeFlashlight(cart)
+    local returnedType = (data and data.originalType) or "Base.Torch"
+
+    local returned = instanceItem(returnedType)
+    if returned then
+        player:getInventory():AddItem(returned)
+        print("[SaucedCarts] Flashlight removed, returned " .. returnedType)
+    else
+        print("[SaucedCarts] Flashlight removed, but could not instance " .. returnedType)
+    end
+
+    if charge and charge > 0 then
+        local battery = instanceItem("Base.Battery")
+        if battery then
+            battery:setCurrentUsesFloat(charge)
+            player:getInventory():AddItem(battery)
+            print("[SaucedCarts] Returned battery at " .. string.format("%.0f", charge * 100) .. "%")
+        end
+    end
+
+    -- force: removal is a known repaint — same policy as ISRemoveFlashlightAction.
+    if SaucedCarts.updateCartVisual then
+        SaucedCarts.updateCartVisual(cart, player, true)
+    end
 end
 
 --- Simulate battery drain for testing

@@ -243,9 +243,15 @@ function ISInstallFlashlightAction:perform()
     local materialName = ATTACHMENT_MATERIALS[self.materialType] and ATTACHMENT_MATERIALS[self.materialType].name or self.materialType
     SaucedCarts.debug("ISInstallFlashlightAction: consumed flashlight + " .. self.materialUses .. " uses of " .. materialName)
 
-    -- Update cart visual model (server-side)
+    -- Update cart visual model. Same field-visible logging as the remove
+    -- action so install/remove repaint timing is comparable in normal logs.
     if SaucedCarts.updateCartVisual then
-        SaucedCarts.updateCartVisual(cart, self.character)
+        local repainted = SaucedCarts.updateCartVisual(cart, self.character)
+        SaucedCarts.log(string.format(
+            "InstallFlashlight: repaint=%s model=%s ground=%s equipped=%s",
+            tostring(repainted), tostring(cart:getStaticModel()),
+            tostring(cart:getWorldItem() ~= nil),
+            tostring(self.character and self.character:getPrimaryHandItem() == cart)))
     end
 
     -- Fire event (for local listeners)

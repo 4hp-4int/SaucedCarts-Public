@@ -33,7 +33,7 @@
 SaucedCarts = SaucedCarts or {}
 
 -- Version info
-SaucedCarts.VERSION = "2.1.17"
+SaucedCarts.VERSION = "2.1.18"
 SaucedCarts.MOD_ID = "SaucedCarts"
 SaucedCarts.API_VERSION = 1  -- Increment on breaking API changes (field renames, removed fields, signature changes)
 
@@ -237,6 +237,7 @@ SaucedCarts.Events = {
 
     -- Upgrade events (fire on both client and server)
     onFlashlightInstalled = createEvent("onFlashlightInstalled"), -- (player, cart, flashlightType)
+    onFlashlightRemoved = createEvent("onFlashlightRemoved"),     -- (player, cart, flashlightType)
     onFlashlightToggled = createEvent("onFlashlightToggled"),     -- (player, cart, isActive)
     onBatteryInserted = createEvent("onBatteryInserted"),         -- (player, cart, chargeAmount)
     onBatteryRemoved = createEvent("onBatteryRemoved"),           -- (player, cart, chargeAmount)

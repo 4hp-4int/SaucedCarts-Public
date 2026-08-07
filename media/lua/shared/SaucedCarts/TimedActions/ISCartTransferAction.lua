@@ -207,15 +207,17 @@ function ISCartTransferAction:isValid()
 end
 
 -- ============================================================================
--- VANILLA-API SHIMS
+-- VANILLA & THIRD-PARTY API SHIMS
 -- ============================================================================
--- Methods vanilla code calls externally on action instances. Our
--- interceptor substitutes ISCartTransferAction for vanilla's class; if
--- we don't expose these, downstream calls (e.g. ISCraftingUI.Return-
+-- Methods external code calls on action instances. Our interceptor
+-- substitutes ISCartTransferAction for vanilla's class; if we don't
+-- expose these, downstream calls (e.g. ISCraftingUI.Return-
 -- ItemToContainer's `action:setAllowMissingItems(true)`) crash with
--- "Object tried to call nil". OfflineApiContractTests.lua enforces
--- presence so future vanilla additions get caught before players hit
--- the crash.
+-- "Object tried to call nil". The same applies to THIRD-PARTY mods that
+-- patch methods onto ISInventoryTransferAction at boot and then call
+-- them on whatever :new returned (Inventory Tetris). OfflineApiContract-
+-- Tests.lua enforces presence for both groups; CartTransferInterceptor's
+-- boot-time surface audit logs any foreign method we haven't shimmed.
 -- ============================================================================
 
 --- Mirror of ISInventoryTransferAction:setAllowMissingItems (vanilla
@@ -232,6 +234,28 @@ end
 function ISCartTransferAction:setOnComplete(func, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
     self.onCompleteFunc = func
     self.onCompleteArgs = { arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8 }
+end
+
+--- Mirror of Inventory Tetris's ISInventoryTransferAction:setTetrisTarget
+--- (Patches/TimedActions/InventoryTetris_InventoryTransferAction.lua:62,
+--- installed at OnGameBoot). Tetris calls it on the instance immediately
+--- after construction at six sites (ItemGridUI_events.lua:266/:414/:461,
+--- ItemGridStackSplitWindow.lua:110, AmmoOnMagazineHandler.lua:69,
+--- AttachmentOnWeaponHandler.lua:38) — without this shim, dragging into
+--- an open cart panel crashes "Object tried to call nil". The fields are
+--- inert for our pipeline: we ignore grid targets and let Tetris auto-
+--- place the item via its container-grid reconciliation
+--- (ItemContainerGrid:_updateGridPositions). Deliberately NOT mirrored
+--- in canMergeAction (Tetris refuses to merge differing grid targets;
+--- we ignore targets entirely, so matching the rule would only slow
+--- stack transfers for zero behavioral gain).
+function ISCartTransferAction:setTetrisTarget(x, y, i, r, secondaryTarget)
+    self.gridX = x
+    self.gridY = y
+    self.gridIndex = i
+    self.isRotated = r
+    self.tetrisSecondary = secondaryTarget
+    self.enforceTetrisRules = true
 end
 
 function ISCartTransferAction:waitToStart()
@@ -439,6 +463,17 @@ function ISCartTransferAction:perform()
                 -- dedi running its own copy of this action.
                 if SaucedCarts.flushContainerResync then
                     SaucedCarts.flushContainerResync()
+                end
+                -- SP only. Rebuild aggregated inventory panels (Better
+                -- Containers' proximity view, Proximity Inventory, vanilla's
+                -- floor container) that hold item REFERENCES copied from the
+                -- real containers and so are never dirtied by our move. See
+                -- SaucedCarts.requestInventoryRefresh. On a dedi this same
+                -- branch runs as the double-perform, but handleCartTransfer
+                -- has already told the initiator — refreshing here too would
+                -- just be a second broadcast.
+                if not isServer() and SaucedCarts.requestInventoryRefresh then
+                    SaucedCarts.requestInventoryRefresh(self.character)
                 end
             end
         end

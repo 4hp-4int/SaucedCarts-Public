@@ -436,4 +436,139 @@ tests["deposit_updates_recorded_fill_state_end_to_end"] = function()
     return Assert.equal(cart:getStaticModel() ~= nil, true, "a model was applied")
 end
 
+-- ============================================================================
+-- UPGRADE REPAINT REGRESSIONS (the flashlight-removal stale mesh, 2026-08-07)
+-- ============================================================================
+-- Root cause being locked: removeFlashlight cleared the differ's
+-- SaucedCarts_upgradeKey memo to "force a change", which made prev==current
+-- (nil==nil) so updateCartVisual returned false and the flashlight mesh
+-- stayed on the cart. The fix: callers that KNOW a repaint is due pass
+-- force=true, and nothing outside CartVisuals touches the memo.
+
+require "SaucedCarts/Upgrades"
+
+local function giveMockLightApi(cart)
+    cart.setActivated      = function(self, v) self._activated = v end
+    cart.setLightStrength  = function(self, v) self._lightStrength = v end
+    cart.setLightDistance  = function(self, v) self._lightDistance = v end
+    cart.setTorchCone      = function(self, v) self._torchCone = v end
+    cart.setCanBeActivated = function(self, v) self._canBeActivated = v end
+end
+
+tests["force_repaints_even_when_memo_matches"] = function()
+    local cart = makeCartItem({})
+    -- Converge the memo: first call applies and records state.
+    SaucedCarts.updateCartVisual(cart, nil)
+    cart._staticModel = "WRONG_MODEL_ON_SCREEN"  -- what the memo can't see
+    if not Assert.isFalse(SaucedCarts.updateCartVisual(cart, nil),
+        "memo-matched update is a no-op without force") then return false end
+    if not Assert.equal(cart._staticModel, "WRONG_MODEL_ON_SCREEN",
+        "no-op must not have repainted") then return false end
+    if not Assert.isTrue(SaucedCarts.updateCartVisual(cart, nil, true),
+        "force applies even when memo matches") then return false end
+    return Assert.notEqual(cart._staticModel, "WRONG_MODEL_ON_SCREEN",
+        "forced update repainted the model")
+end
+
+tests["flashlight_removal_repaints_base_model"] = function()
+    local cart = makeCartItem({})
+    giveMockLightApi(cart)
+
+    -- Baseline model, memo converged. force: a fresh cart's memo already
+    -- reads empty/nil, so an unforced first paint is a no-op by design.
+    SaucedCarts.updateCartVisual(cart, nil, true)
+    local baseModel = cart._staticModel
+    if not Assert.notNil(baseModel, "baseline paint applied a model") then
+        return false
+    end
+
+    -- Install-shaped state, then repaint (memo now upgrade-aware).
+    local modData = cart:getModData()
+    modData.SaucedCarts_hasFlashlight = true
+    modData.SaucedCarts_flashlightData = {
+        lightStrength = 1.8, lightDistance = 15,
+        originalType = "Base.Torch", originalName = "Flashlight",
+    }
+    SaucedCarts.updateCartVisual(cart, nil, true)
+
+    -- The removal sequence as ISRemoveFlashlightAction runs it.
+    local returned = SaucedCarts.Upgrades.removeFlashlight(cart)
+    if not Assert.notNil(returned, "removal returns the flashlight data") then
+        return false
+    end
+    if not Assert.isTrue(
+        SaucedCarts.updateCartVisual(cart, nil, true),
+        "post-removal forced update reports a repaint") then return false end
+
+    if not Assert.equal(cart._staticModel, baseModel,
+        "cart is back on the non-flashlight model") then return false end
+    return Assert.equal(cart._worldStaticModel, baseModel,
+        "world model reverted too (correct when dropped)")
+end
+
+tests["late_joiner_fullUpgradeSync_repaints_despite_synced_memo"] = function()
+    -- The late-joiner hazard: a joining client receives cart ModData that
+    -- replicated from the server — INCLUDING the differ's upgradeKey memo,
+    -- stamped when the SERVER painted. This client has painted nothing, so
+    -- an unforced repaint reads prev==current and leaves the base mesh on a
+    -- flashlight cart. The fullUpgradeSync handler must force.
+    require "SaucedCarts/UpgradeSync"
+    local handler = SaucedCarts.Network
+        and SaucedCarts.Network._getClientHandler
+        and SaucedCarts.Network._getClientHandler("fullUpgradeSync")
+    if not Assert.notNil(handler, "fullUpgradeSync handler registered") then
+        return false
+    end
+
+    local cart = makeCartItem({ id = 77 })
+    giveMockLightApi(cart)
+    -- State exactly as replication leaves it: flashlight ModData present,
+    -- memo says "flashlight" (server's paint), fill memo matches current —
+    -- but THIS client's screen still shows the base mesh.
+    local modData = cart:getModData()
+    modData.SaucedCarts_hasFlashlight = true
+    modData.SaucedCarts_flashlightData = { originalType = "Base.Torch" }
+    modData.SaucedCarts_upgradeKey = "flashlight"
+    modData.SaucedCarts_fillState = "empty"
+    cart._staticModel = "BASE_MESH_STALE_ON_SCREEN"
+
+    local remote = makeCharacter()
+    remote.getOnlineID = function(self) return 7 end
+    remote.getPrimaryHandItem = function(self) return cart end
+    remote.resetEquippedHandsModels = function(self) self._handsReset = true end
+
+    local origGetSpecific, origGetByOnline = _G.getSpecificPlayer, _G.getPlayerByOnlineID
+    _G.getSpecificPlayer = function(n) return nil end  -- local player irrelevant
+    _G.getPlayerByOnlineID = function(id) return id == 7 and remote or nil end
+
+    local ok, err = pcall(handler, { states = { {
+        playerOnlineId = 7, cartId = 77,
+        hasFlashlight = true, isLightActive = false,
+        batteryCharge = 0.5,
+        flashlightData = { originalType = "Base.Torch" },
+    } } })
+
+    _G.getSpecificPlayer, _G.getPlayerByOnlineID = origGetSpecific, origGetByOnline
+    if not ok then error(err) end
+
+    return Assert.notEqual(cart._staticModel, "BASE_MESH_STALE_ON_SCREEN",
+        "late joiner repainted despite the synced memo matching")
+end
+
+tests["removeFlashlight_does_not_touch_the_differ_memo"] = function()
+    -- The memo belongs to updateCartVisual. If removal (or any upgrade code)
+    -- writes it again, the nil==nil class of bug comes straight back.
+    local cart = makeCartItem({})
+    giveMockLightApi(cart)
+    local modData = cart:getModData()
+    modData.SaucedCarts_hasFlashlight = true
+    modData.SaucedCarts_flashlightData = { originalType = "Base.Torch" }
+    modData.SaucedCarts_upgradeKey = "flashlight"  -- memo as set by a prior repaint
+
+    SaucedCarts.Upgrades.removeFlashlight(cart)
+
+    return Assert.equal(modData.SaucedCarts_upgradeKey, "flashlight",
+        "removeFlashlight must leave SaucedCarts_upgradeKey to CartVisuals")
+end
+
 return tests

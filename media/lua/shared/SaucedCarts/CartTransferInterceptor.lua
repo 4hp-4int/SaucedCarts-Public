@@ -217,7 +217,6 @@ end
 function SaucedCarts.flushContainerResync()
     if pendingResyncCount == 0 then return end
     local batch = pendingResync
-    local player = pendingResyncPlayer
     pendingResync, pendingResyncCount, pendingResyncPlayer = {}, 0, nil
     if type(sendReplaceItemInContainer) ~= "function" then return end
     for _, entry in pairs(batch) do
@@ -226,25 +225,52 @@ function SaucedCarts.flushContainerResync()
         end)
     end
 
-    -- Repaint the initiator's inventory panels.
-    --
     -- The replace above is correct but REBINDS: the client's handler does
     -- removeItemWithID + addItem, so the bag becomes a NEW object. An open
     -- loot panel still points at the old bag's ItemContainer, which is now
     -- detached — right data, dead panel, and the item only appears after
-    -- clicking away and back.
-    --
-    -- Commands.ui.DirtyUI (client ServerCommands.lua:138-140) runs
-    -- ISInventoryPage.dirtyUI() -> refreshBackpacks() on the player and loot
-    -- panels, which RE-RESOLVES the container list and picks up the new bag.
-    -- It is stock vanilla client code, so this works against unmodified and
-    -- not-yet-updated clients too.
-    --
-    -- Targeted at the initiator via the 4-arg form: they are the one with a
-    -- panel open on the affected container, and refreshBackpacks for every
-    -- player on every cart transfer would be a needless broadcast.
-    if player and type(sendServerCommand) == "function" then
-        pcall(function() sendServerCommand(player, "ui", "DirtyUI", {}) end)
+    -- clicking away and back. Callers follow this with
+    -- requestInventoryRefresh to repaint; keeping the refresh at the call
+    -- site (rather than here) means a transfer that needed no repair still
+    -- gets one, and a transfer that DID need one doesn't get two.
+end
+
+--- Rebuild the initiator's inventory panels from current container truth.
+---
+--- WHY EVERY CART TRANSFER NEEDS THIS, not just the rebinding repair above.
+--- A panel only re-reads its container when that container is drawDirty
+--- (ISInventoryPane.lua:2201), and performCartTransfer dirties the REAL src
+--- and dest. That is enough for vanilla panels, because the container the
+--- user is looking at IS the one we moved out of.
+---
+--- It is NOT enough for an aggregated panel. Better Containers' proximity
+--- view (and Proximity Inventory before it) is backed by a synthetic
+--- ItemContainer.new("proximityInv", nil, nil) holding REFERENCES to items
+--- owned by the real nearby containers, refilled by clear() + addAll() only
+--- inside refreshBackpacks. Vanilla always hands a transfer
+--- item:getContainer() — the real shelf — so nothing ever dirties the
+--- snapshot the user is actually viewing, and the moved item stays listed
+--- until something forces a rebuild. Vanilla's own floor container is the
+--- same shape.
+---
+--- Commands.ui.DirtyUI (client ServerCommands.lua:138-140) runs
+--- ISInventoryPage.dirtyUI() -> refreshBackpacks(), which is exactly that
+--- rebuild. Stock vanilla client code, so it works against unmodified and
+--- not-yet-updated clients. Targeted at the initiator via the 4-arg form:
+--- they are the one with the panel open, and refreshing every player on
+--- every cart transfer would be a needless broadcast.
+---@param player IsoPlayer|nil  the initiator; required server-side
+function SaucedCarts.requestInventoryRefresh(player)
+    if isServer() then
+        if player and type(sendServerCommand) == "function" then
+            pcall(function() sendServerCommand(player, "ui", "DirtyUI", {}) end)
+        end
+        return
+    end
+    -- SP: the move already happened synchronously in perform, so refreshing
+    -- now reads post-move truth.
+    if ISInventoryPage and ISInventoryPage.dirtyUI then
+        pcall(function() ISInventoryPage.dirtyUI() end)
     end
 end
 
@@ -1479,6 +1505,12 @@ local function handleCartTransfer(player, args)
     -- One anchored resync per affected container for the WHOLE command,
     -- after the batch loop — not one per item.
     SaucedCarts.flushContainerResync()
+
+    -- Then one panel rebuild for the whole command, ordered AFTER the
+    -- add/remove broadcasts so the client refreshes against post-move truth.
+    -- This is the MP half of the aggregated-panel fix; the SP half runs
+    -- locally at the end of ISCartTransferAction:perform.
+    SaucedCarts.requestInventoryRefresh(player)
 end
 
 if SaucedCarts.Network and SaucedCarts.Network.registerServerHandler then
@@ -1493,6 +1525,51 @@ end
 -- ============================================================================
 
 local interceptionInstalled = false
+
+-- ----------------------------------------------------------------------------
+-- Third-party API early warning — runtime twin of OfflineApiContractTests.
+-- Mods like Inventory Tetris patch methods onto ISInventoryTransferAction at
+-- OnGameBoot and then call them on whatever :new returns — including our
+-- substituted ISCartTransferAction. The offline kit can never see those
+-- methods (no Workshop mods loaded), so: snapshot vanilla's method set at
+-- file load (before third-party boot patches), diff after boot, and log any
+-- boot-time addition our class doesn't expose. Turns the next foreign-method
+-- crash ("Object tried to call nil") into a greppable log line instead of a
+-- player report. Baseline-diff keeps this noise-free: methods vanilla itself
+-- defines are the offline contract test's jurisdiction, not this audit's.
+-- ----------------------------------------------------------------------------
+local actionMethodBaseline = nil
+
+local function snapshotActionMethodBaseline()
+    if not ISInventoryTransferAction then return end
+    actionMethodBaseline = {}
+    for k, v in pairs(ISInventoryTransferAction) do
+        if type(v) == "function" then actionMethodBaseline[k] = true end
+    end
+end
+
+local function auditForeignActionMethods()
+    if not actionMethodBaseline then return end
+    if not (ISInventoryTransferAction and ISCartTransferAction) then return end
+    local missing = {}
+    for k, v in pairs(ISInventoryTransferAction) do
+        if type(v) == "function"
+           and not actionMethodBaseline[k]
+           and type(ISCartTransferAction[k]) ~= "function" then
+            table.insert(missing, k)
+        end
+    end
+    if #missing > 0 then
+        table.sort(missing)
+        SaucedCarts.log(
+            "CartTransferInterceptor: another mod added method(s) to "
+            .. "ISInventoryTransferAction that ISCartTransferAction does not "
+            .. "expose: " .. table.concat(missing, ", ")
+            .. " -- that mod may call these on our substituted action and "
+            .. "crash. Add a shim (see VANILLA & THIRD-PARTY API SHIMS in "
+            .. "ISCartTransferAction.lua).")
+    end
+end
 
 local function installInterception()
     if interceptionInstalled then return end
@@ -1521,6 +1598,7 @@ local function installInterception()
 end
 
 if ISInventoryTransferAction and ISInventoryTransferAction.new then
+    snapshotActionMethodBaseline()
     local ok, err = pcall(installInterception)
     if not ok then
         SaucedCarts.error("CartTransferInterceptor: load-time install FAILED: " .. tostring(err))
@@ -1529,9 +1607,11 @@ end
 
 if Events.OnServerStarted and Events.OnServerStarted.Add then
     Events.OnServerStarted.Add(installInterception)
+    Events.OnServerStarted.Add(auditForeignActionMethods)
 end
 if Events.OnGameStart and Events.OnGameStart.Add then
     Events.OnGameStart.Add(installInterception)
+    Events.OnGameStart.Add(auditForeignActionMethods)
 end
 
 -- ============================================================================

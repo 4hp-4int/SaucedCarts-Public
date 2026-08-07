@@ -28,6 +28,16 @@
          future refactor that tries `ISInventoryTransferAction:derive`
          and silently inherits vanilla's transaction-driven flow.
       5. Behavioral checks for setOnComplete + setAllowMissingItems.
+      6. Third-party-external-API methods present + behavioral check.
+         Mods like Inventory Tetris patch methods onto vanilla's class at
+         boot and call them on whatever :new returns — including our
+         substituted action. A 2026-08-04 report: dragging an item into
+         an open cart panel with Tetris installed crashed at
+         ItemGridUI_events.lua:414 calling setTetrisTarget on our action.
+         The kit never loads Workshop mods, so these entries are pinned
+         by hand from the third-party source (file:line in each entry);
+         the runtime twin is CartTransferInterceptor's boot-time surface
+         audit, which logs any foreign method we haven't shimmed.
 
     DESIGN NOTE — why we DON'T derive from ISInventoryTransferAction:
     Two reasons. (1) Boot order: our action file loads during preload
@@ -141,6 +151,26 @@ local CRITICAL_EXTERNAL_API = {
 }
 
 -- ============================================================================
+-- Methods THIRD-PARTY mods call on action instances from outside. Same
+-- contract as CRITICAL_EXTERNAL_API, but the caller is a Workshop mod, so
+-- the offline env can never discover these by introspection — each entry is
+-- pinned by hand against the third-party source, with file:line receipts.
+-- ============================================================================
+local THIRD_PARTY_EXTERNAL_API = {
+    setTetrisTarget = {
+        whyExposed = "Inventory Tetris (Workshop 3397561666) adds this to "
+            .. "ISInventoryTransferAction at OnGameBoot (Patches/TimedActions/"
+            .. "InventoryTetris_InventoryTransferAction.lua:62) and calls it "
+            .. "on the instance immediately after :new at six sites: "
+            .. "ItemGridUI_events.lua:266/:414/:461, "
+            .. "ItemGridStackSplitWindow.lua:110, AmmoOnMagazineHandler.lua:69, "
+            .. "AttachmentOnWeaponHandler.lua:38. 2026-08-04 player report: "
+            .. "drag into open cart panel crashed 'Object tried to call nil "
+            .. "in handleDragAndDropTransfer'.",
+    },
+}
+
+-- ============================================================================
 -- TESTS
 -- ============================================================================
 
@@ -239,6 +269,37 @@ tests["setAllowMissingItems_stores_flag"] = function()
     action:setAllowMissingItems(true)
     return Assert.equal(action.allowMissingItems, true,
         "allowMissingItems flag stored")
+end
+
+tests["third_party_external_api_methods_present"] = function()
+    for methodName, info in pairs(THIRD_PARTY_EXTERNAL_API) do
+        if not Assert.equal(type(ISCartTransferAction[methodName]), "function",
+            "ISCartTransferAction:" .. methodName ..
+            " is required (called from " .. info.whyExposed .. ")") then
+            return false
+        end
+    end
+    return true
+end
+
+tests["setTetrisTarget_stores_grid_fields"] = function()
+    -- Field-for-field mirror of Inventory Tetris's implementation
+    -- (InventoryTetris_InventoryTransferAction.lua:62-69). The fields are
+    -- inert for our pipeline, but Tetris reads them back off the action
+    -- (canMergeAction compares gridX/gridY/gridIndex/isRotated), so they
+    -- must land verbatim, not just not-crash.
+    local action = ISCartTransferAction:new(
+        nil, nil, nil, nil, "in", nil, 1
+    )
+    action:setTetrisTarget(3, 4, 2, true, "secondary-sentinel")
+    if not Assert.equal(action.gridX, 3, "gridX stored") then return false end
+    if not Assert.equal(action.gridY, 4, "gridY stored") then return false end
+    if not Assert.equal(action.gridIndex, 2, "gridIndex stored") then return false end
+    if not Assert.equal(action.isRotated, true, "isRotated stored") then return false end
+    if not Assert.equal(action.tetrisSecondary, "secondary-sentinel",
+        "tetrisSecondary stored") then return false end
+    return Assert.equal(action.enforceTetrisRules, true,
+        "enforceTetrisRules flag set")
 end
 
 return tests

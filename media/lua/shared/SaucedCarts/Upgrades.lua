@@ -219,6 +219,20 @@ function SaucedCarts.Upgrades.canRemoveBattery(cart)
     return true, nil
 end
 
+--- Check if the flashlight upgrade can be uninstalled from this cart
+---@param cart InventoryItem The cart item
+---@return boolean canRemove True if flashlight can be removed
+---@return string|nil reason Reason if cannot remove
+function SaucedCarts.Upgrades.canRemoveFlashlight(cart)
+    if not cart then return false, "No cart" end
+
+    if not SaucedCarts.Upgrades.hasFlashlight(cart) then
+        return false, "No flashlight installed"
+    end
+
+    return true, nil
+end
+
 -- =============================================================================
 -- FLASHLIGHT INSTALLATION
 -- =============================================================================
@@ -269,6 +283,46 @@ function SaucedCarts.Upgrades.installFlashlight(cart, flashlight)
     ) end)
 
     return true
+end
+
+--- Uninstall the flashlight upgrade, tearing down all light state on the cart.
+--- Does NOT create the returned item — the caller owns that so it can be
+--- gated to the authoritative VM (see ISRemoveFlashlightAction:perform).
+---@param cart InventoryItem The cart item
+---@return table|nil flashlightData The stored data (originalType/originalName/...) or nil
+---@return number batteryCharge Charge that was in the cart (0..1)
+function SaucedCarts.Upgrades.removeFlashlight(cart)
+    if not cart then return nil, 0 end
+
+    if not SaucedCarts.Upgrades.hasFlashlight(cart) then
+        SaucedCarts.debug("Upgrades: cannot remove flashlight - none installed")
+        return nil, 0
+    end
+
+    local flashlightData = SaucedCarts.Upgrades.getFlashlightData(cart)
+    local batteryCharge = SaucedCarts.Upgrades.getBatteryCharge(cart) or 0
+
+    -- Kill light emission before the ModData that drives it goes away, or the
+    -- cart keeps glowing until something else resets its item light fields.
+    SaucedCarts.Upgrades.disableCartLight(cart)
+
+    local modData = cart:getModData()
+    modData.SaucedCarts_hasFlashlight = nil
+    modData.SaucedCarts_flashlightData = nil
+    modData.SaucedCarts_batteryCharge = nil
+    modData.SaucedCarts_isLightActive = nil
+    -- Deliberately do NOT touch SaucedCarts_upgradeKey: that memo belongs to
+    -- updateCartVisual alone. Clearing it here made prev==current (nil==nil)
+    -- and the differ skipped the repaint — the stale-flashlight-mesh bug.
+    -- Callers repaint via updateCartVisual(cart, player, true).
+
+    SaucedCarts.debug(function() return string.format(
+        "Upgrades: removed flashlight - returning %s, battery=%.2f",
+        tostring(flashlightData and flashlightData.originalType or "nothing"),
+        batteryCharge
+    ) end)
+
+    return flashlightData, batteryCharge
 end
 
 -- =============================================================================

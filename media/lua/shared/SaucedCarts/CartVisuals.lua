@@ -202,10 +202,20 @@ end
 
 --- Update cart visual based on current fill state and upgrade state
 --- Call this whenever container contents change or upgrades are installed
+---
+--- The (fillState, upgradeKey) memo in ModData tracks what this VM last
+--- APPLIED, and exists only to keep the hot path (fill polling) cheap. It is
+--- not authoritative about what is on screen: on MP clients ModData can
+--- arrive via sync without any model having been applied locally. Callers
+--- that KNOW a repaint is due (upgrade install/remove, broadcast handlers)
+--- pass force=true. NEVER mutate SaucedCarts_upgradeKey/_fillState from
+--- outside this function to trick the differ — that pattern caused the
+--- flashlight-removal stale mesh (nil == nil read as "no change").
 ---@param cart InventoryItem The cart item to update
 ---@param player IsoPlayer|nil The player who owns the cart (for MP sync)
+---@param force boolean|nil Apply the model even if the memo says unchanged
 ---@return boolean changed Whether the visual state changed
-local function updateCartVisual(cart, player)
+local function updateCartVisual(cart, player, force)
     if not cart then return false end
     if not SaucedCarts.isCart(cart) then return false end
 
@@ -225,7 +235,7 @@ local function updateCartVisual(cart, player)
     local prevUpgradeKey = modData.SaucedCarts_upgradeKey  -- nil if never set
 
     -- Check if anything changed (fill state OR upgrade state)
-    if fillState == prevFillState and upgradeKey == prevUpgradeKey then
+    if not force and fillState == prevFillState and upgradeKey == prevUpgradeKey then
         return false  -- No change needed
     end
 

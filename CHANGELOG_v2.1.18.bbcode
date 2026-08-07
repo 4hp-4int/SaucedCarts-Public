@@ -1,0 +1,26 @@
+[h1]SaucedCarts v2.1.18[/h1]
+
+[b]Fixed: with Inventory Tetris installed, dragging an item into an open cart panel crashed and the item never moved.[/b]
+Dropping onto the cart's icon worked, which is why this one read as "some ways work and some don't." The cause was on our side: we substitute our own transfer action for anything involving a cart, and Inventory Tetris — reasonably — expects the action it just created to have the methods it added to the game's transfer action at startup. Ours didn't have one of them, and the drag died at the exact moment Tetris tried to tell the action where in the grid you dropped the item.
+
+Our action now carries the method, Tetris places transferred items into its grid exactly as it does for any other container, and we've added a startup check on our side that notices when any other mod extends the transfer action with something we don't cover — so the next mod that does this gets a line in the log instead of a crash in your session.
+
+[b]New: the cart flashlight can be removed, and installing one can no longer eat a gun.[/b]
+A player installed a flashlight and lost an M1911 to it. The pistol had a gun light mounted, and by every property the game exposes, a pistol wearing a gun light [i]is[/i] a flashlight. Our finder swept the inventory, took the first match without asking, and the install consumes what it takes. That's three mistakes stacked, and all three are gone:
+
+[list]
+[*]A weapon carrying a light attachment is never a candidate. If we can't tell for certain, we refuse it rather than gamble with something we're about to consume. Detection now leads with how the game actually marks handheld lights, so lighters and other edge cases stop qualifying too.
+[*]Nothing is auto-picked. If more than one light qualifies, you get a submenu and choose by name.
+[*]There is now a [b]Remove Flashlight[/b] option in the same menu. It hands the light back, with whatever charge remains returned as a battery. The item comes back stock — attachments and condition weren't stored, and the tape isn't recovered — but a mis-click is no longer permanent, and the cart is free to be upgraded again.
+[/list]
+
+Also fixed while we were in there: "Install on Cart" from the flashlight's own right-click menu silently did nothing — it works now and shows the same requirements tooltip as the cart-side option.
+
+[b]Fixed: items moved out of aggregated inventory panels stayed listed until you looked away.[/b]
+If you were viewing a combined panel — Better Containers' proximity view, Proximity Inventory, or the vanilla floor panel — items moved between a cart and a container kept showing in that panel until you clicked away and back. Those panels display a combined snapshot rather than the actual container we moved things out of, so nothing was telling them to rebuild. Every cart transfer now ends with exactly one rebuild of the panels you're looking at, in singleplayer and multiplayer both.
+
+[h1]Compatibility[/h1]
+[list]
+[*][b]Save-safe.[/b] No save or database changes, no settings migration. Safe to apply mid-run.
+[*]Tested against Inventory Tetris (B42). If another inventory-overhaul mod still conflicts with cart transfers, our log now names the missing piece — include it when you report and we'll cover it quickly.
+[/list]

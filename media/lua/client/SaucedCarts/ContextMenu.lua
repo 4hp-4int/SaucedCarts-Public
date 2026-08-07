@@ -26,6 +26,7 @@ require "SaucedCarts/TimedActions/ISCartRepairAction"
 require "SaucedCarts/TimedActions/ISInstallFlashlightAction"
 require "SaucedCarts/TimedActions/ISInsertBatteryAction"
 require "SaucedCarts/TimedActions/ISRemoveBatteryAction"
+require "SaucedCarts/TimedActions/ISRemoveFlashlightAction"
 require "SaucedCarts/OrphanRecovery"
 require "TimedActions/ISDropWorldItemAction"
 

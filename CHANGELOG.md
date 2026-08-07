@@ -2,7 +2,122 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
-## v2.1.17 — unreleased
+## v2.1.18
+
+### Inventory Tetris compatibility: dragging into an open cart panel crashed
+
+With Inventory Tetris installed, dragging an item into the open cart panel
+crashed with "Object tried to call nil in handleDragAndDropTransfer"
+(ItemGridUI_events.lua:414) and the item never moved. Dropping onto the
+cart's *icon* worked — which is why reports said "some ways work".
+
+Tetris adds `setTetrisTarget` to `ISInventoryTransferAction` at boot and
+calls it on the action instance immediately after construction, at six
+call sites. Our interceptor substitutes `ISCartTransferAction` for
+cart-involved transfers — an object that didn't have the method. Same
+crash class as the `setAllowMissingItems` furnace report: the bug is
+ours for substituting a foreign class into a constructor other mods hook.
+
+Fixes:
+
+- `ISCartTransferAction:setTetrisTarget` shim, field-for-field mirror of
+  Tetris's implementation. The fields are inert for our pipeline; Tetris
+  auto-places transferred items via its own grid reconciliation.
+- Boot-time surface audit in `CartTransferInterceptor`: after all mods
+  load, any method another mod added to `ISInventoryTransferAction` that
+  our action doesn't expose gets logged — the next foreign method becomes
+  a greppable log line instead of a player crash report.
+- Contract tests: new `THIRD_PARTY_EXTERNAL_API` table in
+  `OfflineApiContractTests.lua` with file:line receipts, plus a
+  behavioral test that all six Tetris fields land verbatim
+  (revert-proven against the shim).
+
+Also statically audited the wider Tetris interop: the cart-into-container
+block survives under Tetris's grid UI (vanilla `isValid:117` calls
+`isItemAllowed` from Lua, where our hook lives, and Tetris composes
+around vanilla's `isValid` rather than replacing it). Cart grids size
+correctly because Tetris keys grid dimensions off `getCapacity()` via
+Lua, which honors our capacity override.
+
+### Items moved out of aggregated panels (proximity views, floor) stayed listed
+
+Moving items between a cart and a container while looking at an
+aggregated panel — Better Containers' proximity view, Proximity
+Inventory, or vanilla's floor panel — left the moved item listed in
+that panel until you clicked away and back.
+
+A panel only re-reads a container marked drawDirty, and our transfer
+dirties the REAL source and destination. That's enough for normal
+panels, because the container on screen is the one we moved out of.
+Aggregated views are different: they're synthetic containers holding
+item references copied from the real nearby containers, refilled only
+inside `refreshBackpacks` — so nothing our move dirtied was the thing
+actually being displayed.
+
+Fix: every cart transfer now ends with exactly one targeted panel
+rebuild (`SaucedCarts.requestInventoryRefresh`). On MP the server sends
+`Commands.ui.DirtyUI` to the initiator once per command, ordered after
+the add/remove broadcasts so the client repaints against post-move
+truth; in SP, `ISInventoryPage.dirtyUI()` runs at the end of the
+action. Previously the rebuild only happened when the v2.1.16
+bag-rebind repair fired — now a transfer that needs no repair still
+gets its one refresh, and a transfer that does need one doesn't get
+two.
+
+### "Install Flashlight" could eat a gun, and there was no way to undo it
+
+A player installed a flashlight on their cart and lost an M1911 to it. The
+pistol had a gun light mounted, and that turns out to be enough.
+
+`HandWeapon` forwards every light-related getter to whatever light part is
+attached to it:
+
+```java
+// HandWeapon.java:2600, 2610, 2615
+public boolean isTorchCone()    { return this.activeLight != null && this.activeLight.isTorchCone() || super.isTorchCone(); }
+public int getLightDistance()   { return this.activeLight != null ? this.activeLight.getLightDistance() : super.getLightDistance(); }
+public boolean canBeActivated() { return this.activeLight != null ? this.activeLight.canBeActivated() : super.canBeActivated(); }
+```
+
+`Base.GunLight` is a weapon part with `ActivatedItem = true` and
+`LightDistance = 15`. Our candidate filter accepted anything reporting a torch
+cone or a positive light distance, so a pistol wearing one was, by every
+property we looked at, a flashlight.
+
+The menu then made it worse. It swept the inventory recursively, took the first
+match without asking, and the install destroys whatever it takes. The pistol was
+holstered, the sweep reached it first, and it was gone.
+
+Three changes:
+
+A weapon carrying a light is no longer a candidate. We check `getActiveLight()`
+and reject the item outright, and if that accessor isn't available on the build
+we're running we reject the weapon anyway rather than gamble with something
+we're about to destroy. Detection now leads with the `base:flashlight` tag and
+the `LightSource` display category, which is how B42 actually marks handheld
+lights, and the old cone-or-distance guess is now a last-resort fallback that
+requires both — so lighters, which have a light distance but no cone, stop
+qualifying too.
+
+Nothing is ever auto-picked. With more than one candidate you get a submenu and
+name the item yourself.
+
+And there is now a **Remove Flashlight** option, under the same cart flashlight
+menu the install lives in. It hands the light back along with any charge left in
+it as a battery. The item comes back stock — attachments, ammo and condition
+were never stored, and the tape isn't recovered — but the cart is free to be
+upgraded again, and a mis-click is no longer permanent. Admins can do the same
+from `SaucedCartsDebug.removeFlashlight()`.
+
+Separately, "Install on Cart" on a flashlight's own right-click menu never
+worked: it didn't pass the attachment material through, so the handler bailed
+silently on click. It works now and shows the same requirements tooltip as the
+cart-side option.
+
+Eighteen tests in `OfflineFlashlightInstallTests.lua`, including the pistol case
+against a mock that reproduces the Java delegation. Suite 447/447.
+
+## v2.1.17
 
 ### Dedicated servers: we no longer rewrite `<server>_SandboxVars.lua` at all
 
