@@ -45,8 +45,8 @@ function ISInsertBatteryAction:isValid()
         return false
     end
 
-    -- Cart must have flashlight upgrade
-    if not SaucedCarts.Upgrades.hasFlashlight(cart) then
+    -- Cart must have flashlight upgrade AND room in the tank
+    if not SaucedCarts.Upgrades.canInsertBattery(cart) then
         return false
     end
 
@@ -118,47 +118,71 @@ end
 -- COMPLETION
 -- ============================================================================
 
-function ISInsertBatteryAction:perform()
+-- ============================================================================
+-- COMPLETE -- server-authoritative state (replication opt-in; see
+-- ISInstallFlashlightAction:complete for the full mechanism notes)
+-- ============================================================================
+function ISInsertBatteryAction:complete()
     self.completed = true
 
     local cart = self:findCart()
     local battery = self:findBattery()
 
     if not cart or not battery then
-        SaucedCarts.debug("ISInsertBatteryAction: cart or battery not found in perform()")
-        return
+        SaucedCarts.debug("ISInsertBatteryAction: cart or battery not found in complete()")
+        return false
     end
 
     -- Check again that cart has flashlight
     if not SaucedCarts.Upgrades.hasFlashlight(cart) then
         SaucedCarts.debug("ISInsertBatteryAction: cart has no flashlight upgrade")
-        return
+        return false
     end
 
     -- Get battery charge (uses delta 0.0-1.0)
     local batteryCharge = battery:getCurrentUsesFloat()
     if batteryCharge <= 0 then
         SaucedCarts.debug("ISInsertBatteryAction: battery is empty")
-        return
+        return false
     end
+
+    -- Drain-what-fits: pour only the tank's deficit out of the battery.
+    -- The battery keeps the remainder and stays in the inventory; it is
+    -- consumed only when actually emptied. No eating a full battery for a
+    -- two-percent top-up.
+    local deficit = 1.0 - (SaucedCarts.Upgrades.getBatteryCharge(cart) or 0)
+    if deficit <= 0 then
+        SaucedCarts.debug("ISInsertBatteryAction: cart battery already full")
+        return false
+    end
+    local used = math.min(batteryCharge, deficit)
+    local remainder = batteryCharge - used
 
     -- Add charge to cart (cap at 1.0)
-    local success = SaucedCarts.Upgrades.addBatteryCharge(cart, batteryCharge)
-    if not success then
-        SaucedCarts.debug("ISInsertBatteryAction: failed to add charge")
-        return
-    end
+    SaucedCarts.Upgrades.addBatteryCharge(cart, used)
 
-    -- Consume the battery
-    local container = battery:getContainer()
-    if container then
-        container:DoRemoveItem(battery)
-        sendRemoveItemFromContainer(container, battery)
+    if remainder > 0.001 then
+        -- Partial drain: battery survives with what's left. Runs on both
+        -- VMs (same value each side); the server's syncItemFields is the
+        -- authoritative copy for equipped inventories.
+        battery:setCurrentUsesFloat(remainder)
+        if isServer() then
+            syncItemFields(self.character, battery)
+        end
+    elseif not isClient() then
+        -- Fully drained: consume â SERVER/SP ONLY. Client-side
+        -- sendRemoveItemFromContainer = SyncItemDelete = Capability.EditItem
+        -- = anti-cheat kick (see ISInstallFlashlightAction:complete).
+        local container = battery:getContainer()
+        if container then
+            container:DoRemoveItem(battery)
+            sendRemoveItemFromContainer(container, battery)
+        end
     end
 
     -- Fire event
     if SaucedCarts._fireEvent then
-        SaucedCarts._fireEvent(SaucedCarts.Events.onBatteryInserted, self.character, cart, batteryCharge)
+        SaucedCarts._fireEvent(SaucedCarts.Events.onBatteryInserted, self.character, cart, used)
     end
 
     -- Sync item state (only for equipped carts)
@@ -168,10 +192,30 @@ function ISInsertBatteryAction:perform()
         syncItemFields(self.character, cart)
     end
 
-    -- Clean up job indicator
-    cart:setJobType(nil)
-    cart:setJobDelta(0.0)
+    -- Ground carts: mirror the new charge to clients via broadcast (the
+    -- container isn't replicated, so syncItemModData above never lands).
+    if isServer() and self.isGroundCart then
+        SaucedCarts.Network.broadcast("upgradeInstalled", {
+            playerOnlineId = self.character:getOnlineID(),
+            cartId = cart:getID(),
+            upgradeType = "batteryUpdated",
+            batteryCharge = SaucedCarts.Upgrades.getBatteryCharge(cart) or 0,
+            squareX = self.squareX,
+            squareY = self.squareY,
+            squareZ = self.squareZ,
+        })
+    end
 
+    return true
+end
+
+function ISInsertBatteryAction:perform()
+    -- Client-side presentation only; all state changes live in :complete().
+    local cart = self:findCart()
+    if cart then
+        cart:setJobType(nil)
+        cart:setJobDelta(0.0)
+    end
     ISBaseTimedAction.perform(self)
 end
 

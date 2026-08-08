@@ -2,6 +2,74 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.19
+
+### Dedicated servers: installing a flashlight kicked the player — and never really installed anything
+
+Two defects wearing one report ("kicked for malformed packets or suspicious
+activity when finishing a flashlight install"):
+
+**The kick.** Timed actions used to consume items with
+`sendRemoveItemFromContainer` on whichever VM ran them. On an MP client that
+sends `SyncItemDelete`, whose packet definition requires `Capability.EditItem`
+— an admin capability. 42.20's capability gate rejects it and
+`AntiCheatPermission` kicks (or at setting 1, **bans**) the player. Every
+non-admin installing a flashlight got kicked at action completion; battery
+insert and equipped-cart repair carried the same latent vector.
+
+**The deeper one.** Custom Lua timed actions only replicate to the server if
+the class defines `:complete()` (`LuaTimedActionNew.java:77-79` — no complete
+means the action is flagged as custom-synced and never sent). The flashlight
+and battery actions had everything in `:perform()` — so dedicated servers
+never ran them at all: no items consumed, no server-side ModData, and
+removing a flashlight diverged client from server. Verified live: after an
+install/remove cycle the server still believed the flashlight was installed
+and every material was intact.
+
+The fix restructures all four actions to the pattern the repair and equip
+actions already used: `perform()` is client presentation only; `complete()`
+holds the state changes, runs server-authoritatively under replication, and
+gates all consume/sync/broadcast work off the client. The redundant
+`flashlightInstalled`/`batteryUpdated` client commands are retired (their
+server handlers remain for v2.1.18 clients). New contract test pins that
+every state-mutating action defines `:complete()` — the silent-client-only
+failure mode can't come back unnoticed.
+
+### Ground carts: upgrade state now reaches clients immediately
+
+Ground-cart containers never replicate, so clients learned about a flashlight
+install only when the item happened to transmit (equip/push) — the install
+looked like it "ate the flashlight and did nothing." The `upgradeInstalled`
+broadcast now carries the install payload (and battery charge), and clients
+mirror it into local ModData on receipt — menu and mesh are correct within a
+round trip. Same mirror added for battery charge changes.
+
+### Ground carts: mesh swaps no longer lag behind upgrades
+
+The engine re-evaluates a ground item's cached render every frame, but the
+cache key is worldScale — never the model (`WorldItemAtlas.isStillValid`).
+Our repaint paths invalidated it by toggling scale between two values; on MP
+clients repaints arrive in pairs, the toggles cancelled to a net-zero change,
+and the engine kept serving the stale mesh until a push or chunk event.
+Scale nudges are now a monotonic micro-sequence (1.0001–1.0010,
+imperceptible): any number of repaints nets a change, and the mesh swaps on
+the next frame in both render regimes (item atlas and chunk-texture bake).
+
+### Battery semantics: drain-what-fits
+
+Inserting a battery used to consume the whole item regardless of how little
+the cart's light needed — a full battery for a 2% top-up, gone. Now the
+battery pours only the tank's deficit, keeps the remainder (the menu label
+shows its charge), and is consumed only when actually emptied. Insertion is
+greyed out at full charge, with a server-side validity gate to match.
+
+**Server admins**: until everyone updates, `AntiCheatPermission=3` (Log) in
+the server INI stops the kicks; the mod functions under any setting. If your
+server has it at `1`, players are being banned — clear those bans after
+updating.
+
+
+
 ## v2.1.18
 
 ### Inventory Tetris compatibility: dragging into an open cart panel crashed

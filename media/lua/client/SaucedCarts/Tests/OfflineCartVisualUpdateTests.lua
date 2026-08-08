@@ -555,6 +555,43 @@ tests["late_joiner_fullUpgradeSync_repaints_despite_synced_memo"] = function()
         "late joiner repainted despite the synced memo matching")
 end
 
+tests["upgradeInstalled_handler_mirrors_install_state_locally"] = function()
+    -- The client-side half of the ground-cart install fix: on receipt the
+    -- handler must write the broadcast's install payload into local ModData
+    -- BEFORE the forced repaint, or the repaint derives from empty local
+    -- state and paints the base mesh over the correct one.
+    require "SaucedCarts/UpgradeSync"
+    local handler = SaucedCarts.Network._getClientHandler("upgradeInstalled")
+    if not Assert.notNil(handler, "upgradeInstalled handler registered") then
+        return false
+    end
+    local cart = makeCartItem({ id = 88 })
+    giveMockLightApi(cart)
+    cart._staticModel = "BASE_STALE"
+    local remote = makeCharacter()
+    remote.getOnlineID = function(self) return 9 end
+    remote.getPrimaryHandItem = function(self) return cart end
+    remote.resetEquippedHandsModels = function(self) end
+    local og1, og2 = _G.getSpecificPlayer, _G.getPlayerByOnlineID
+    _G.getSpecificPlayer = function() return nil end
+    _G.getPlayerByOnlineID = function(id) return id == 9 and remote or nil end
+    local ok, err = pcall(handler, {
+        playerOnlineId = 9, cartId = 88,
+        upgradeType = "flashlight", newUpgradeKey = "flashlight",
+        flashlightData = { originalType = "Base.Torch", lightDistance = 15 },
+        batteryCharge = 0.5,
+    })
+    _G.getSpecificPlayer, _G.getPlayerByOnlineID = og1, og2
+    if not ok then error(err) end
+    local md = cart:getModData()
+    if not Assert.equal(md.SaucedCarts_hasFlashlight, true,
+        "install state mirrored locally") then return false end
+    if not Assert.equal(md.SaucedCarts_batteryCharge, 0.5,
+        "battery charge mirrored") then return false end
+    return Assert.notEqual(cart._staticModel, "BASE_STALE",
+        "repaint ran after the mirror (flashlight-aware, not base)")
+end
+
 tests["removeFlashlight_does_not_touch_the_differ_memo"] = function()
     -- The memo belongs to updateCartVisual. If removal (or any upgrade code)
     -- writes it again, the nil==nil class of bug comes straight back.

@@ -181,61 +181,79 @@ end
 -- COMPLETION
 -- ============================================================================
 
-function ISInstallFlashlightAction:perform()
+-- ============================================================================
+-- COMPLETE -- server-authoritative state (and the replication opt-in)
+-- ============================================================================
+-- Defining :complete() on the class is what opts a Lua timed action into
+-- NetTimedAction replication: LuaTimedActionNew.java:77-79 flags any class
+-- WITHOUT complete as useCustomRemoteTimedActionSync and NEVER SENDS it to
+-- the server -- which is why, through v2.1.18, dedicated servers never ran
+-- any of this (no consumption, no server-side ModData, client/server
+-- divergence). On MP the server executes :complete() (NetTimedAction.java);
+-- the client runs it too -- pure-local mirrors (ModData, visuals) keep the
+-- UX instant while the consume/sync/broadcast blocks stay server-gated.
+function ISInstallFlashlightAction:complete()
     self.completed = true
 
     local cart = self:findCart()
     local flashlight = self:findFlashlight()
 
     if not cart or not flashlight then
-        SaucedCarts.debug("ISInstallFlashlightAction: cart or flashlight not found in perform()")
-        return
+        SaucedCarts.debug("ISInstallFlashlightAction: cart or flashlight not found in complete()")
+        return false
     end
 
     -- Check again that cart doesn't already have flashlight
     if SaucedCarts.Upgrades.hasFlashlight(cart) then
         SaucedCarts.debug("ISInstallFlashlightAction: cart already has flashlight")
-        return
+        return false
     end
 
     -- Install flashlight upgrade (copies properties to ModData)
     local success = SaucedCarts.Upgrades.installFlashlight(cart, flashlight)
     if not success then
         SaucedCarts.debug("ISInstallFlashlightAction: installation failed")
-        return
+        return false
     end
 
-    -- Consume the flashlight
-    local container = flashlight:getContainer()
-    if container then
-        container:DoRemoveItem(flashlight)
-        sendRemoveItemFromContainer(container, flashlight)
-    end
+    -- Consume the flashlight + material — SERVER/SP ONLY. MP timed actions
+    -- run on both VMs; on a client, sendRemoveItemFromContainer sends
+    -- SyncItemDelete, which requires Capability.EditItem (admin) — the 42.20
+    -- capability gate rejects it and AntiCheatPermission kicks the player
+    -- ("suspicious activity", the 2026-08-07 dedi report). The server's copy
+    -- performs the removal and its send legitimately broadcasts to clients.
+    if not isClient() then
+        local container = flashlight:getContainer()
+        if container then
+            container:DoRemoveItem(flashlight)
+            sendRemoveItemFromContainer(container, flashlight)
+        end
 
-    -- Consume the attachment material
-    local inv = self.character:getInventory()
-    local material = findMaterialWithUses(inv, self.materialType, self.materialUses)
-    if material then
-        local currentUses = getItemUses(material)
-        local newUses = currentUses - self.materialUses
+        -- Consume the attachment material
+        local inv = self.character:getInventory()
+        local material = findMaterialWithUses(inv, self.materialType, self.materialUses)
+        if material then
+            local currentUses = getItemUses(material)
+            local newUses = currentUses - self.materialUses
 
-        if newUses <= 0 then
-            -- Consume entire item
-            local matContainer = material:getContainer()
-            if matContainer then
-                matContainer:DoRemoveItem(material)
-                sendRemoveItemFromContainer(matContainer, material)
-            end
-        else
-            -- Reduce uses (drainable or multi-use items)
-            if material.setCurrentUses then
-                material:setCurrentUses(newUses)
-            elseif material.setUsesRemaining then
-                material:setUsesRemaining(newUses)
-            end
-            -- Sync item state
-            if isServer() then
-                syncItemFields(self.character, material)
+            if newUses <= 0 then
+                -- Consume entire item
+                local matContainer = material:getContainer()
+                if matContainer then
+                    matContainer:DoRemoveItem(material)
+                    sendRemoveItemFromContainer(matContainer, material)
+                end
+            else
+                -- Reduce uses (drainable or multi-use items)
+                if material.setCurrentUses then
+                    material:setCurrentUses(newUses)
+                elseif material.setUsesRemaining then
+                    material:setUsesRemaining(newUses)
+                end
+                -- Sync item state
+                if isServer() then
+                    syncItemFields(self.character, material)
+                end
             end
         end
     end
@@ -276,20 +294,31 @@ function ISInstallFlashlightAction:perform()
             cartId = cart:getID(),
             upgradeType = "flashlight",
             newUpgradeKey = newUpgradeKey,
+            -- Ground carts never receive syncItemModData (container not
+            -- replicated), so the broadcast must carry the install state for
+            -- clients to mirror locally — without it a client renders the
+            -- base mesh and keeps offering Install on an installed cart.
+            flashlightData = cart:getModData().SaucedCarts_flashlightData,
+            batteryCharge = cart:getModData().SaucedCarts_batteryCharge or 0,
             squareX = self.squareX,
             squareY = self.squareY,
             squareZ = self.squareZ,
         })
     end
 
-    -- Clean up job indicator
-    cart:setJobType(nil)
-    cart:setJobDelta(0.0)
+    return true
+end
 
+function ISInstallFlashlightAction:perform()
+    -- Client-side presentation only; all state changes live in :complete().
+    local cart = self:findCart()
+    if cart then
+        cart:setJobType(nil)
+        cart:setJobDelta(0.0)
+    end
     if self.sound and self.sound ~= 0 then
         self.character:getEmitter():stopSound(self.sound)
     end
-
     ISBaseTimedAction.perform(self)
 end
 

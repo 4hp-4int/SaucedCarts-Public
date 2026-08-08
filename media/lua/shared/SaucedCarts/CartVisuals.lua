@@ -152,6 +152,23 @@ end
 -- Model Application
 -- =============================================================================
 
+--- Invalidate the world-item atlas cache for a cart by nudging worldScale.
+--- WorldItemAtlas.isStillValid keys on worldScale (never the model), which is
+--- why a scale change forces a re-render at all. MONOTONIC sequence, not a
+--- two-value toggle: repaints arrive in pairs on MP clients (ground-visual
+--- broadcast + upgradeInstalled force-repaint), and an even number of A/B
+--- toggles nets ZERO scale change -- the cache stays "valid" and the stale
+--- mesh lingers until a push or chunk event (the 2026-08-08 removal report).
+--- Steps cycle 1.0001..1.0010: imperceptible, and consecutive values always
+--- differ.
+function SaucedCarts.nudgeCartWorldScale(cart)
+    if not cart or not cart.setWorldScale then return end
+    local modData = cart:getModData()
+    local seq = ((modData.SaucedCarts_scaleSeq or 0) % 10) + 1
+    modData.SaucedCarts_scaleSeq = seq
+    cart:setWorldScale(1.0 + seq * 0.0001)
+end
+
 --- Apply model to cart (both static and world models)
 ---@param cart InventoryItem The cart item
 ---@param modelName string The model name to apply
@@ -169,13 +186,7 @@ local function applyModel(cart, modelName, player)
     -- NOTE: Do NOT call softReset() - on IsoWorldInventoryObject it REMOVES the item!
     local worldItem = cart:getWorldItem()
     if worldItem then
-        -- Toggle worldScale to invalidate atlas cache
-        -- Note: cart.worldScale field access may not work from Lua, so we track in ModData
-        local modData = cart:getModData()
-        local lastScale = modData.SaucedCarts_lastWorldScale or 1.0
-        local newScale = (lastScale < 1.0001) and 1.0001 or 1.0
-        cart:setWorldScale(newScale)
-        modData.SaucedCarts_lastWorldScale = newScale
+        SaucedCarts.nudgeCartWorldScale(cart)
 
         -- Call updateSprite to refresh the 2D texture/icon
         worldItem:updateSprite()

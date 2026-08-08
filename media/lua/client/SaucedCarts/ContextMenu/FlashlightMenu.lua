@@ -650,7 +650,18 @@ function FlashlightMenu.buildFlashlightSubmenu(submenu, playerObj, cart, isWorld
                 local insertText = getTextOrFallback("UI_SaucedCarts_InsertBattery", "Insert Battery")
                 local batteryPercent = math.floor(bestBattery:getCurrentUsesFloat() * 100)
                 insertText = insertText .. " (" .. batteryPercent .. "%)"
-                flashlightSubmenu:addOption(insertText, {}, onInsertBattery, playerObj:getPlayerNum(), cart, bestBattery)
+                local insertOpt = flashlightSubmenu:addOption(insertText, {}, onInsertBattery, playerObj:getPlayerNum(), cart, bestBattery)
+                -- Grey out when the tank is full: consuming a battery for a
+                -- zero-gain top-up was the old (silly) behavior.
+                local canIns = SaucedCarts.Upgrades.canInsertBattery(cart)
+                if not canIns then
+                    insertOpt.notAvailable = true
+                    local tip = ISToolTip:new()
+                    tip:initialise()
+                    tip:setVisible(false)
+                    tip.description = "<RGB:0.9,0.6,0.1>" .. (getText("UI_SaucedCarts_BatteryFull") or "Battery already full")
+                    insertOpt.toolTip = tip
+                end
             end
 
             -- Remove Battery (if cart has charge)

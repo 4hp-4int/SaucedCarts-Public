@@ -129,18 +129,22 @@ end
 -- COMPLETION
 -- ============================================================================
 
-function ISRemoveFlashlightAction:perform()
+-- ============================================================================
+-- COMPLETE -- server-authoritative state (replication opt-in; see
+-- ISInstallFlashlightAction:complete for the full mechanism notes)
+-- ============================================================================
+function ISRemoveFlashlightAction:complete()
     self.completed = true
 
     local cart = self:findCart()
     if not cart then
-        SaucedCarts.debug("ISRemoveFlashlightAction: cart not found in perform()")
-        return
+        SaucedCarts.debug("ISRemoveFlashlightAction: cart not found in complete()")
+        return false
     end
 
     if not SaucedCarts.Upgrades.hasFlashlight(cart) then
         SaucedCarts.debug("ISRemoveFlashlightAction: cart has no flashlight upgrade")
-        return
+        return false
     end
 
     -- If the light is on, kill it and tell the other clients before we tear
@@ -237,14 +241,19 @@ function ISRemoveFlashlightAction:perform()
         })
     end
 
-    -- Clean up job indicator
-    cart:setJobType(nil)
-    cart:setJobDelta(0.0)
+    return true
+end
 
+function ISRemoveFlashlightAction:perform()
+    -- Client-side presentation only; all state changes live in :complete().
+    local cart = self:findCart()
+    if cart then
+        cart:setJobType(nil)
+        cart:setJobDelta(0.0)
+    end
     if self.sound and self.sound ~= 0 then
         self.character:getEmitter():stopSound(self.sound)
     end
-
     ISBaseTimedAction.perform(self)
 end
 

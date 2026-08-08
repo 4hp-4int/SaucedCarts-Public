@@ -527,6 +527,22 @@ if isClient() then
                 modData.SaucedCarts_isLightActive = nil
             end
 
+            -- Install: mirror the server's install state locally (symmetric
+            -- to the teardown above, same reason). Without this the forced
+            -- repaint below derives from empty local ModData and paints the
+            -- BASE mesh over the correct ground-visual broadcast — and the
+            -- menu keeps offering Install on an installed cart.
+            if args.upgradeType == "flashlight" and args.flashlightData then
+                modData.SaucedCarts_hasFlashlight = true
+                modData.SaucedCarts_flashlightData = args.flashlightData
+                modData.SaucedCarts_batteryCharge = args.batteryCharge or 0
+            end
+
+            -- Battery charge mirror for ground carts (same replication hole).
+            if args.upgradeType == "batteryUpdated" then
+                modData.SaucedCarts_batteryCharge = args.batteryCharge or 0
+            end
+
             -- Broadcast handlers always repaint: this client's ModData may
             -- have synced without any model ever being applied locally, so
             -- the differ's memo cannot be trusted here. force=true instead
@@ -853,68 +869,15 @@ local function getCartSquareCoords(cart)
     return nil, nil, nil
 end
 
--- Flashlight installed → sync to server
-if SaucedCarts.Events and SaucedCarts.Events.onFlashlightInstalled then
-    SaucedCarts.Events.onFlashlightInstalled:Add(function(player, cart, flashlightType)
-        if not isClient() then return end
-        if not cart or not player then return end
-
-        local modData = cart:getModData()
-        local squareX, squareY, squareZ = getCartSquareCoords(cart)
-
-        SaucedCarts.Network.sendToServer(player, "flashlightInstalled", {
-            cartId = cart:getID(),
-            flashlightData = modData.SaucedCarts_flashlightData,
-            batteryCharge = modData.SaucedCarts_batteryCharge or 0,
-            squareX = squareX,
-            squareY = squareY,
-            squareZ = squareZ,
-        })
-
-        SaucedCarts.debug(function() return "EventSync: flashlightInstalled sent for cart " .. cart:getID() end)
-    end)
-end
-
--- Battery inserted → sync to server
-if SaucedCarts.Events and SaucedCarts.Events.onBatteryInserted then
-    SaucedCarts.Events.onBatteryInserted:Add(function(player, cart, chargeAmount)
-        if not isClient() then return end
-        if not cart or not player then return end
-
-        local modData = cart:getModData()
-        local squareX, squareY, squareZ = getCartSquareCoords(cart)
-
-        SaucedCarts.Network.sendToServer(player, "batteryUpdated", {
-            cartId = cart:getID(),
-            batteryCharge = modData.SaucedCarts_batteryCharge or 0,
-            squareX = squareX,
-            squareY = squareY,
-            squareZ = squareZ,
-        })
-
-        SaucedCarts.debug(function() return "EventSync: batteryInserted sent for cart " .. cart:getID() end)
-    end)
-end
-
--- Battery removed → sync to server
-if SaucedCarts.Events and SaucedCarts.Events.onBatteryRemoved then
-    SaucedCarts.Events.onBatteryRemoved:Add(function(player, cart, chargeAmount)
-        if not isClient() then return end
-        if not cart or not player then return end
-
-        local squareX, squareY, squareZ = getCartSquareCoords(cart)
-
-        SaucedCarts.Network.sendToServer(player, "batteryUpdated", {
-            cartId = cart:getID(),
-            batteryCharge = 0,
-            squareX = squareX,
-            squareY = squareY,
-            squareZ = squareZ,
-        })
-
-        SaucedCarts.debug(function() return "EventSync: batteryRemoved sent for cart " .. cart:getID() end)
-    end)
-end
+-- ----------------------------------------------------------------------------
+-- RETIRED (v2.1.19): the flashlightInstalled / batteryUpdated client->server
+-- event listeners. The flashlight/battery actions now define :complete(),
+-- which opts them into NetTimedAction replication -- the SERVER executes the
+-- authoritative install/consume/charge logic itself, so a client command
+-- re-applying the same state raced it (and for battery charge, double-applied
+-- it). The server-side handlers below are KEPT for legacy 2.1.18 clients,
+-- whose actions are never replicated and whose commands are their only path.
+-- ----------------------------------------------------------------------------
 
 -- Cart visual update → sync to server (for ground carts)
 if SaucedCarts.Events and SaucedCarts.Events.onCartVisualUpdate then

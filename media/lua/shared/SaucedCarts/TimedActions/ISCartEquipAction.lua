@@ -94,16 +94,19 @@ function ISCartEquipAction:complete()
 
     local playerInv = self.character:getInventory()
 
-    -- If cart is not in player inventory, transfer it first
+    -- If cart is not in player inventory, transfer it first. The LOCAL
+    -- mutations run on both VMs (the client needs the cart in playerInv
+    -- right now for the hand-equip below); the SENDS are server-only —
+    -- client-side sendRemoveItemFromContainer = SyncItemDelete =
+    -- Capability.EditItem = anti-cheat kick (see ISInstallFlashlightAction).
     local currentContainer = cart:getContainer()
     if currentContainer and currentContainer ~= playerInv then
-        -- Remove from source container
         currentContainer:Remove(cart)
-        sendRemoveItemFromContainer(currentContainer, cart)
-
-        -- Add to player inventory
         playerInv:AddItem(cart)
-        sendAddItemToContainer(playerInv, cart)
+        if not isClient() then
+            sendRemoveItemFromContainer(currentContainer, cart)
+            sendAddItemToContainer(playerInv, cart)
+        end
     end
 
     -- Equip in both hands

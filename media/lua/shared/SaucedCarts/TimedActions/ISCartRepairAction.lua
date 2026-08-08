@@ -230,11 +230,15 @@ function ISCartRepairAction:complete()
         SaucedCarts._fireEvent(SaucedCarts.Events.onCartRepair, self.character, cart, actualRepair, newCondition)
     end
 
-    -- Consume repair material
-    local repairItemContainer = repairItem:getContainer()
-    if repairItemContainer then
-        repairItemContainer:DoRemoveItem(repairItem)
-        sendRemoveItemFromContainer(repairItemContainer, repairItem)
+    -- Consume repair material — SERVER/SP ONLY. Client-side
+    -- sendRemoveItemFromContainer = SyncItemDelete = Capability.EditItem =
+    -- anti-cheat kick (see ISInstallFlashlightAction:perform).
+    if not isClient() then
+        local repairItemContainer = repairItem:getContainer()
+        if repairItemContainer then
+            repairItemContainer:DoRemoveItem(repairItem)
+            sendRemoveItemFromContainer(repairItemContainer, repairItem)
+        end
     end
 
     -- Award XP if skill bonus is enabled and repair actually happened

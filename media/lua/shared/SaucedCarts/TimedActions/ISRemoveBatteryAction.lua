@@ -120,26 +120,30 @@ end
 -- COMPLETION
 -- ============================================================================
 
-function ISRemoveBatteryAction:perform()
+-- ============================================================================
+-- COMPLETE -- server-authoritative state (replication opt-in; see
+-- ISInstallFlashlightAction:complete for the full mechanism notes)
+-- ============================================================================
+function ISRemoveBatteryAction:complete()
     self.completed = true
 
     local cart = self:findCart()
     if not cart then
-        SaucedCarts.debug("ISRemoveBatteryAction: cart not found in perform()")
-        return
+        SaucedCarts.debug("ISRemoveBatteryAction: cart not found in complete()")
+        return false
     end
 
     -- Check again that cart has flashlight
     if not SaucedCarts.Upgrades.hasFlashlight(cart) then
         SaucedCarts.debug("ISRemoveBatteryAction: cart has no flashlight upgrade")
-        return
+        return false
     end
 
     -- Get current charge
     local charge = SaucedCarts.Upgrades.getBatteryCharge(cart)
     if not charge or charge <= 0 then
         SaucedCarts.debug("ISRemoveBatteryAction: cart has no charge")
-        return
+        return false
     end
 
     -- If light is on, turn it off first and broadcast to other clients
@@ -189,10 +193,30 @@ function ISRemoveBatteryAction:perform()
         syncItemFields(self.character, cart)
     end
 
-    -- Clean up job indicator
-    cart:setJobType(nil)
-    cart:setJobDelta(0.0)
+    -- Ground carts: mirror the new charge to clients via broadcast (the
+    -- container isn't replicated, so syncItemModData above never lands).
+    if isServer() and self.isGroundCart then
+        SaucedCarts.Network.broadcast("upgradeInstalled", {
+            playerOnlineId = self.character:getOnlineID(),
+            cartId = cart:getID(),
+            upgradeType = "batteryUpdated",
+            batteryCharge = SaucedCarts.Upgrades.getBatteryCharge(cart) or 0,
+            squareX = self.squareX,
+            squareY = self.squareY,
+            squareZ = self.squareZ,
+        })
+    end
 
+    return true
+end
+
+function ISRemoveBatteryAction:perform()
+    -- Client-side presentation only; all state changes live in :complete().
+    local cart = self:findCart()
+    if cart then
+        cart:setJobType(nil)
+        cart:setJobDelta(0.0)
+    end
     ISBaseTimedAction.perform(self)
 end
 

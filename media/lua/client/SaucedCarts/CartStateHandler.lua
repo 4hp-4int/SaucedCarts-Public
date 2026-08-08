@@ -381,10 +381,11 @@ SaucedCarts.Network.registerClientHandler("updateGroundCartVisual", function(arg
     -- Toggle worldScale between two imperceptibly different values (1.0 and 1.0001)
     -- Use ModData tracking since direct field access may not work from Lua
     if worldObj then
-        local lastScale = modData.SaucedCarts_lastWorldScale or 1.0
-        local newScale = (lastScale < 1.0001) and 1.0001 or 1.0
-        cart:setWorldScale(newScale)
-        modData.SaucedCarts_lastWorldScale = newScale
+        -- Monotonic: see SaucedCarts.nudgeCartWorldScale (paired repaints
+        -- with a two-value toggle net zero and leave the atlas cache valid).
+        if SaucedCarts.nudgeCartWorldScale then
+            SaucedCarts.nudgeCartWorldScale(cart)
+        end
 
         -- Call updateSprite to refresh the 2D texture/icon
         worldObj:updateSprite()

@@ -1,0 +1,21 @@
+[h1]SaucedCarts v2.1.19[/h1]
+
+[b]Fixed: on dedicated servers, finishing a flashlight install kicked you for "malformed packets or suspicious activity."[/b]
+The install action consumed the flashlight and tape from whichever machine ran it — including your client. A client deleting items sends a packet the game reserves for admins, and since build 42.20 the anti-cheat rejects it and kicks you (on servers with AntiCheatPermission set to 1, it [i]bans[/i] you — admins, check your user logs and clear any of those). Battery inserts and repairs on an equipped cart could trigger the same thing. All of it now happens on the server, where it belongs.
+
+[b]Also fixed: those installs were never actually happening on the server at all.[/b]
+While fixing the kick we found the second half: the game only mirrors a mod's timed action to the server if the action opts in, and ours didn't. So on a dedicated server the install ran only on your screen — the server never consumed the flashlight or the tape, and after a removal the server still believed the flashlight was installed while your client believed it wasn't. If flashlights ever felt haunted on your server — free installs, removals that didn't stick after a relog — this was why. Install, removal, and battery actions are now executed by the server and synced back, same as cart transfers always were.
+
+[b]Ground carts: installs and removals now show up immediately.[/b]
+A ground cart's contents don't replicate to clients, so after an install your game only found out about it when you next picked the cart up — until then it looked like the flashlight vanished for nothing. Upgrade broadcasts now carry the full state and clients apply it on arrival. Relatedly, the mesh itself could lag behind a change until you pushed the cart: our redraw trigger cancelled itself out when two refreshes arrived back-to-back, which on multiplayer was every time. Both directions now update within a frame of the server confirming.
+
+[b]Better battery manners.[/b]
+Topping up the cart light no longer eats a whole battery for a sliver of charge. Batteries drain only what the light can hold, keep the rest, and are consumed only when actually emptied. When the light is full, the insert option is greyed out instead of wasting your battery.
+
+[b]For server admins, until all players update:[/b] players on v2.1.18 can still trigger the kick. Setting [b]AntiCheatPermission=3[/b] (Log) in your server INI stops the kicks without disabling the check for everything else; set it back once your players have updated. The mod works correctly under any setting.
+
+[h1]Compatibility[/h1]
+[list]
+[*][b]Save-safe.[/b] No save or database changes, no settings migration. Safe to apply mid-run.
+[*]Old (v2.1.18) clients on an updated server keep working through legacy sync paths, minus the parts that were already broken for them — updating the client is what fixes the kick.
+[/list]
