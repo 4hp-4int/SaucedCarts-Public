@@ -9,6 +9,9 @@ While fixing the kick we found the second half: the game only mirrors a mod's ti
 [b]Ground carts: installs and removals now show up immediately.[/b]
 A ground cart's contents don't replicate to clients, so after an install your game only found out about it when you next picked the cart up — until then it looked like the flashlight vanished for nothing. Upgrade broadcasts now carry the full state and clients apply it on arrival. Relatedly, the mesh itself could lag behind a change until you pushed the cart: our redraw trigger cancelled itself out when two refreshes arrived back-to-back, which on multiplayer was every time. Both directions now update within a frame of the server confirming.
 
+[b]Ground cart appearance now stays honest no matter how you load or unload it.[/b]
+Emptying a cart through a loot panel or proximity view (Better Containers, CleanUI, Tetris's combined grids) skips the code path we repaint from — the cart could sit visibly full while actually empty. The cart now also watches transfers made around our pipeline and self-checks every few seconds besides, so its model matches its contents whichever way items move.
+
 [b]Better battery manners.[/b]
 Topping up the cart light no longer eats a whole battery for a sliver of charge. Batteries drain only what the light can hold, keep the rest, and are consumed only when actually emptied. When the light is full, the insert option is greyed out instead of wasting your battery.
 

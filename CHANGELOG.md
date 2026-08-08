@@ -55,6 +55,33 @@ Scale nudges are now a monotonic micro-sequence (1.0001–1.0010,
 imperceptible): any number of repaints nets a change, and the mesh swaps on
 the next frame in both render regimes (item atlas and chunk-texture bake).
 
+### Ground carts: fill changes made through aggregated views now repaint
+
+Pulling items out of a ground cart through an aggregated inventory panel
+(CleanUI / Proximity Inventory loot views, Tetris aggregate grids) bypasses
+our transfer pipeline entirely: those panels hand vanilla a synthetic source
+container, so the interceptor never matches and 42.20's transaction system
+moves the items with no Lua event fired server-side (verified: ItemContainer
+has zero OnContainerUpdate trigger sites). The cart could reach 0 weight with
+the mesh still showing partial.
+
+Ground-cart visuals are now a three-layer system, each catching what the
+previous can't:
+1. **Funnel** (instant) — our own pipeline repaints on every intercepted
+   transfer, as before.
+2. **Nudge** (event-driven, ~instant) — the initiating client watches vanilla
+   `transferItem`, where the item's REAL container is visible even when the
+   UI used a synthetic one; when a cart is on either side it sends a
+   stateless nudge and the server recalcs after the transaction lands.
+3. **Sweep** (15s backstop) — a server-side drift reconciler for ground carts
+   near players heals mutations no client ever sees (other mods, admin
+   commands, whatever's next). Same pattern as the equipped-cart reconciler.
+
+Also: the client's ground-visual receive handler logs its outcomes
+field-visibly, and CI's two vanilla-introspection contract tests now
+skip-with-reason on runners without a PZ install instead of failing the
+whole build (they still run in full on any dev machine).
+
 ### Battery semantics: drain-what-fits
 
 Inserting a battery used to consume the whole item regardless of how little

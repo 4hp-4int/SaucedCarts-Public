@@ -1514,6 +1514,19 @@ local function handleCartTransfer(player, args)
 end
 
 if SaucedCarts.Network and SaucedCarts.Network.registerServerHandler then
+    -- Event-driven visual nudge: a client saw a NON-intercepted vanilla
+    -- transfer touch a cart's real container (aggregated-view transfers use
+    -- synthetic source containers, so classifyTransfer never matches and the
+    -- repaint funnel is bypassed). No client state is trusted -- the server
+    -- just recalcs fill and repaints if drifted, slightly delayed so the
+    -- vanilla transaction's move lands first.
+    SaucedCarts.Network.registerServerHandler("cartVisualNudge", function(player, args)
+        if not args or not args.cartId then return end
+        if SaucedCarts.queueGroundCartVisualNudge then
+            SaucedCarts.queueGroundCartVisualNudge(
+                args.cartId, args.squareX, args.squareY, args.squareZ, player)
+        end
+    end)
     SaucedCarts.Network.registerServerHandler("cartTransfer", handleCartTransfer)
     -- Keep the old command name alive so connected clients that were loaded
     -- before the update don't break mid-session.
@@ -1595,6 +1608,54 @@ local function installInterception()
     end
 
     SaucedCarts.log("CartTransferInterceptor: hooked ISInventoryTransferAction.new (src-or-dest cart matching)")
+
+    -- MP clients only: watch VANILLA transfers for cart involvement that the
+    -- .new hook cannot see. Aggregated views (CleanUI/Proximity loot panels,
+    -- Tetris aggregate grids) pass a SYNTHETIC source container, so the
+    -- substitution above never fires -- but at transferItem time the ITEM
+    -- knows its real container. When a real cart container is on either
+    -- side, nudge the server to recalc that cart's visual. Throttled per
+    -- cart; SP and dedi are covered by the funnel and never install this.
+    if isClient() and ISInventoryTransferAction.transferItem then
+        local origTransferItem = ISInventoryTransferAction.transferItem
+        local lastNudgeMs = {}
+        local function realCartOf(container)
+            if not container or not container.getContainingItem then return nil end
+            local it = container:getContainingItem()
+            if it and SaucedCarts.safeIsCart(it) then return it end
+            return nil
+        end
+        local function nudge(cart)
+            if not cart then return end
+            local id = cart:getID()
+            local now = getTimestampMs and getTimestampMs() or 0
+            if lastNudgeMs[id] and (now - lastNudgeMs[id]) < 400 then return end
+            lastNudgeMs[id] = now
+            local wi = cart:getWorldItem()
+            local sq = wi and wi:getSquare()
+            local p = getSpecificPlayer(0)
+            if p and SaucedCarts.Network and SaucedCarts.Network.sendToServer then
+                SaucedCarts.Network.sendToServer(p, "cartVisualNudge", {
+                    cartId = id,
+                    squareX = sq and sq:getX() or nil,
+                    squareY = sq and sq:getY() or nil,
+                    squareZ = sq and sq:getZ() or nil,
+                })
+            end
+        end
+        ISInventoryTransferAction.transferItem = function(self, item, ...)
+            local srcCart
+            pcall(function()
+                srcCart = realCartOf(item and item:getContainer())
+            end)
+            local result = origTransferItem(self, item, ...)
+            pcall(function()
+                nudge(srcCart or realCartOf(item and item:getContainer()))
+            end)
+            return result
+        end
+        SaucedCarts.log("CartTransferInterceptor: vanilla transferItem nudge armed (client)")
+    end
 end
 
 if ISInventoryTransferAction and ISInventoryTransferAction.new then

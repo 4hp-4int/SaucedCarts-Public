@@ -363,13 +363,18 @@ SaucedCarts.Network.registerClientHandler("updateGroundCartVisual", function(arg
         args.squareX, args.squareY, args.squareZ, args.cartId)
 
     if not cart then
-        SaucedCarts.debug(function() return "CartStateHandler: cart " .. args.cartId .. " not found for visual update" end)
+        -- .log: field-visible -- triaging "ground mesh didn't update" needs
+        -- receive-side evidence in normal (non-debug) client logs.
+        SaucedCarts.log("GroundCartVisual: cart " .. tostring(args.cartId) .. " NOT FOUND at "
+            .. tostring(args.squareX) .. "," .. tostring(args.squareY) .. "," .. tostring(args.squareZ))
         return
     end
 
     -- Update local model
     cart:setStaticModel(args.modelName)
     cart:setWorldStaticModel(args.modelName)
+    SaucedCarts.log("GroundCartVisual: applied " .. tostring(args.modelName)
+        .. " to cart " .. tostring(args.cartId) .. " (worldObj=" .. tostring(worldObj ~= nil) .. ")")
 
     -- Update ModData to match
     local modData = cart:getModData()
