@@ -218,7 +218,13 @@ tests["api_surface_matches_vanilla_or_is_documented_internal"] = function()
     --   (a) present on ISCartTransferAction, OR
     --   (b) listed in KNOWN_VANILLA_INTERNALS as an audited internal.
     -- New vanilla methods (e.g. from a PZ patch) light up here.
-    if not ISInventoryTransferAction then return false end
+    -- Gate on _pz_install_dir (set by the kit ONLY when a real PZ install
+    -- resolved — KahluaTestRunner.java:1099): CI has no install, and mock
+    -- fallbacks can plant a mock under the class global.
+    if not _pz_install_dir or not ISInventoryTransferAction then
+        return PZTestKit.skip("requires a real PZ install (see "
+            .. "vanilla_class_loaded_for_introspection)")
+    end
 
     local missing = {}
     for k, v in pairs(ISInventoryTransferAction) do
