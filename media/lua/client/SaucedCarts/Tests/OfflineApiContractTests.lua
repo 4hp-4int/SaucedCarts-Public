@@ -180,7 +180,11 @@ tests["vanilla_class_loaded_for_introspection"] = function()
     -- CI has no PZ install: vanilla_requires falls back to mocks and this
     -- contract is uncheckable there. It MUST still run (and fail loudly)
     -- on any machine with a real install — that's every dev machine.
-    if not ISInventoryTransferAction then
+    -- Gate on _pz_install_dir, NOT the class global: the kit sets it only
+    -- when a REAL install was found (KahluaTestRunner.java:1099); other
+    -- tests/mock fallbacks can install a mock under the class global,
+    -- which is exactly what made this fail on CI while "guarded".
+    if not _pz_install_dir or not ISInventoryTransferAction then
         return PZTestKit.skip("requires a real PZ install "
             .. "(vanilla_requires fell back to mocks; contract "
             .. "introspection is hollow without vanilla's class)")
