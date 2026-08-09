@@ -37,7 +37,9 @@ function SaucedCarts.OrphanRecovery.notifyOrphans(player, orphans)
     if count == 1 then
         msg = getText("UI_SaucedCarts_OrphanFound_Single")
     else
-        msg = getText("UI_SaucedCarts_OrphanFound_Multi"):gsub("%%1", tostring(count))
+        -- Args go through getText: a bare call on a %1-carrying key WARN-logs
+        -- on every call since 42.20 (the format pass is unconditional).
+        msg = getText("UI_SaucedCarts_OrphanFound_Multi", tostring(count))
     end
 
     -- Use HaloTextHelper for in-game notification if available
@@ -120,7 +122,7 @@ local function doRecoverOrphanCart(item, player)
 
     if success then
         -- Show success notification
-        local msg = getText("UI_SaucedCarts_RecoveredItems"):gsub("%%1", tostring(result))
+        local msg = getText("UI_SaucedCarts_RecoveredItems", tostring(result))
 
         if HaloTextHelper and HaloTextHelper.addTextWithArrow then
             local color = HaloTextHelper.getColorGreen and HaloTextHelper.getColorGreen() or {r = 0, g = 1, b = 0}
@@ -140,7 +142,7 @@ local function doRecoverOrphanCart(item, player)
         end
     else
         -- Show error notification
-        local msg = getText("UI_SaucedCarts_RecoveryFailed"):gsub("%%1", tostring(result))
+        local msg = getText("UI_SaucedCarts_RecoveryFailed", tostring(result))
 
         if HaloTextHelper and HaloTextHelper.addTextWithArrow then
             local color = HaloTextHelper.getColorRed and HaloTextHelper.getColorRed() or {r = 1, g = 0, b = 0}
@@ -188,7 +190,7 @@ local function onFillInventoryContextMenu(playerNum, context, items)
             local info = SaucedCarts.OrphanRecovery.getOrphanInfo(item)
 
             -- Build option text
-            local text = getText("UI_SaucedCarts_RecoverItems"):gsub("%%1", tostring(info.itemCount))
+            local text = getText("UI_SaucedCarts_RecoverItems", tostring(info.itemCount))
 
             local option = context:addOption(text, item, doRecoverOrphanCart, player)
 
@@ -200,13 +202,12 @@ local function onFillInventoryContextMenu(playerNum, context, items)
             desc = desc .. getText("UI_SaucedCarts_OrphanTooltip_Reason") .. "\n\n"
 
             if info.originalType then
-                desc = desc .. getText("UI_SaucedCarts_OrphanTooltip_OriginalType"):gsub("%%1", info.originalType) .. "\n"
+                desc = desc .. getText("UI_SaucedCarts_OrphanTooltip_OriginalType", info.originalType) .. "\n"
             end
 
             if info.itemCount > 0 then
-                local containsText = getText("UI_SaucedCarts_OrphanTooltip_Contains")
-                containsText = containsText:gsub("%%1", tostring(info.itemCount))
-                containsText = containsText:gsub("%%2", string.format("%.1f", info.totalWeight))
+                local containsText = getText("UI_SaucedCarts_OrphanTooltip_Contains",
+                    tostring(info.itemCount), string.format("%.1f", info.totalWeight))
                 desc = desc .. containsText .. "\n\n"
             else
                 desc = desc .. getText("UI_SaucedCarts_OrphanTooltip_Empty") .. "\n\n"
@@ -274,7 +275,7 @@ local function onFillWorldObjectContextMenu(player, context, worldObjects, test)
                 local info = SaucedCarts.OrphanRecovery.getOrphanInfo(item)
 
                 -- For world objects, we need to pick up first then recover
-                local text = getText("UI_SaucedCarts_PickupBrokenCart"):gsub("%%1", tostring(info.itemCount))
+                local text = getText("UI_SaucedCarts_PickupBrokenCart", tostring(info.itemCount))
 
                 -- Use a closure to capture obj and playerObj
                 local capturedObj = obj

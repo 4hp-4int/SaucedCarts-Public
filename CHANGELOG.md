@@ -4,6 +4,20 @@ All notable changes to SaucedCarts are documented here. Latest version first.
 
 ## v2.1.19
 
+### Console WARN spam from repair/orphan menus on 42.20+
+
+Since 42.20 the game format-processes every translated string unconditionally,
+so the old `getText(key)` → Lua-side `:gsub("%%1", value)` pattern throws
+`MissingFormatArgumentException` inside the Translator on every call — caught,
+but WARN-logged, and the repair tooltip rebuilds per frame while the context
+menu is open. Twelve call sites across `ContextMenu/RepairMenu.lua` (5) and
+`OrphanRecovery.lua` (7) now pass their values through `getText(key, args...)`
+and the gsub lines are gone; displayed text is byte-identical. Found by the new
+monorepo caller-side audit (`pz-mods/tools/gettext-audit/gettext_audit.py` —
+zero under-fed calls remain; the two dynamic-key files it flags for review,
+`RepairMenu.lua:26` and `ContextMenu.lua:312`, were verified to only ever
+receive placeholder-free keys).
+
 ### Dedicated servers: installing a flashlight kicked the player — and never really installed anything
 
 Two defects wearing one report ("kicked for malformed packets or suspicious

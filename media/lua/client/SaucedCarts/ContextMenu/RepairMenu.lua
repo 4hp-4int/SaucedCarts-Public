@@ -121,26 +121,24 @@ local function createRepairTooltip(cart, repairItemType, playerObj)
     local restoreAmount = math.min(finalRepairAmount, conditionMax - condition)
 
     -- Show how much will be restored
-    local restoreText = getText("UI_SaucedCarts_RepairTooltip_Restores") or "Restores %1 condition"
-    restoreText = restoreText:gsub("%%1", tostring(restoreAmount))
+    -- Args go through getText itself: a bare getText on a %1-carrying key
+    -- WARN-logs on every call since 42.20 (format pass is unconditional).
+    local restoreText = getText("UI_SaucedCarts_RepairTooltip_Restores", tostring(restoreAmount))
     table.insert(lines, "<RGB:0.2,0.8,0.2>" .. restoreText)
 
     -- Show skill bonus if applicable
     if skillBonusEnabled and skillContribution > 0 then
-        local skillBonusText = getText("UI_SaucedCarts_RepairTooltip_SkillBonus") or "Skill bonus: +%1"
-        skillBonusText = skillBonusText:gsub("%%1", tostring(skillContribution))
+        local skillBonusText = getText("UI_SaucedCarts_RepairTooltip_SkillBonus", tostring(skillContribution))
         table.insert(lines, "<RGB:0.5,0.7,1.0>" .. skillBonusText)
     end
 
     -- Show current condition
-    local currentText = getText("UI_SaucedCarts_RepairTooltip_Current") or "Current: %1/%2"
-    currentText = currentText:gsub("%%1", tostring(condition)):gsub("%%2", tostring(conditionMax))
+    local currentText = getText("UI_SaucedCarts_RepairTooltip_Current", tostring(condition), tostring(conditionMax))
     table.insert(lines, currentText)
 
     -- Show material used
     local itemName = getItemDisplayName(repairItemType)
-    local requiresText = getText("UI_SaucedCarts_RepairTooltip_Requires") or "Requires: %1"
-    requiresText = requiresText:gsub("%%1", itemName)
+    local requiresText = getText("UI_SaucedCarts_RepairTooltip_Requires", itemName)
     table.insert(lines, requiresText)
 
     tooltip.description = table.concat(lines, " <LINE> ")
@@ -159,8 +157,7 @@ local function createRepairNeededTooltip(cart, repairItemType)
 
     -- Show what's needed
     local itemName = getItemDisplayName(repairItemType)
-    local needText = getText("UI_SaucedCarts_RepairTooltip_NeedMaterial") or "Need %1 to repair"
-    needText = needText:gsub("%%1", itemName)
+    local needText = getText("UI_SaucedCarts_RepairTooltip_NeedMaterial", itemName)
     table.insert(lines, "<RGB:0.9,0.6,0.1>" .. needText)
 
     -- Show current condition. Inline-concatenating a trailing "%" hit a
