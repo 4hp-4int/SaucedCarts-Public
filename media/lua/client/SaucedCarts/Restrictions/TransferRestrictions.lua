@@ -655,6 +655,147 @@ local function removeWorldCartGrabOptions(player, context, worldObjects, test)
 end
 
 -- ============================================================================
+-- POST-MENU GRAB SWEEP (the "Grab option leak")
+-- ============================================================================
+-- Vanilla B42 no longer adds any world-menu option wired to
+-- ISWorldObjectContextMenu.onGrabWItem / onGrabHalfWItems / onGrabAllWItems —
+-- the handlers exist but are dead code (verified: zero addOption call sites in
+-- vanilla media/lua). Some QoL mods re-add the B41-style "Grab" option wired
+-- to those legacy handlers. removeWorldCartGrabOptions above only wins that
+-- fight when OUR OnFillWorldObjectContextMenu handler happens to run AFTER the
+-- re-adding mod's (event order = mod load order), and it matches by display
+-- name, which any custom label defeats. Field report (prsly, 2026-08): Grab
+-- visible on a ground cart, click shows our "can't put a grocery cart in my
+-- pocket" block message — option leaked, behavior layer held.
+--
+-- Fix: wrap ISWorldObjectContextMenu.createMenu. It fires the fill event
+-- internally (ISWorldObjectContextMenu.lua:213) and returns the finished
+-- context (:222), so a post-call sweep runs after EVERY mod's handler
+-- regardless of load order. Options are matched by HANDLER IDENTITY (live
+-- field values plus the pre-hook originals recorded in
+-- GrabRestrictions.legacyOriginals) — locale-proof and label-proof — and
+-- removed only when everything they target is a cart, so a mod's grab option
+-- for ordinary loot is never touched. Mixed cart+loot grab-all lists are left
+-- in place: the click-time filter in GrabRestrictions grabs the non-carts and
+-- notifies about the cart.
+
+local worldMenuSweepInitialized = false
+
+--- Is this function one of the legacy world-grab handlers (in either its
+--- current hooked form or the pre-hook original a mod may have captured)?
+local function isLegacyGrabHandler(fn)
+    if type(fn) ~= "function" then return false end
+    if ISWorldObjectContextMenu then
+        if fn == ISWorldObjectContextMenu.onGrabWItem
+            or fn == ISWorldObjectContextMenu.onGrabHalfWItems
+            or fn == ISWorldObjectContextMenu.onGrabAllWItems then
+            return true
+        end
+    end
+    local originals = SaucedCarts.GrabRestrictions
+        and SaucedCarts.GrabRestrictions.legacyOriginals
+    return (originals and originals[fn]) or false
+end
+
+--- Does this option target carts and nothing else? param1 of the legacy
+--- handlers is either one IsoWorldInventoryObject (onGrabWItem) or a Lua
+--- array of them (onGrabHalfWItems / onGrabAllWItems).
+local function optionTargetsOnlyCarts(option)
+    local ok, result = pcall(function()
+        local target = option.param1
+        if not target then return false end
+        if instanceof(target, "IsoWorldInventoryObject") then
+            local item = target:getItem()
+            return (item and SaucedCarts.safeIsCart(item)) or false
+        end
+        if type(target) == "table" then
+            local count = 0
+            for _, wi in ipairs(target) do
+                count = count + 1
+                local item = instanceof(wi, "IsoWorldInventoryObject") and wi:getItem() or nil
+                if not (item and SaucedCarts.safeIsCart(item)) then
+                    return false
+                end
+            end
+            return count > 0
+        end
+        return false
+    end)
+    return (ok and result) or false
+end
+
+--- Remove options[index], mirroring vanilla removeOptionByName's compaction
+--- (ISContextMenu.lua:1016-1036) so ids, numOptions and the option pool stay
+--- consistent.
+local function removeOptionAt(menu, index)
+    local option = menu.options[index]
+    if not option then return end
+    table.insert(menu.optionPool, option)
+    for i = index + 1, #menu.options do
+        menu.options[i - 1] = menu.options[i]
+        menu.options[i - 1].id = i - 1
+    end
+    menu.options[#menu.options] = nil
+    menu.numOptions = menu.numOptions - 1
+    if menu.calcHeight then menu:calcHeight() end
+end
+
+--- Sweep one menu (and its submenus, one level down) for cart grab options.
+---@return number removed
+local function sweepMenuForCartGrabs(menu, depth)
+    if type(menu) ~= "table" or type(menu.options) ~= "table" then return 0 end
+    depth = depth or 0
+    if depth > 2 then return 0 end
+    local removed = 0
+    local i = 1
+    while menu.options[i] do
+        local option = menu.options[i]
+        if isLegacyGrabHandler(option.onSelect) and optionTargetsOnlyCarts(option) then
+            removeOptionAt(menu, i)
+            removed = removed + 1
+        else
+            if option.subOption and menu.getSubMenu then
+                local ok, sub = pcall(menu.getSubMenu, menu, option.subOption)
+                if ok and sub then
+                    removed = removed + sweepMenuForCartGrabs(sub, depth + 1)
+                end
+            end
+            i = i + 1
+        end
+    end
+    return removed
+end
+
+local function initWorldMenuSweep()
+    if worldMenuSweepInitialized then return end
+    if not (ISWorldObjectContextMenu and ISWorldObjectContextMenu.createMenu) then
+        SaucedCarts.debug("ISWorldObjectContextMenu.createMenu not found, skipping grab sweep")
+        return
+    end
+
+    local originalCreateMenu = ISWorldObjectContextMenu.createMenu
+    ISWorldObjectContextMenu.createMenu = function(...)
+        local context = originalCreateMenu(...)
+        -- test mode returns a boolean, paused/tutorial paths return nil or a
+        -- foreign menu — the type guards below make all of those no-ops.
+        pcall(function()
+            if type(context) == "table" and type(context.options) == "table" then
+                local removed = sweepMenuForCartGrabs(context, 0)
+                if removed > 0 then
+                    SaucedCarts.log("Grab sweep: removed " .. removed
+                        .. " third-party cart Grab option(s) re-added after our menu cleanup"
+                        .. " (a mod wires vanilla's legacy onGrabWItem handlers)")
+                end
+            end
+        end)
+        return context
+    end
+
+    worldMenuSweepInitialized = true
+    SaucedCarts.debug("World-menu grab sweep initialized")
+end
+
+-- ============================================================================
 -- DOUBLE-CLICK HOOKS
 -- ============================================================================
 -- Hook double-click handlers to block cart equip attempts.
@@ -752,6 +893,7 @@ local function onGameStart()
     initTransferHook()
     initTransferActionHook()
     initDoubleClickHook()
+    initWorldMenuSweep()
 
     -- Register context menu cleanup handlers
     Events.OnFillWorldObjectContextMenu.Add(removeWorldCartGrabOptions)
@@ -774,6 +916,11 @@ SaucedCarts.TransferRestrictions = TransferRestrictions
 
 -- Test hook: pure discriminator that gates the transferItemsByWeight fast-path.
 TransferRestrictions._transferInvolvesCart = transferInvolvesCart
+
+-- Test hooks: the post-createMenu grab sweep's pure pieces.
+TransferRestrictions._sweepMenuForCartGrabs = sweepMenuForCartGrabs
+TransferRestrictions._isLegacyGrabHandler = isLegacyGrabHandler
+TransferRestrictions._optionTargetsOnlyCarts = optionTargetsOnlyCarts
 
 -- ============================================================================
 -- CLEANUP ON GAME END

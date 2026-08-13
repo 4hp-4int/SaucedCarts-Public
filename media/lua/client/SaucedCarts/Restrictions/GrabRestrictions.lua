@@ -25,6 +25,14 @@ require "SaucedCarts/Notifications"
 ---@class SaucedCartsGrabRestrictions
 local GrabRestrictions = {}
 
+-- The vanilla functions our grab hooks replaced, keyed by function value.
+-- TransferRestrictions' post-createMenu sweep consults this: a third-party
+-- mod that captured ISWorldObjectContextMenu.onGrabWItem at ITS file-load
+-- time (before our OnGameStart hook install) wires its menu option to the
+-- ORIGINAL function, so identity checks against the live field alone would
+-- miss it.
+GrabRestrictions.legacyOriginals = {}
+
 -- ============================================================================
 -- SAFE HELPER FUNCTIONS
 -- ============================================================================
@@ -77,6 +85,7 @@ local function initGrabHooks()
     -- Hook onGrabWItem (single item grab)
     if ISWorldObjectContextMenu.onGrabWItem then
         local originalOnGrabWItem = ISWorldObjectContextMenu.onGrabWItem
+        GrabRestrictions.legacyOriginals[originalOnGrabWItem] = true
         ISWorldObjectContextMenu.onGrabWItem = function(worldobjects, WItem, player)
             -- Safe check: is this a cart?
             local shouldBlock = false
@@ -104,6 +113,7 @@ local function initGrabHooks()
     -- Hook onGrabHalfWItems (grab half)
     if ISWorldObjectContextMenu.onGrabHalfWItems then
         local originalOnGrabHalfWItems = ISWorldObjectContextMenu.onGrabHalfWItems
+        GrabRestrictions.legacyOriginals[originalOnGrabHalfWItems] = true
         ISWorldObjectContextMenu.onGrabHalfWItems = function(worldobjects, WItems, player)
             -- Safe filter: remove carts from list
             local filteredItems = WItems
@@ -140,6 +150,7 @@ local function initGrabHooks()
     -- Hook onGrabAllWItems (grab all)
     if ISWorldObjectContextMenu.onGrabAllWItems then
         local originalOnGrabAllWItems = ISWorldObjectContextMenu.onGrabAllWItems
+        GrabRestrictions.legacyOriginals[originalOnGrabAllWItems] = true
         ISWorldObjectContextMenu.onGrabAllWItems = function(worldobjects, WItems, player)
             -- Safe filter: remove carts from list
             local filteredItems = WItems
