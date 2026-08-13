@@ -36,6 +36,7 @@ require "SaucedCarts/Core"
 require "SaucedCarts/CartTransferInterceptor"
 require "SaucedCarts/Durability"
 require "SaucedCarts/ContainerRestrictions"
+require "SaucedCarts/WorldCleanupGuard"
 
 local Durability = SaucedCarts.Durability
 
@@ -369,6 +370,149 @@ tests["server_instant_drop_cart_exempt_from_world_cleanup"] = function()
     end
     return Assert.isTrue(exempt,
         "cart dropped by the MP server is exempt from world cleanup")
+end
+
+-- ============================================================================
+-- WorldCleanupGuard — boot-time keep-list guard. On servers running
+-- ItemRemovalListBlacklistToggle=true, WorldItemRemovalList inverts into a
+-- keep-list and every unlisted item is swept by the IsoGridSquare.load filter
+-- — including carts saved unflagged before v2.1.16 and loot-spawned carts
+-- players use in place. The guard appends cart types to the in-memory list at
+-- boot so the filter can never match a cart at all.
+-- ============================================================================
+
+local Guard = SaucedCarts.WorldCleanupGuard
+
+--- Sandbox-options stub: state.setValueCalls counts writes, state.list holds
+--- the live value so idempotence can be tested across two apply() runs.
+local function withSandbox(opts, fn)
+    local state = {
+        toggle = opts.toggle,
+        list = opts.list or "",
+        setValueCalls = 0,
+    }
+    local sandbox = {
+        getOptionByName = function(_, name)
+            if name == "ItemRemovalListBlacklistToggle" then
+                return { getValue = function() return state.toggle end }
+            elseif name == "WorldItemRemovalList" then
+                return {
+                    getValue = function() return state.list end,
+                    setValue = function(_, v)
+                        state.setValueCalls = state.setValueCalls + 1
+                        state.list = v
+                    end,
+                }
+            end
+            return nil
+        end,
+    }
+    if opts.hostile then
+        sandbox.getOptionByName = function() error("simulated Java-side failure") end
+    end
+    local realGetSandboxOptions = _G.getSandboxOptions
+    _G.getSandboxOptions = function() return sandbox end
+    local ok, err = pcall(function() fn(state) end)
+    _G.getSandboxOptions = realGetSandboxOptions
+    if not ok then error(err) end
+end
+
+--- Exact-segment CSV membership (trims each piece, no substring false hits).
+local function csvContains(csv, entry)
+    local pos = 1
+    while true do
+        local comma = string.find(csv, ",", pos, true)
+        local piece = comma and string.sub(csv, pos, comma - 1) or string.sub(csv, pos)
+        piece = string.match(piece, "^%s*(.-)%s*$") or piece
+        if piece == entry then return true end
+        if not comma then return false end
+        pos = comma + 1
+    end
+end
+
+tests["guard_patch_appends_cart_type_to_empty_list"] = function()
+    local patched, added = Guard.computeKeepListPatch("", { "SaucedCarts.ShoppingCart" })
+    if not Assert.equal(patched, "SaucedCarts.ShoppingCart",
+        "empty list gains exactly the cart type") then return false end
+    return Assert.equal(#added, 1, "one addition reported")
+end
+
+tests["guard_patch_preserves_existing_entries_and_order"] = function()
+    local patched = Guard.computeKeepListPatch(
+        "Base.Hat,Base.Glasses", { "SaucedCarts.ShoppingCart" })
+    return Assert.equal(patched, "Base.Hat,Base.Glasses,SaucedCarts.ShoppingCart",
+        "admin's entries stay first and untouched, cart appended")
+end
+
+tests["guard_patch_idempotent_when_already_present"] = function()
+    -- Whitespace-tolerant: vanilla's getSplitCSVList trims, so must we.
+    local patched = Guard.computeKeepListPatch(
+        " Base.Hat , SaucedCarts.ShoppingCart ", { "SaucedCarts.ShoppingCart" })
+    return Assert.isNil(patched, "nothing to add -> nil (no setValue churn)")
+end
+
+tests["guard_patch_underscore_type_adds_family_prefix"] = function()
+    -- IsoGridSquare.load family-matches type:split("_")[0]
+    -- (IsoGridSquare.java:3306-3309): with the blacklist toggle on, a listed
+    -- "MyMod.CoolCart_v2" is STILL swept unless "MyMod.CoolCart" is listed
+    -- too. The patch must cover both or the guard silently fails for any
+    -- addon cart with an underscore in its name.
+    local patched = Guard.computeKeepListPatch("", { "MyMod.CoolCart_v2" })
+    if not Assert.isTrue(csvContains(patched, "MyMod.CoolCart_v2"),
+        "full type listed") then return false end
+    return Assert.isTrue(csvContains(patched, "MyMod.CoolCart"),
+        "family prefix (before first underscore) listed as well")
+end
+
+tests["guard_apply_noop_in_remove_list_mode"] = function()
+    -- toggle=false is vanilla's default REMOVE-list mode: only listed items
+    -- are swept, carts can never match. The guard must not touch the
+    -- admin's list.
+    local touched
+    withSandbox({ toggle = false, list = "Base.Hat" }, function(state)
+        Guard.apply()
+        touched = state.setValueCalls
+    end)
+    return Assert.equal(touched, 0, "remove-list mode left entirely alone")
+end
+
+tests["guard_apply_patches_keep_list_for_all_registered_carts"] = function()
+    local finalList, calls
+    withSandbox({ toggle = true, list = "Base.Hat,Base.Glasses" }, function(state)
+        Guard.apply()
+        finalList = state.list
+        calls = state.setValueCalls
+    end)
+    if not Assert.equal(calls, 1, "list written exactly once") then return false end
+    for _, cartType in ipairs(SaucedCarts.getAllCartTypes()) do
+        for _, entry in ipairs(Guard.entriesForCartType(cartType)) do
+            if not Assert.isTrue(csvContains(finalList, entry),
+                "keep-list covers " .. entry) then return false end
+        end
+    end
+    return Assert.isTrue(csvContains(finalList, "Base.Hat"),
+        "admin's own entries survive the patch")
+end
+
+tests["guard_apply_idempotent_across_boots"] = function()
+    -- Second boot re-reads the (in-memory) patched list: no second write.
+    local calls
+    withSandbox({ toggle = true, list = "" }, function(state)
+        Guard.apply()
+        Guard.apply()
+        calls = state.setValueCalls
+    end)
+    return Assert.equal(calls, 1, "second apply() found nothing to add")
+end
+
+tests["guard_apply_survives_hostile_sandbox"] = function()
+    -- A Java-side throw (missing option, boot-order surprise) must never
+    -- propagate out of OnServerStarted and take other listeners down.
+    local result
+    withSandbox({ toggle = true, hostile = true }, function()
+        result = Guard.apply()
+    end)
+    return Assert.isFalse(result, "throwing sandbox caught, apply reports false")
 end
 
 return tests
