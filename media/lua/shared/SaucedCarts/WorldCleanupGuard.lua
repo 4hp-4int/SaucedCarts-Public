@@ -34,9 +34,15 @@
     restart or once everyone logs out and back in ("all our carts disappeared"
     reports).
 
-    So: when the toggle is TRUE, ensure every registered cart type is present
-    in the keep-list, in memory, every boot. Two subtleties, both from reading
-    the filter:
+    So: when the toggle is TRUE — and the admin has opted in via the
+    SaucedCarts.ProtectFromWorldCleanup sandbox option (default OFF) — ensure
+    every registered cart type is present in the keep-list, in memory, every
+    boot. The guard is opt-in because the keep-list is the admin's cleanup
+    config: silently rewriting its effective contents (even in memory) changes
+    behavior they may be relying on. When keep-list mode is detected with the
+    opt-in off, the guard logs a hint instead so a "carts vanished" report can
+    be traced to this option in one log grep. Two subtleties, both from
+    reading the filter:
       * It also family-matches type:split("_")[0] (IsoGridSquare.java:
         3306-3309), so any cart type containing an underscore needs its
         before-the-underscore prefix listed too or the family branch still
@@ -145,6 +151,27 @@ function Guard.apply()
         -- carts can't match unless an admin listed them on purpose. Not ours
         -- to touch.
         if not toggleOpt:getValue() then return end
+
+        -- Opt-in gate: the keep-list is the admin's cleanup config, so we
+        -- never alter it (even in memory) unless they asked. Option object
+        -- first (it's what the server transmits to clients), SandboxVars
+        -- table as fallback; absent anywhere = off.
+        local protectOpt = sandbox:getOptionByName("SaucedCarts.ProtectFromWorldCleanup")
+        local optedIn
+        if protectOpt and protectOpt.getValue then
+            optedIn = protectOpt:getValue() == true
+        else
+            local sv = SandboxVars and SandboxVars.SaucedCarts
+            optedIn = (sv and sv.ProtectFromWorldCleanup) == true
+        end
+        if not optedIn then
+            SaucedCarts.log("WorldCleanupGuard: ItemRemovalListBlacklistToggle is on (keep-list"
+                .. " world cleanup) — unlisted items, including carts on the ground, are deleted"
+                .. " at chunk load. Cart protection is OFF; enable the sandbox option"
+                .. " 'Protect Carts From World Cleanup' (SaucedCarts.ProtectFromWorldCleanup)"
+                .. " to keep carts off the sweep. Nothing is written to disk.")
+            return
+        end
 
         local patched, added =
             Guard.computeKeepListPatch(listOpt:getValue(), SaucedCarts.getAllCartTypes())

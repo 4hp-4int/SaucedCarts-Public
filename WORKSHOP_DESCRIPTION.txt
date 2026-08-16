@@ -125,7 +125,8 @@ That's IT! Your cart automatically gets world spawning, durability, repairs, vis
 
 [h1]WHAT'S IN THE BOX?[/h1]
 
-[b]Build 42.13.1+ REQUIRED[/b]
+[b]Build 42.17.0+ REQUIRED[/b]
+[b] Compatible with 42.19 [/b]
 
 [list]
 [*] Shopping Cart (craftable & world spawning)
@@ -177,3 +178,12 @@ By subscribing to SaucedCarts you acknowledge that: (a) shopping carts are for P
 SaucedCarts is not responsible for: zombie-related cart losses, server admins who set durability to 1%, the emotional bond you will form with your cart, or the crushing grief when it finally breaks.
 
 All carts are tested on survivors who knew what they were signing up for.
+
+[img]https://pz-mod-images.us-southeast-1.linodeobjects.com/mod-tiles.png[/img]  
+
+Workshop ID: 3651954650
+Mod ID: SaucedCarts
+
+
+Workshop ID: 3651954650
+Mod ID: SaucedCarts

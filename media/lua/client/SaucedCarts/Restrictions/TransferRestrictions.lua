@@ -740,7 +740,8 @@ local function removeOptionAt(menu, index)
     if menu.calcHeight then menu:calcHeight() end
 end
 
---- Sweep one menu (and its submenus, one level down) for cart grab options.
+--- Sweep one menu (and its submenus, up to two levels down) for cart grab
+--- options.
 ---@return number removed
 local function sweepMenuForCartGrabs(menu, depth)
     if type(menu) ~= "table" or type(menu.options) ~= "table" then return 0 end
@@ -766,6 +767,39 @@ local function sweepMenuForCartGrabs(menu, depth)
     return removed
 end
 
+local grabSweepReported = false
+
+--- The full post-createMenu pass: sweep, then repeat vanilla's "hide a menu
+--- with no real options" check — createMenu runs it BEFORE returning
+--- (ISWorldObjectContextMenu.lua:218-220, hides at numOptions == 1), so a
+--- menu whose only real option was the leaked Grab would otherwise render as
+--- an empty box after our removal. numOptions/setVisible absent (foreign
+--- menu framework) simply skips the re-check.
+---@return number removed
+local function postCreateMenuSweep(context)
+    if type(context) ~= "table" or type(context.options) ~= "table" then return 0 end
+    local removed = sweepMenuForCartGrabs(context, 0)
+    if removed > 0 then
+        if context.numOptions == 1 and type(context.setVisible) == "function" then
+            context:setVisible(false)
+        end
+        local msg = "Grab sweep: removed " .. removed
+            .. " third-party cart Grab option(s) re-added after our menu cleanup"
+            .. " (a mod wires vanilla's legacy onGrabWItem handlers)"
+        if grabSweepReported then
+            -- Per-removal reporting fires on every menu open while a
+            -- conflicting mod is installed — debug-only past the first.
+            SaucedCarts.debug(msg)
+        else
+            -- Once per session ungated, so a plain user log still answers
+            -- "why is that mod's Grab missing on carts" without the spam.
+            grabSweepReported = true
+            SaucedCarts.log(msg .. " — further removals this session log in debug mode only")
+        end
+    end
+    return removed
+end
+
 local function initWorldMenuSweep()
     if worldMenuSweepInitialized then return end
     if not (ISWorldObjectContextMenu and ISWorldObjectContextMenu.createMenu) then
@@ -777,17 +811,8 @@ local function initWorldMenuSweep()
     ISWorldObjectContextMenu.createMenu = function(...)
         local context = originalCreateMenu(...)
         -- test mode returns a boolean, paused/tutorial paths return nil or a
-        -- foreign menu — the type guards below make all of those no-ops.
-        pcall(function()
-            if type(context) == "table" and type(context.options) == "table" then
-                local removed = sweepMenuForCartGrabs(context, 0)
-                if removed > 0 then
-                    SaucedCarts.log("Grab sweep: removed " .. removed
-                        .. " third-party cart Grab option(s) re-added after our menu cleanup"
-                        .. " (a mod wires vanilla's legacy onGrabWItem handlers)")
-                end
-            end
-        end)
+        -- foreign menu — postCreateMenuSweep's type guards no-op all of those.
+        pcall(postCreateMenuSweep, context)
         return context
     end
 
@@ -921,6 +946,8 @@ TransferRestrictions._transferInvolvesCart = transferInvolvesCart
 TransferRestrictions._sweepMenuForCartGrabs = sweepMenuForCartGrabs
 TransferRestrictions._isLegacyGrabHandler = isLegacyGrabHandler
 TransferRestrictions._optionTargetsOnlyCarts = optionTargetsOnlyCarts
+TransferRestrictions._postCreateMenuSweep = postCreateMenuSweep
+TransferRestrictions._resetGrabSweepReport = function() grabSweepReported = false end
 
 -- ============================================================================
 -- CLEANUP ON GAME END

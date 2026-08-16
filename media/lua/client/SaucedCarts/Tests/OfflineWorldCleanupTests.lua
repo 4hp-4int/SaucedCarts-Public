@@ -385,6 +385,10 @@ local Guard = SaucedCarts.WorldCleanupGuard
 
 --- Sandbox-options stub: state.setValueCalls counts writes, state.list holds
 --- the live value so idempotence can be tested across two apply() runs.
+--- opts.protect: value of the SaucedCarts.ProtectFromWorldCleanup option
+--- object (nil = option not registered, exercising the missing-option path).
+--- opts.sandboxVars: when a table, swaps _G.SandboxVars for the duration so
+--- the SandboxVars-table fallback is deterministic.
 local function withSandbox(opts, fn)
     local state = {
         toggle = opts.toggle,
@@ -403,6 +407,9 @@ local function withSandbox(opts, fn)
                         state.list = v
                     end,
                 }
+            elseif name == "SaucedCarts.ProtectFromWorldCleanup" then
+                if opts.protect == nil then return nil end
+                return { getValue = function() return opts.protect end }
             end
             return nil
         end,
@@ -411,9 +418,12 @@ local function withSandbox(opts, fn)
         sandbox.getOptionByName = function() error("simulated Java-side failure") end
     end
     local realGetSandboxOptions = _G.getSandboxOptions
+    local realSandboxVars = _G.SandboxVars
     _G.getSandboxOptions = function() return sandbox end
+    if opts.sandboxVars then _G.SandboxVars = opts.sandboxVars end
     local ok, err = pcall(function() fn(state) end)
     _G.getSandboxOptions = realGetSandboxOptions
+    _G.SandboxVars = realSandboxVars
     if not ok then error(err) end
 end
 
@@ -468,17 +478,57 @@ tests["guard_apply_noop_in_remove_list_mode"] = function()
     -- toggle=false is vanilla's default REMOVE-list mode: only listed items
     -- are swept, carts can never match. The guard must not touch the
     -- admin's list.
+    -- protect=true isolates the remove-list gate: even an opted-in server
+    -- must be left alone when the list is a remove-list.
     local touched
-    withSandbox({ toggle = false, list = "Base.Hat" }, function(state)
+    withSandbox({ toggle = false, list = "Base.Hat", protect = true }, function(state)
         Guard.apply()
         touched = state.setValueCalls
     end)
     return Assert.equal(touched, 0, "remove-list mode left entirely alone")
 end
 
+tests["guard_apply_noop_without_opt_in"] = function()
+    -- Keep-list mode alone is not enough: the admin must opt in via the
+    -- SaucedCarts.ProtectFromWorldCleanup sandbox option. Their cleanup
+    -- config is never altered silently.
+    local touched
+    withSandbox({ toggle = true, list = "Base.Hat", protect = false }, function(state)
+        Guard.apply()
+        touched = state.setValueCalls
+    end)
+    return Assert.equal(touched, 0, "opt-in off: keep-list untouched")
+end
+
+tests["guard_apply_defaults_off_when_option_missing"] = function()
+    -- Option object unregistered AND no SandboxVars entry (old configs,
+    -- boot-order surprises): must behave as off, never as on.
+    local touched
+    withSandbox({ toggle = true, list = "", protect = nil, sandboxVars = {} },
+        function(state)
+            Guard.apply()
+            touched = state.setValueCalls
+        end)
+    return Assert.equal(touched, 0, "missing option defaults to off")
+end
+
+tests["guard_apply_opt_in_via_sandboxvars_fallback"] = function()
+    -- When the option OBJECT is unavailable but the SandboxVars table carries
+    -- the opt-in, the guard still runs (dedi boot-order resilience).
+    local calls
+    withSandbox({
+        toggle = true, list = "", protect = nil,
+        sandboxVars = { SaucedCarts = { ProtectFromWorldCleanup = true } },
+    }, function(state)
+        Guard.apply()
+        calls = state.setValueCalls
+    end)
+    return Assert.equal(calls, 1, "SandboxVars fallback opt-in applies the patch")
+end
+
 tests["guard_apply_patches_keep_list_for_all_registered_carts"] = function()
     local finalList, calls
-    withSandbox({ toggle = true, list = "Base.Hat,Base.Glasses" }, function(state)
+    withSandbox({ toggle = true, list = "Base.Hat,Base.Glasses", protect = true }, function(state)
         Guard.apply()
         finalList = state.list
         calls = state.setValueCalls
@@ -497,7 +547,7 @@ end
 tests["guard_apply_idempotent_across_boots"] = function()
     -- Second boot re-reads the (in-memory) patched list: no second write.
     local calls
-    withSandbox({ toggle = true, list = "" }, function(state)
+    withSandbox({ toggle = true, list = "", protect = true }, function(state)
         Guard.apply()
         Guard.apply()
         calls = state.setValueCalls

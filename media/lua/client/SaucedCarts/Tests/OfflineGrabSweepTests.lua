@@ -243,6 +243,75 @@ tests["sweep_leaves_mixed_grab_all_lists"] = function()
     return Assert.equal(removed, 0, "mixed list kept — click-time filter owns that case")
 end
 
+-- ----------------------------------------------------------------------------
+-- postCreateMenuSweep: the wrapper body (visibility re-check + log latch)
+-- ----------------------------------------------------------------------------
+
+tests["post_sweep_hides_menu_left_empty"] = function()
+    -- Vanilla createMenu hides an empty menu BEFORE we sweep; a menu whose
+    -- only real option was the leaked Grab must not render as an empty box.
+    local result
+    withSweepEnv(function()
+        local menu = makeMenu({
+            makeOption("Grab", fnGrab, makeWItem(makeCartItem())),
+        })
+        local visibleSetTo
+        menu.setVisible = function(_, v) visibleSetTo = v end
+        local removed = TR._postCreateMenuSweep(menu)
+        result = { removed = removed, visibleSetTo = visibleSetTo,
+                   numOptions = menu.numOptions }
+    end)
+    if not Assert.equal(result.removed, 1, "the lone leaked option removed") then return false end
+    if not Assert.equal(result.numOptions, 1, "menu is empty by vanilla's invariant") then return false end
+    return Assert.equal(result.visibleSetTo, false,
+        "empty menu hidden, mirroring vanilla's own post-fill check")
+end
+
+tests["post_sweep_keeps_menu_visible_when_options_remain"] = function()
+    local result
+    withSweepEnv(function()
+        local menu = makeMenu({
+            makeOption("Push Cart", fnPushCart, makeWItem(makeCartItem())),
+            makeOption("Grab", fnGrab, makeWItem(makeCartItem())),
+        })
+        local setVisibleCalls = 0
+        menu.setVisible = function() setVisibleCalls = setVisibleCalls + 1 end
+        local removed = TR._postCreateMenuSweep(menu)
+        result = { removed = removed, setVisibleCalls = setVisibleCalls }
+    end)
+    if not Assert.equal(result.removed, 1, "leaked option removed") then return false end
+    return Assert.equal(result.setVisibleCalls, 0,
+        "menu with surviving options is never touched for visibility")
+end
+
+tests["post_sweep_logs_once_ungated_then_debug_only"] = function()
+    -- First removal of the session gets one plain log line (user logs can
+    -- answer "why is that mod's Grab missing on carts"); repeats are
+    -- debug-gated so a conflicting mod doesn't spam every right-click.
+    local result
+    withSweepEnv(function()
+        local realLog, realDebug = SaucedCarts.log, SaucedCarts.debug
+        local logCalls, debugCalls = 0, 0
+        SaucedCarts.log = function() logCalls = logCalls + 1 end
+        SaucedCarts.debug = function() debugCalls = debugCalls + 1 end
+        TR._resetGrabSweepReport()
+        local ok, err = pcall(function()
+            for _ = 1, 3 do
+                TR._postCreateMenuSweep(makeMenu({
+                    makeOption("Grab", fnGrab, makeWItem(makeCartItem())),
+                    makeOption("Walk To", fnPushCart, nil),
+                }))
+            end
+        end)
+        SaucedCarts.log, SaucedCarts.debug = realLog, realDebug
+        TR._resetGrabSweepReport()
+        if not ok then error(err) end
+        result = { logCalls = logCalls, debugCalls = debugCalls }
+    end)
+    if not Assert.equal(result.logCalls, 1, "exactly one ungated line per session") then return false end
+    return Assert.equal(result.debugCalls, 2, "subsequent removals are debug-gated")
+end
+
 tests["sweep_tolerates_hostile_shapes"] = function()
     local results = {}
     withSweepEnv(function()
