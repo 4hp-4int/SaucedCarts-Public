@@ -1,24 +1,37 @@
 [h1]SaucedCarts v2.1.19[/h1]
 
 [b]Fixed: on dedicated servers, finishing a flashlight install kicked you for "malformed packets or suspicious activity."[/b]
-The install action consumed the flashlight and tape from whichever machine ran it — including your client. A client deleting items sends a packet the game reserves for admins, and since build 42.20 the anti-cheat rejects it and kicks you (on servers with AntiCheatPermission set to 1, it [i]bans[/i] you — admins, check your user logs and clear any of those). Battery inserts and repairs on an equipped cart could trigger the same thing. All of it now happens on the server, where it belongs.
-
-[b]Also fixed: those installs were never actually happening on the server at all.[/b]
-While fixing the kick we found the second half: the game only mirrors a mod's timed action to the server if the action opts in, and ours didn't. So on a dedicated server the install ran only on your screen — the server never consumed the flashlight or the tape, and after a removal the server still believed the flashlight was installed while your client believed it wasn't. If flashlights ever felt haunted on your server — free installs, removals that didn't stick after a relog — this was why. Install, removal, and battery actions are now executed by the server and synced back, same as cart transfers always were.
+The install action consumed the flashlight and tape from whichever machine ran it — including your client. A client deleting items sends a packet the game reserves for admins, and since build 42.20 the anti-cheat rejects it and kicks you. Battery inserts and repairs on an equipped cart could trigger the same thing. All of it now happens on the server, where it belongs.
 
 [b]Ground carts: installs and removals now show up immediately.[/b]
 A ground cart's contents don't replicate to clients, so after an install your game only found out about it when you next picked the cart up — until then it looked like the flashlight vanished for nothing. Upgrade broadcasts now carry the full state and clients apply it on arrival. Relatedly, the mesh itself could lag behind a change until you pushed the cart: our redraw trigger cancelled itself out when two refreshes arrived back-to-back, which on multiplayer was every time. Both directions now update within a frame of the server confirming.
 
 [b]Ground cart appearance now stays honest no matter how you load or unload it.[/b]
-Emptying a cart through a loot panel or proximity view (Better Containers, CleanUI, Tetris's combined grids) skips the code path we repaint from — the cart could sit visibly full while actually empty. The cart now also watches transfers made around our pipeline and self-checks every few seconds besides, so its model matches its contents whichever way items move.
+Emptying a cart through a loot panel or proximity view (Better Containers, CleanUI, Tetris's combined grids) skips the code path we repaint from — the cart could sit visibly full while actually empty. 
 
 [b]Better battery manners.[/b]
 Topping up the cart light no longer eats a whole battery for a sliver of charge. Batteries drain only what the light can hold, keep the rest, and are consumed only when actually emptied. When the light is full, the insert option is greyed out instead of wasting your battery.
 
-[b]For server admins, until all players update:[/b] players on v2.1.18 can still trigger the kick. Setting [b]AntiCheatPermission=3[/b] (Log) in your server INI stops the kicks without disabling the check for everything else; set it back once your players have updated. The mod works correctly under any setting.
+[b]For servers running world cleanup in keep-list mode: carts can now be protected — if you opt in.[/b]
+Some servers set ItemRemovalListBlacklistToggle=true, which turns the game's WorldItemRemovalList into a keep-list: anything not on it gets deleted as chunks load. Carts on the ground qualified, cargo and all, which is why a few servers watched every cart vanish after a restart. A new sandbox option, Protect Carts From World Cleanup, adds cart types to that list in memory at every boot so the cleanup can never touch them. It ships off because that list is your cleanup config, and the mod shouldn't change how it behaves without being asked — when the server is in keep-list mode with the option off, the server log says so and names the option, so the cause is one grep away. Nothing is ever written to your config files. On dedicated servers, flip it through the in-game admin sandbox editor.
+
+[b]A stray "Grab" option no longer shows on ground carts alongside certain mods.[/b]
+The game itself stopped offering Grab on world items in build 42, but some quality-of-life mods add the old option back, and it appeared on carts too — clicking it only got you the "can't put a grocery cart in my pocket" message. That option is now removed no matter which mod adds it, whatever it's labelled and in any language, and only when everything it points at is a cart — a mod's Grab on ordinary loot is left alone.
+
+[b]Snack break without letting go.[/b]
+You could always technically eat, drink or smoke while pushing a cart — the game never required a free hand for it — but the cart model vanished for the whole animation, which made it look broken. Now the cart stays in your right hand while the left brings the bottle, sandwich or cigarette up. Bon appetit.
+
+[b]Hurt leg? You limp with the cart now.[/b]
+Leg injuries used to vanish the moment you grabbed a cart — the pushing animation took over your whole body and you strode along like nothing happened. Now the game's own limp plays in your legs while your hands stay on the handle. Standing still and running are unchanged; badly hurt characters can't run with a cart anyway.
+
+[b]You can ride the cart now.[/b]
+The game has an animation where your character stands on the back of a moving cart and kicks along — it's the sprint animation while pushing, and until now it was nearly impossible to see outside debug mode: the cart slowed you down just enough that the game silently downgraded your sprint to a run. The push penalty is now lighter, so a character with shoes on, decent stamina and a not-overloaded cart can hold sprint and hop on. If you preferred carts slow and heavy, the Speed Penalty sandbox option now genuinely works (it previously did nothing — sorry) and goes up to five times the normal penalty; crank it and nobody's riding anything.
+
+[b]Quieter console on 42.20.[/b]
+Since 42.20 the game format-checks every translated string, and the way we filled in values tripped that check — harmless, but it wrote a warning line every frame while a repair tooltip was open. The text now goes through the game's own substitution; what you see on screen is unchanged.
 
 [h1]Compatibility[/h1]
 [list]
-[*][b]Save-safe.[/b] No save or database changes, no settings migration. Safe to apply mid-run.
+[*][b]Save-safe.[/b] No save or database changes, no settings migration. One new sandbox option (Protect Carts From World Cleanup), off by default; the Speed Penalty option's range grew from 0-200 to 0-500 and existing values keep working. Safe to apply mid-run.
 [*]Old (v2.1.18) clients on an updated server keep working through legacy sync paths, minus the parts that were already broken for them — updating the client is what fixes the kick.
 [/list]

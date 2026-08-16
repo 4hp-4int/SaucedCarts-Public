@@ -18,6 +18,155 @@ zero under-fed calls remain; the two dynamic-key files it flags for review,
 `RepairMenu.lua:26` and `ContextMenu.lua:312`, were verified to only ever
 receive placeholder-free keys).
 
+### Keep-list servers: opt-in protection from the world-item cleanup
+
+The "all our carts vanished at restart / when everyone logged out" class of
+report: on servers running `ItemRemovalListBlacklistToggle=true`, vanilla's
+`WorldItemRemovalList` inverts into a keep-list and the `IsoGridSquare.load`
+filter sweeps every unlisted item as chunks deserialize — including carts
+saved before v2.1.16's drop-time exemption and loot-spawned carts used in
+place (both unflagged by design). New `WorldCleanupGuard.lua` appends every
+registered cart type — plus its before-first-underscore family prefix, since
+the filter family-matches `type:split("_")[0]` and those branches bypass the
+`hours > 0` guard — to the in-memory keep-list at `OnServerStarted` (SP:
+`OnGameStart`). In-memory only; the mod never writes the list to disk.
+
+The guard is **opt-in** via a new sandbox option,
+`SaucedCarts.ProtectFromWorldCleanup` (default off): the keep-list is the
+admin's cleanup config, and rewriting its effective contents — even in
+memory — is not something the mod should do silently. When keep-list mode is
+detected with the option off, the server log gets a one-line hint naming the
+option, so a vanished-carts report is diagnosable from a single grep.
+Remove-list mode (the vanilla default) is never touched either way. Note for
+dedicated servers: mod sandbox values hand-edited into
+`<server>_SandboxVars.lua` may not survive boot — set the option through the
+in-game admin sandbox editor instead. 11 tests in
+`OfflineWorldCleanupTests.lua` cover the patch math, family prefixes,
+idempotence across boots, both gates (remove-list mode and the opt-in), the
+missing-option default, and the SandboxVars fallback.
+
+### Cart-riding (sprint) reachable in normal play; Speed Penalty option now real
+
+Field report: the stand-on-the-back-and-kick animation played in debug
+invisible mode but never in normal play. The "ride" is `Bob_Cart_Sprint`, the
+sprint-state cart anim — and vanilla replaces sprint with run whenever
+effective run speed drops below 0.4, *unless the player is in ghost mode*
+(`IsoPlayer.java:2733-2741`; debug invisible IS ghost mode, hence the
+correlation). The cart's `RunSpeedModifier = 0.75` fed that speed twice via
+`calcRunSpeedModByBag` (`IsoGameCharacter.java:10325-10329`), parking a clean,
+shod character at ~0.41 — one moodle level (or bare feet) below the cutoff.
+Base is now **0.9**: comfortable margin to sprint-ride an empty-ish cart with
+shoes on, still scaling down as the cart fills.
+
+While wiring the sandbox side we found the existing **Speed Penalty** option
+was a silent no-op: it stamped `modData.SaucedCarts_runSpeedModifier`, which
+nothing — mod or engine — ever read. The engine reads the item *script's*
+`runSpeedModifier` (Java-internal, live, per speed calc), so the option now
+patches the script per cart type via `DoParam` at boot (`OnGameStart` /
+`OnServerStarted`), re-stamped on every cart touch so mid-game sandbox edits
+apply on the next equip/pickup/relog (there is no vanilla sandbox-changed
+event). Range widened 0–200 → **0–500** (100 = default 10% penalty, 0 = none,
+500 = five-fold — deliberately past the point where sprint-riding stops
+working, for servers that want heavy carts to feel heavy). Addon carts are
+scaled only if they explicitly declared `runSpeedModifier` at registration:
+the script field has no Lua getter, so stamping a defaulted registry value
+over an addon's script could silently change its speed. 14 tests in
+`OfflineRunSpeedTests.lua`.
+
+### Eat, drink and smoke while pushing — the cart no longer vanishes
+
+Vanilla's consume actions were already cart-compatible mechanically: they
+never equip the consumable (`setOverrideHandModels`, a hand-model override),
+run with `stopOnWalk=false`, and define `:complete()` so MP replicates
+consumption server-side. The one breakage was visual — while an action
+override is active, `ModelManager` renders ONLY the override items
+(ModelManager.java:671-688), and the consume actions pass a nil primary, so
+the equipped cart's model disappeared for the whole action. New
+`ConsumeWithCart.lua` (client-only) wraps `start()` on `ISEatFoodAction`
+(food and cigarettes — `FoodType=cigarettes`), `ISDrinkFluidAction` and
+`ISDrinkFromBottle`: after the vanilla override, the equipped cart is
+re-asserted as the primary override item. `addEquippedModelInstance`
+consults `ReplaceInPrimaryHand`, so the cart model and the hand-mask layer
+both survive; the consumable stays in the secondary slot where the
+Eat/Drink/Smoke overlays expect it (they mask the left arm + `Bip01_Prop2`).
+Known cosmetic edge: pot/utensil eat-types that put an item in the primary
+slot show the cart instead of the pot while pushing. 6 tests in
+`OfflineConsumeWithCartTests.lua`.
+
+Second pass after in-game testing (cart bobbed with the eat/drink body sway):
+the sway enters through the vanilla overlays' partial spine weights
+(`DrinkBottle`: Spine 0.5/Spine1 1.0; `Smoke`: 0.25/0.5) — the right arm
+hangs off the spine chain, so the sway translated the hand and the cart.
+Fixed at the source with cart-specific overlay variants
+(`DrinkBottleCart/DrinkPopCanCart/DrinkFromCanCart/SmokeCart.xml`,
+conditioned on `Weapon=cart` at ConditionPriority 50): identical to vanilla's
+minus every spine weight, keeping only neck/head + left arm + `Bip01_Prop2` —
+the push posture stays rigid while the left hand drinks/smokes. Additionally
+all four right-hand cart masks (`holding/walk/run/sprintcartright`) now claim
+`Bip01_R_Clavicle` so the pushing arm's local pose is always the cart anim's,
+covering consume types without a cart variant (plain food).
+
+### Injured cart-pushers limp now (lower-body mask layering)
+
+Pushing a cart used to hide leg injuries entirely: the full-body cart anims
+(`walk_cart` etc., matched on `Weapon=cart`) outrank vanilla `defaultWalk`,
+whose `WalkInjury`/`WalkSpeed` 2D blend space is where limping actually lives
+(`Bob_WalkLightLimpR/L`, `Bob_WalkHeavyLimpR/L` — it's a blend, not a state).
+The full-body walk node (`walk_cart.xml`) is gated to a healthy band
+(`-0.15 < WalkInjury < 0.15`, float GTR/LESS node conditions); outside it the
+body falls back to vanilla `defaultWalk` — limp included — while the
+always-on hand masks (`walkcartright/left`) hold the push pose over it. Those
+masks now carry the full stabilizer weight set: side clavicle + prop +
+`Spine1` 1.0 (torso and arms stay in the smooth `Bob_Cart_Walk` push cycle,
+sync-locked with the healthy body anim so nothing changes when uninjured),
+`Bip01_Neck` 0 (head follows the limp for body language) and `Bip01_Pelvis` 0
+(legs limp freely). First iteration used separate fallback mask nodes
+(`walkcartlimp*`) selected by inverse injury conditions — they never
+activated in-game despite the selection logic verifying clean against the
+decompiled animator (AnimState.getAnimNodes / addNode insertion sort /
+per-frame re-selection at AnimLayer.updateNodeActiveFlags), so the design
+was consolidated onto the proven-active nodes instead. Safe for consume
+actions because the actions layer overrides hand-mask layers on shared bones
+(field-proven: the drink overlay's bottle motion wins `Bip01_Prop2` against
+our left mask). `run_cart` is gated on the same band — ungated, an injured
+character who cannot run bare-handed could run at full animation-driven speed
+by equipping a cart (B42 movement derives from the playing clip's root
+motion, and the healthy cart-run clip has healthy root motion; field report:
+bullet in the foot, sprinting cart pusher). The run masks carry the same
+stabilizer claims so the cart stays held through vanilla's limp-run
+fallback. Sprint needs no gate: vanilla cancels it outright at
+`walkInjury > 0.5` (IsoPlayer.java:2733).
+Root translation from the hobble still moves the character as a whole (bone
+masks cannot pin world space) — that residual is the limp reading through.
+
+### Third-party "Grab" options on ground carts: swept by handler identity
+
+Field report: "Grab" visible on a ground cart; clicking it fired our block
+message — the option leaked while the behavior layer held. Vanilla B42 wires
+no world-menu option to the legacy `ISWorldObjectContextMenu.onGrabWItem` /
+`onGrabHalfWItems` / `onGrabAllWItems` handlers (zero call sites; the
+loot-pane Grab self-gates on `destContainer:isItemAllowed`, which we
+override), so a leaked option means a mod re-added the B41-style Grab wired
+to them. Our `OnFillWorldObjectContextMenu` removal only won that race when
+it happened to run after the re-adding mod (event order = load order) and it
+matched by display name, which any custom label or locale defeats. Now
+`ISWorldObjectContextMenu.createMenu` is wrapped — it fires the fill event
+internally (`:213`) and returns the finished context (`:222`) — so a
+post-call sweep runs after every mod's handler regardless of load order.
+Options are matched by handler identity (live fields plus the pre-hook
+originals recorded in `GrabRestrictions.legacyOriginals`) and removed only
+when everything they target is a cart: mixed cart+loot grab-all lists stay
+(the click-time filter owns those), and other mods' grab options for
+ordinary loot are never touched. Two edges closed after interop review:
+vanilla's "hide a menu with no real options" check runs inside `createMenu`
+before our sweep, so a menu whose only real option was the leaked Grab is
+re-hidden after removal instead of rendering as an empty box; and removal
+logging is once-per-session ungated (a plain user log can still answer "why
+is that mod's Grab missing on carts") with every subsequent removal
+debug-gated, since it fires per menu open while a conflicting mod is
+installed. 13 tests in `OfflineGrabSweepTests.lua`, sensitivity-proven
+against the pre-fix module.
+
 ### Dedicated servers: installing a flashlight kicked the player — and never really installed anything
 
 Two defects wearing one report ("kicked for malformed packets or suspicious

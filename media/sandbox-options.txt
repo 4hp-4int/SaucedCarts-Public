@@ -16,6 +16,14 @@ option SaucedCarts.EnableCorpseStorage
     translation = SaucedCarts_EnableCorpseStorage,
 }
 
+option SaucedCarts.ProtectFromWorldCleanup
+{
+    type = boolean,
+    default = false,
+    page = SaucedCarts,
+    translation = SaucedCarts_ProtectFromWorldCleanup,
+}
+
 option SaucedCarts.SpawnRate
 {
     type = integer,
@@ -70,7 +78,7 @@ option SaucedCarts.SpeedPenaltyMultiplier
 {
     type = integer,
     min = 0,
-    max = 200,
+    max = 500,
     default = 100,
     page = SaucedCarts,
     translation = SaucedCarts_SpeedPenaltyMultiplier,
