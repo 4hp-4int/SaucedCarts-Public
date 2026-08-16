@@ -510,6 +510,9 @@ function SaucedCarts.applyMultipliers(cart)
     -- changes. Cheap + idempotent.
     if modData.SaucedCarts_multipliersApplied then
         applyWeightReduction(cart)
+        -- Re-stamp type-level run speed too: cheap, idempotent, and the only
+        -- way mid-game sandbox edits reach the script (no vanilla event).
+        SaucedCarts.applyCartRunSpeedSettings()
         -- Ensure raw capacity is in ModData (migration for saves before CapacityOverride)
         local rawCapKey = SaucedCarts.CapacityOverride and SaucedCarts.CapacityOverride.getRawCapacityKey()
         if rawCapKey and not modData[rawCapKey] then
@@ -529,19 +532,18 @@ function SaucedCarts.applyMultipliers(cart)
     end
 
     -- Get sandbox multipliers (default to 100%)
+    -- NOTE: SpeedPenaltyMultiplier is NOT handled here — it is a per-TYPE
+    -- script patch, not per-instance state. See applyCartRunSpeedSettings.
     local capMult = 100
     local durMult = 100
-    local speedPenMult = 100
     if SandboxVars.SaucedCarts then
         capMult = SandboxVars.SaucedCarts.CapacityMultiplier or 100
         durMult = SandboxVars.SaucedCarts.DurabilityMultiplier or 100
-        speedPenMult = SandboxVars.SaucedCarts.SpeedPenaltyMultiplier or 100
     else
         SaucedCarts.error("applyMultipliers: SandboxVars.SaucedCarts is nil!")
     end
 
-    SaucedCarts.debug(function() return "applyMultipliers: capMult=" .. capMult .. "%, durMult=" .. durMult ..
-        "%, speedPenMult=" .. speedPenMult .. "%" end)
+    SaucedCarts.debug(function() return "applyMultipliers: capMult=" .. capMult .. "%, durMult=" .. durMult .. "%" end)
 
     -- Apply capacity multiplier
     -- Java's setCapacity always stores the value (ItemContainer.java:171), but
@@ -580,17 +582,6 @@ function SaucedCarts.applyMultipliers(cart)
     if currentCondition == baseConditionMax or currentCondition > newConditionMax then
         cart:setCondition(newConditionMax)
     end
-
-    -- Apply speed penalty multiplier
-    -- Base runSpeedModifier is like 0.70 (30% penalty)
-    -- 100% = normal penalty, 0% = no penalty, 200% = double penalty
-    local baseSpeedMod = cartData.runSpeedModifier
-    local basePenalty = 1 - baseSpeedMod  -- e.g., 0.30 for 30% penalty
-    local scaledPenalty = basePenalty * speedPenMult / 100
-    local newSpeedMod = math.max(0.1, 1 - scaledPenalty)  -- Clamp to min 0.1 (90% penalty max)
-    -- Store in ModData - CartStateHandler uses this for movement speed
-    modData.SaucedCarts_runSpeedModifier = newSpeedMod
-    SaucedCarts.debug(function() return "RunSpeedModifier: base=" .. baseSpeedMod .. ", applied=" .. newSpeedMod end)
 
     -- Mark as applied
     modData.SaucedCarts_multipliersApplied = true
@@ -808,6 +799,79 @@ local function applyMultipliersToPlayerCarts(player)
     return count
 end
 
+-- ============================================================================
+-- CART RUN SPEED (SpeedPenaltyMultiplier sandbox option)
+-- ============================================================================
+-- The push/run/ride speed penalty lives in the item SCRIPT's RunSpeedModifier:
+-- IsoGameCharacter.calcRunSpeedModByBag reads bag.getScriptItem()
+-- .runSpeedModifier (Java-internal, live read every speed calc), NOT the item
+-- instance or ModData. So the sandbox option must patch the shared script
+-- object per cart TYPE via DoParam — instance-level state can never work
+-- (pre-v2.1.20 versions stamped ModData that nothing read; the option was a
+-- silent no-op).
+--
+-- Why speed matters beyond pacing: vanilla cancels sprint whenever effective
+-- run speed drops below 0.4 unless the player is in ghost mode
+-- (IsoPlayer.java:2733-2741). The sprint-while-pushing state is what plays the
+-- Bob_Cart_Sprint "riding" animation, so a harsh RunSpeedModifier makes the
+-- ride unreachable in normal play. Base 0.9 leaves a healthy margin; the
+-- sandbox option lets servers dial the penalty back up.
+
+--- Pure formula: scale a cart's base run-speed modifier by the sandbox
+--- penalty multiplier. 100 = base penalty, 0 = no penalty, 500 = 5x penalty.
+--- Clamped to [0.1, 2.0] (FIELD_RANGES bounds for runSpeedModifier).
+---@param baseMod number The cart type's base runSpeedModifier (e.g. 0.9)
+---@param penaltyMult number Sandbox SpeedPenaltyMultiplier (0-500)
+---@return number The effective runSpeedModifier to stamp on the script
+function SaucedCarts.computeRunSpeedModifier(baseMod, penaltyMult)
+    local penalty = (1 - baseMod) * (penaltyMult or 100) / 100
+    local newMod = 1 - penalty
+    if newMod < 0.1 then newMod = 0.1 end
+    if newMod > 2.0 then newMod = 2.0 end
+    -- Round to 4 decimals: kills float dust (0.50000000000000004) and makes
+    -- the returned value exactly what the %.4f DoParam stamp writes.
+    return math.floor(newMod * 10000 + 0.5) / 10000
+end
+
+--- Stamp the sandbox-scaled RunSpeedModifier onto every opted-in cart type's
+--- item script. Idempotent; safe to call on every boot and sandbox change.
+--- Only types whose registry entry EXPLICITLY declared runSpeedModifier are
+--- touched (runSpeedExplicit — see CartData.registerCart): the script field
+--- has no Lua getter, so for defaulted registrations we could not know the
+--- addon's real base and stamping would silently change their speed.
+---@return number patched How many cart type scripts were stamped
+function SaucedCarts.applyCartRunSpeedSettings()
+    local penaltyMult = 100
+    if SandboxVars.SaucedCarts and SandboxVars.SaucedCarts.SpeedPenaltyMultiplier then
+        penaltyMult = SandboxVars.SaucedCarts.SpeedPenaltyMultiplier
+    end
+
+    local sm = getScriptManager and getScriptManager() or nil
+    if not sm then
+        -- Offline test kit / exotic contexts: nothing to stamp, not an error.
+        SaucedCarts.debug("applyCartRunSpeedSettings: no ScriptManager, skipping")
+        return 0
+    end
+
+    local patched = 0
+    for fullType, data in pairs(SaucedCarts.CartTypes or {}) do
+        if data.runSpeedExplicit and type(data.runSpeedModifier) == "number" then
+            local newMod = SaucedCarts.computeRunSpeedModifier(data.runSpeedModifier, penaltyMult)
+            local script = sm:getItem(fullType)
+            if script then
+                script:DoParam("RunSpeedModifier = " .. string.format("%.4f", newMod))
+                patched = patched + 1
+                SaucedCarts.debug(function() return string.format(
+                    "RunSpeedModifier: %s base=%.2f penalty=%d%% -> %.4f",
+                    fullType, data.runSpeedModifier, penaltyMult, newMod) end)
+            else
+                SaucedCarts.log("applyCartRunSpeedSettings: no script item for " .. tostring(fullType))
+            end
+        end
+    end
+    return patched
+end
+
 local function onGameStart()
     SaucedCarts.debug("Initializing SaucedCarts v" .. SaucedCarts.VERSION)
 
@@ -819,6 +883,10 @@ local function onGameStart()
     if SaucedCarts._fireEvent then
         SaucedCarts._fireEvent(SaucedCarts.Events.onRegistryFrozen, SaucedCarts.getCartTypeCount())
     end
+
+    -- Stamp sandbox-scaled run speed onto cart scripts (SandboxVars are
+    -- loaded by now; the registry is complete and frozen)
+    SaucedCarts.applyCartRunSpeedSettings()
 
     -- Log sandbox settings (debug only)
     if SandboxVars.SaucedCarts then
@@ -849,6 +917,19 @@ end
 
 -- Register initialization event
 Events.OnGameStart.Add(onGameStart)
+
+-- Dedicated servers never fire OnGameStart — stamp cart run speed from the
+-- server-side boot hook too (harmless double-apply in SP/hosted: idempotent).
+if Events.OnServerStarted then
+    Events.OnServerStarted.Add(function()
+        SaucedCarts.applyCartRunSpeedSettings()
+    end)
+end
+
+-- NOTE: there is NO vanilla "sandbox options changed" event in B42 (verified
+-- 42.20 decompile: SandboxOptions.toLua triggers nothing). Mid-game sandbox
+-- edits are picked up by the re-stamp in applyMultipliers on the next cart
+-- touch (equip/pickup/relog) — same convention as weight reduction.
 
 -- v2.1.14: Core no longer requires its submodules. PZ's directory scan
 -- loads every file under media/lua/{shared,client,server}/ regardless, and

@@ -53,7 +53,13 @@ SaucedCarts.CartTypes = {
         description = "A metal shopping cart. Great for hauling supplies from stores.",
         capacity = 50,  -- PZ caps InventoryContainer items at 50 (ItemContainer.java:155-156)
         weightReduction = 95,
-        runSpeedModifier = 0.70,
+        -- MUST match RunSpeedModifier in items_saucedcarts.txt: this is the base
+        -- the SpeedPenaltyMultiplier sandbox option scales from (the script field
+        -- has no Lua getter, so the registry is the only readable source).
+        -- 0.9 keeps sprint runSpeed above vanilla's 0.4 cancel threshold
+        -- (IsoPlayer.java:2733) so the sprint-ride animation is reachable.
+        runSpeedModifier = 0.9,
+        runSpeedExplicit = true,  -- opt in to sandbox speed scaling
         conditionMax = 100,
         baseWeight = 8.0,
         repairItem = "Base.ScrapMetal",
@@ -488,6 +494,15 @@ function SaucedCarts.registerCart(fullType, data)
         fullType,
         cartData.visualModels and "defined" or "nil"
     ) end)
+
+    -- Sandbox speed scaling is opt-in by declaration: only carts that
+    -- EXPLICITLY registered a runSpeedModifier get the SpeedPenaltyMultiplier
+    -- script patch (Core.applyCartRunSpeedSettings). Carts that fell back to
+    -- CART_DEFAULTS keep whatever their item script says — we can't read the
+    -- script's RunSpeedModifier from Lua (public field, no getter), so
+    -- stamping a defaulted registry value over it could change an addon
+    -- cart's speed at 100%.
+    cartData.runSpeedExplicit = (data.runSpeedModifier ~= nil)
 
     -- Register the cart type
     SaucedCarts.CartTypes[fullType] = cartData

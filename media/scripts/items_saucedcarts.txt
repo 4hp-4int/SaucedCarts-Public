@@ -25,7 +25,7 @@ module SaucedCarts
         Icon = ShoppingCart,
         Capacity = 50,
         WeightReduction = 95,
-        RunSpeedModifier = 0.75,
+        RunSpeedModifier = 0.9,
         RequiresEquippedBothHands = true,
         ConditionMax = 100,
         ConditionLowerChance = 25,
