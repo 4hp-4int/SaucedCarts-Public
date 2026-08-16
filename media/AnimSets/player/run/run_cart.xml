@@ -12,6 +12,16 @@
 		<m_Type>STRING</m_Type>
 		<m_Value>cart</m_Value>
 	</m_Conditions>
+	<m_Conditions>
+		<m_Name>WalkInjury</m_Name>
+		<m_Type>LESS</m_Type>
+		<m_Value>0.15</m_Value>
+	</m_Conditions>
+	<m_Conditions>
+		<m_Name>WalkInjury</m_Name>
+		<m_Type>GTR</m_Type>
+		<m_Value>-0.15</m_Value>
+	</m_Conditions>
 	<m_Transitions>
 		<m_Target>IdleCart</m_Target>
 		<m_blendInTime>0.2</m_blendInTime>

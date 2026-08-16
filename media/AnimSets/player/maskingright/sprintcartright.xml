@@ -58,4 +58,8 @@
 		<boneName>Bip01_Prop1</boneName>
 		<weight>1.00</weight>
 	</m_SubStateBoneWeights>
+	<m_SubStateBoneWeights>
+		<boneName>Bip01_R_Clavicle</boneName>
+		<weight>1.00</weight>
+	</m_SubStateBoneWeights>
 </animNode>
