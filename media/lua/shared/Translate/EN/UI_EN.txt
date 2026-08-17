@@ -40,6 +40,8 @@ UI_EN = {
     UI_SaucedCarts_CantDoThatWithCart = "I can't do that while pushing this cart.",
     UI_SaucedCarts_OrphansFound = "Found %1 broken cart(s). Right-click to recover items.",
 
+    UI_SaucedCarts_AnimLoadFailed = "Cart animations failed to load at game startup - a game bug, not your save. Quit Project Zomboid completely and relaunch it. (Exiting to the main menu is not enough - the animation cache only rebuilds on a fresh start.)",
+
     UI_SaucedCarts_CantPickupSleeping = "Cannot pick up while sleeping",
     UI_SaucedCarts_CantPushSleeping = "Cannot push while sleeping",
 

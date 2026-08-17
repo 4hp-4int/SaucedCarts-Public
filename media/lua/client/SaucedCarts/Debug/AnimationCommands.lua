@@ -44,22 +44,26 @@ function AnimationCommands.dumpAnimState()
     print("isTurningAround: " .. tostring(player:getVariableBoolean("isTurningAround")))
 
     -- Animator state
+    -- NOTE: AdvancedAnimator methods (GetDebug etc.) are NOT Kahlua-exposed
+    -- (verified 2026-08-17 — "attempted index: GetDebug of non-table"). Walk
+    -- the playing tracks via IsoGameCharacter.dbgGetAnimTrackName/Time
+    -- instead: exposed, returns "" out of bounds, never throws.
     print("\n--- ANIMATOR STATE ---")
-    local animator = player:getAdvancedAnimator()
-    if animator then
-        print("Has animator: true")
-
-        -- GetDebug() returns full state info as string
-        local debugInfo = animator:GetDebug()
-        if debugInfo then
-            print("Debug info:\n" .. tostring(debugInfo))
+    print("AnimSet name: " .. tostring(player:GetAnimSetName()))
+    print("Playing tracks (layer, track, clip, time):")
+    local any = false
+    for layer = 0, 7 do
+        for track = 0, 7 do
+            local ok, name = pcall(function() return player:dbgGetAnimTrackName(layer, track) end)
+            if ok and type(name) == "string" and name ~= "" then
+                any = true
+                local _, t = pcall(function() return player:dbgGetAnimTrackTime(layer, track) end)
+                print(string.format("  [%d,%d] %s  t=%s", layer, track, name, tostring(t)))
+            end
         end
-
-        -- Get animation set name
-        local animSetName = player:GetAnimSetName()
-        print("AnimSet name: " .. tostring(animSetName))
-    else
-        print("Has animator: false")
+    end
+    if not any then
+        print("  (no named tracks - anim clips failed to load?)")
     end
 
     -- Movement state
@@ -265,13 +269,22 @@ function AnimationCommands.dumpLayers()
     end
 
     print("========== ANIMATION LAYERS ==========")
-    -- Note: getRootLayer, getSubLayerCount, etc. are not exposed to Lua
-    -- GetDebug() provides layer info as formatted string
-    local debugInfo = animator:GetDebug()
-    if debugInfo then
-        print(tostring(debugInfo))
-    else
-        print("GetDebug() returned nil")
+    -- AdvancedAnimator.GetDebug is NOT Kahlua-exposed (crashed here,
+    -- 2026-08-17). Use the exposed per-track debug accessors instead.
+    for layer = 0, 7 do
+        local header = false
+        for track = 0, 7 do
+            local ok, name = pcall(function() return player:dbgGetAnimTrackName(layer, track) end)
+            if ok and type(name) == "string" and name ~= "" then
+                if not header then
+                    print("Layer " .. layer .. ":")
+                    header = true
+                end
+                local _, t = pcall(function() return player:dbgGetAnimTrackTime(layer, track) end)
+                local _, w = pcall(function() return player:dbgGetAnimTrackWeight(layer, track) end)
+                print(string.format("  track %d: %s  t=%s w=%s", track, name, tostring(t), tostring(w)))
+            end
+        end
     end
     print("======================================")
 end

@@ -152,6 +152,9 @@ A: Nice try, wise guy. NO.
 [b]Q: What if an addon I'm using gets removed?[/b]
 A: Orphaned carts are detected automatically! You'll get a notification and can recover your items. We THOUGHT of everything!
 
+[b]Q: I get STUCK crouching in place with the cart and can't move! (Or the animations are just missing.)[/b]
+A: That's a game bug at startup, not your save and not the mod: Steam sometimes hands the game an empty mod list for a moment, and the game builds its animation cache before our files are in it. It most often happens on the FIRST launch after a mod update, while Steam is still downloading the new files. The fix: QUIT Project Zomboid completely and relaunch it. Exiting to the main menu is NOT enough — we tested it, the animation cache only rebuilds on a fresh start. The mod detects the situation within a couple of seconds of pushing and pops up these same instructions in-game.
+
 [hr][/hr]
 
 [h1]GET ROLLING TODAY![/h1]

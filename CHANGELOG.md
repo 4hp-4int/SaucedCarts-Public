@@ -45,6 +45,40 @@ in-game admin sandbox editor instead. 11 tests in
 idempotence across boots, both gates (remove-list mode and the opt-in), the
 missing-option default, and the SandboxVars fallback.
 
+### Animation-load failure now detected, explained, and self-serviceable
+
+The recurring "cart animations don't play this session" reports are an
+engine race: at app boot Steam Workshop can return subscribed mod IDs but
+fail the item detail request (mod list momentarily empty) — most commonly on
+the first launch after a Workshop item UPDATE, while Steam is still pulling
+the new files (which is why reports spike after every release). If PZ parses
+its AnimationSet cache inside that window,
+`ZomboidFileSystem.resolveAllDirectories` misses every mod's
+`media/AnimSets` dir — the cart nodes are absent all session while the
+mod's Lua (mounted moments later) works fine. The engine's own refresh
+pipeline (`LuaManager.GlobalObject.refreshAnimSets(true)` — cache reset,
+asset reload, live-animator rebind) is not Lua-exposed, and while the
+dedicated server self-heals with it at boot (GameServer.java:842), the
+client never calls it — so a mod cannot force the reload. The cure is a
+FULL game restart — verified empirically (2026-08-17) by hiding and
+restoring the mod's anim files around a live session: exit-to-menu re-parses
+only the anim-NODE cache (`AnimationSet.Reset()`, IngameState.java:976); the
+CLIP cache — where the common "stuck crouching in place, can't move" variant
+lives, since a matched node with a dead clip yields zero root motion and B42
+movement is animation-driven — survives to app shutdown, so reloading the
+save does not help. New `AnimLoadSentinel.lua` watches for the failure
+(while pushing and moving, some playing track must be a `Bob_Cart_*` clip —
+sampled via the Lua-exposed `dbgGetAnimTrackName`, which returns "" out of
+bounds and never throws; live-validated against the reproduced field bug,
+including that dead clips produce no named tracks) and after ~1.6 seconds of
+cumulative movement attempts with zero cart clips fires a one-per-session
+modal dialog (plus halo fallback and a greppable log line) telling the
+player to fully restart. A healthy sample permanently disarms it; any
+sentinel error disarms it too — diagnostics never touch gameplay. 7 tests
+in `OfflineAnimSentinelTests.lua`. Upstream-report material: the client
+should mirror the server's boot-time `refreshAnimSets` call after mod
+mounting, and clip assets need the same treatment.
+
 ### Cart-riding (sprint) reachable in normal play; Speed Penalty option now real
 
 Field report: the stand-on-the-back-and-kick animation played in debug

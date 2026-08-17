@@ -18,6 +18,9 @@ Some servers set ItemRemovalListBlacklistToggle=true, which turns the game's Wor
 [b]A stray "Grab" option no longer shows on ground carts alongside certain mods.[/b]
 The game itself stopped offering Grab on world items in build 42, but some quality-of-life mods add the old option back, and it appeared on carts too — clicking it only got you the "can't put a grocery cart in my pocket" message. That option is now removed no matter which mod adds it, whatever it's labelled and in any language, and only when everything it points at is a cart — a mod's Grab on ordinary loot is left alone.
 
+[b]If the game eats the cart animations, we now tell you what's happening.[/b]
+Some sessions start broken: you grab a cart and get stuck crouching in place, unable to move, or the push animations are simply missing. That's a game bug at startup, not your save: Steam is sometimes slow handing the game its mod list, and the game builds its animation cache before our files are in it. We can't force a reload from mod code (the game keeps that ability to itself), and we verified that exiting to the main menu does NOT rebuild the broken part of the cache - the fix is to quit the game completely and relaunch. The mod now detects the situation within a couple of seconds of pushing and pops up a dialog saying exactly that, instead of leaving you to think the mod broke.
+
 [b]Snack break without letting go.[/b]
 You could always technically eat, drink or smoke while pushing a cart — the game never required a free hand for it — but the cart model vanished for the whole animation, which made it look broken. Now the cart stays in your right hand while the left brings the bottle, sandwich or cigarette up. Bon appetit.
 
