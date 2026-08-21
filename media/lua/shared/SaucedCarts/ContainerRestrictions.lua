@@ -95,6 +95,52 @@ end
 -- Hook ItemContainer.isItemAllowed() to block carts from non-player containers.
 -- This runs on BOTH client and server - the server validation is authoritative.
 
+--- Pure destination rule for the cart-item gate: is a CART item blocked from
+--- entering a container with this type and parent? Extracted from the
+--- __classmetatables wrapper so the rule has offline coverage (v2.1.16
+--- lesson: logic inside Java-class overrides is untestable in the kit).
+--- Reads nothing but its arguments.
+---@param containerType string|nil The container's getType()
+---@param parent any The container's parent object (userdata or table mock)
+---@return boolean blocked
+function ContainerRestrictions.isCartDestinationBlocked(containerType, parent)
+    -- FIRST: container type — most reliable for floor/vehicle detection and
+    -- critical for mod compat (e.g. Inventory Tetris) where the parent can
+    -- be unexpected but the type is always correct.
+    if containerType then
+        local typeLower = string.lower(containerType)
+        if typeLower == SaucedCarts.ContainerTypes.FLOOR then
+            return false  -- floor always allows carts (drop operations)
+        end
+        if SaucedCarts.isVehicleContainerType(containerType) then
+            return false  -- v2.1.14 vanilla parity: no server capacity block
+        end
+    end
+
+    -- SECOND: parent object
+    if instanceof(parent, "IsoGridSquare") then
+        return false  -- ground (drop operations)
+    end
+    if instanceof(parent, "IsoPlayer") then
+        -- v2.1.20: main inventory is BLOCKED. The old allowance ("needed for
+        -- pickup/equip") was a vestige: our equip pipeline moves the cart
+        -- with raw AddItem (ISCartEquipAction), which never consults
+        -- isItemAllowed, so blocking cannot break it. The allowance DID tell
+        -- every well-behaved consumer that carts belong in pockets: Picking
+        -- Meister filters on destContainer:isItemAllowed
+        -- (P4PickingMeister.lua:112), vanilla ISInventoryTransferAction:
+        -- isValid and the loot-pane Grab self-gate consult it too. Blocking
+        -- excludes carts at the source for all of them.
+        return true
+    end
+    if instanceof(parent, "BaseVehicle") or instanceof(parent, "VehiclePart") then
+        return false  -- v2.1.14 vanilla parity: no server capacity block
+    end
+
+    -- Everything else: bags, backpacks, furniture, unknown containers.
+    return true
+end
+
 local containerHookInitialized = false
 
 local function initContainerRestrictions()
@@ -122,68 +168,15 @@ local function initContainerRestrictions()
         local shouldBlock = false
 
         local checkSuccess = pcall(function()
-            -- Only check SaucedCarts carts
+            -- Only check SaucedCarts carts; the destination rule itself is
+            -- the pure isCartDestinationBlocked above (offline-tested).
             if SaucedCarts.safeIsCart(item) then
-                -- FIRST: Check container type - most reliable for floor/vehicle detection
-                -- This is critical for mod compatibility (e.g., Inventory Tetris) where
-                -- the parent object might be unexpected but container type is always correct.
                 local containerType = self:getType()
-                if containerType then
-                    local typeLower = string.lower(containerType)
-                    if typeLower == SaucedCarts.ContainerTypes.FLOOR then
-                        -- Floor container always allows carts (drop operations)
-                        shouldBlock = false
-                        SaucedCarts.debug(function() return "isItemAllowed: allowing cart to floor (type check)" end)
-                        return  -- Early exit - floor is always allowed
-                    elseif SaucedCarts.isVehicleContainerType(containerType) then
-                        -- v2.1.14 vanilla parity: vehicle containers are
-                        -- ALLOWED without a server-side capacity block.
-                        -- Vanilla's TransactionManager exempts BaseVehicle-
-                        -- parented destinations from capacity rejection; the
-                        -- client's own hasRoomFor is the vanilla gate. Our
-                        -- extra block used the raw capacity field, which is
-                        -- wrong for modded vehicles with item-backed /
-                        -- runtime-set capacities (KI5).
-                        shouldBlock = false
-                        return  -- Early exit - vehicle check complete
-                    end
-                end
-
-                -- SECOND: Check parent type for player inventory and other cases
                 local parent = safeGetParent(self)
-
-                -- Carts can go to:
-                -- 1. Ground (IsoGridSquare parent) - drop operations
-                -- 2. Vehicle containers (BaseVehicle parent) - trunk/glovebox storage
-                -- Block: player main inventory, bags, backpacks, furniture, etc.
-                if instanceof(parent, "IsoGridSquare") then
-                    -- Ground is allowed - this is a drop operation
-                    shouldBlock = false
-                elseif instanceof(parent, "IsoPlayer") then
-                    -- v2.1.20: main inventory is now BLOCKED. The old allowance
-                    -- ("needed for pickup/equip") was a vestige: our equip
-                    -- pipeline moves the cart with raw AddItem
-                    -- (ISCartEquipAction), which never consults isItemAllowed,
-                    -- so blocking here cannot break it. What the allowance DID
-                    -- do was tell every well-behaved mod that carts belong in
-                    -- pockets: Picking Meister filters its area-pickup on
-                    -- destContainer:isItemAllowed (P4PickingMeister.lua:112)
-                    -- and pocketed carts precisely because we said yes;
-                    -- vanilla ISInventoryTransferAction:isValid and the
-                    -- loot-pane Grab self-gate consult it too. Blocking makes
-                    -- all of them exclude carts at the source.
-                    shouldBlock = true
-                    SaucedCarts.debug("isItemAllowed: blocking cart -> player main inventory")
-                elseif instanceof(parent, "BaseVehicle") then
-                    -- v2.1.14 vanilla parity: allowed, no server capacity block
-                    shouldBlock = false
-                elseif instanceof(parent, "VehiclePart") then
-                    -- v2.1.14 vanilla parity: allowed, no server capacity block
-                    shouldBlock = false
-                else
-                    -- Everything else is blocked (bags, backpacks, furniture, etc.)
-                    shouldBlock = true
-                    SaucedCarts.debug(function() return "isItemAllowed: blocking cart transfer to " .. tostring(parent) .. " (type: " .. tostring(containerType) .. ")" end)
+                shouldBlock = ContainerRestrictions.isCartDestinationBlocked(containerType, parent)
+                if shouldBlock then
+                    SaucedCarts.debug(function() return "isItemAllowed: blocking cart transfer to "
+                        .. tostring(parent) .. " (type: " .. tostring(containerType) .. ")" end)
                 end
             end
         end)

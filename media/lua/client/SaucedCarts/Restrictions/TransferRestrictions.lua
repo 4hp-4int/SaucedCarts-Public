@@ -92,27 +92,6 @@ end
 
 -- Note: SaucedCarts.safeIsCart() is now centralized in Core.lua as SaucedCarts.SaucedCarts.safeIsCart()
 
---- Check if an item is in a vehicle container
---- Items in vehicles can be dropped to ground, so skip notifications for that case
----@param item InventoryItem The item to check
----@return boolean True if the item is in a vehicle container
-local function isItemInVehicle(item)
-    if not item then return false end
-
-    local success, result = pcall(function()
-        local container = item:getContainer()
-        if not container then return false end
-        local parent = container:getParent()
-        return parent and instanceof(parent, "BaseVehicle")
-    end)
-
-    if not success then
-        return false
-    end
-
-    return result == true
-end
-
 --- Check if vehicle container has room for cart (client-side UX)
 --- This is for immediate feedback - server validates authoritatively
 ---@param container ItemContainer
@@ -609,14 +588,16 @@ local function removeCartTransferOptions(player, context, items)
         end
 
         if item and SaucedCarts.safeIsCart(item) then
-            -- For carts in vehicle containers, allow Grab (transfer to player inventory is OK)
-            -- For carts elsewhere (ground loot panel), remove Grab to force "Push Cart" usage
-            if not isItemInVehicle(item) then
-                safeRemoveOption(context, "ContextMenu_Grab")
-                safeRemoveOption(context, "ContextMenu_Grab_one")
-                safeRemoveOption(context, "ContextMenu_Grab_half")
-                safeRemoveOption(context, "ContextMenu_Grab_all")
-            end
+            -- v2.1.20: Grab is removed for carts EVERYWHERE, including
+            -- vehicle containers. The old carve-out ("transfer to player
+            -- inventory is OK" for trunk carts) is contradicted by the
+            -- isItemAllowed flip — a Grab click would now be a dead option
+            -- with a toast. Retrieval from a trunk is "Push Cart" (equip via
+            -- ISCartEquipAction) or drag to the floor, both unaffected.
+            safeRemoveOption(context, "ContextMenu_Grab")
+            safeRemoveOption(context, "ContextMenu_Grab_one")
+            safeRemoveOption(context, "ContextMenu_Grab_half")
+            safeRemoveOption(context, "ContextMenu_Grab_all")
 
             safeRemoveOption(context, "ContextMenu_PutItemsInContainer")
 
