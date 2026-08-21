@@ -2,6 +2,70 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.20
+
+### Common Sense's ground "Equip" no longer pockets carts
+
+Field report (VB_CommonSense, Workshop 3750253491, v3.5.3): its world-menu
+"Equip" submenu lists every ground `InventoryContainer` — carts qualify —
+and its handler runs `transferIfNeeded` (a vanilla transfer of the cart into
+the player's MAIN inventory) followed by an `ISWearClothing` that no-ops on
+a cart, leaving the cart resting in the pocket. Main inventory is the one
+destination our server-side `isItemAllowed` deliberately permits (our own
+equip pipeline transits it — via direct `AddItem`, never via vanilla
+`ISInventoryTransferAction`, verified), and our UI guards only cover vanilla
+menu paths, so the foreign option sailed through every layer; users even saw
+our "can't fit" toast while the cart moved anyway, because the transfer-
+action hook was notification-only by design. That hook now also invalidates
+the action: any vanilla `ISInventoryTransferAction` carrying a cart into a
+player's main inventory gets a per-instance `isValid = false`, which the
+vanilla queue discards safely (the supported rejection path). Floor and
+vehicle destinations untouched — drop and trunk-stow flows verified by the
+4 new tests in `OfflineTransferRestrictionTests.lua`. Generic by
+construction: catches any mod that vanilla-transfers a cart into a pocket,
+not just Common Sense.
+
+### Root fix: `isItemAllowed` no longer tells other mods that carts belong in pockets
+
+The deeper finding behind both pocketing reports: our `isItemAllowed`
+override deliberately allowed player main inventory as a cart destination
+("needed for pickup/equip operations" per the old comment) — but that
+allowance was a vestige. Our equip pipeline moves the cart with raw
+`AddItem` (ISCartEquipAction), which never consults `isItemAllowed`, so
+blocking cannot break it. What the allowance actually did was authorize
+every well-behaved mod to pocket carts: Picking Meister filters its
+area-pickup on `destContainer:isItemAllowed` (P4PickingMeister.lua:112) and
+included carts precisely because we said yes; vanilla
+`ISInventoryTransferAction:isValid` and the loot-pane Grab self-gate consult
+it too. Main inventory is now blocked for carts — every path that consults
+`isItemAllowed` (vanilla `ISInventoryTransferAction:isValid`, the loot-pane
+Grab gate, isItemAllowed-respecting mods like Picking Meister) now excludes
+carts at the source. Suite-verified that nothing first-party relied on the
+allowance. (A polling "PocketGuard" invariant enforcer was prototyped for
+hypothetical mods that consult nothing at all, then removed as unnecessary
+once the root fix covered every observed path — players with an
+already-pocketed cart from before this fix can drop it normally.)
+
+Second confirmed pocketing chain (reporter without Common Sense, culprit
+identified 2026-08-19): a VANILLA under-validation unlocked by Nicks
+Inventory Selection Fix (3782920935). Vanilla `doGrabMenu`
+(ISInventoryPaneContextMenu.lua:4211-4236) gates the Grab option on
+`isForceDropHeavyItem` + `isItemAllowed` for only the FIRST entry of a
+multi-selection (`break` after adding), yet `onGrabItems` transfers the
+ENTIRE selection — so a selection led by ordinary loot mass-grabs a
+selected cart row past both gates. NISF itself moves nothing: it repairs
+vanilla's selection loss across `refreshContainer`, and since the loot pane
+refreshes constantly, vanilla's selection BUG had been accidentally
+shielding us by wiping multi-selections before the under-gated mass Grab
+could fire with a cart aboard. Both v2.1.20 layers kill the chain (the
+cart's transfer action is invalidated; other selected items transfer
+normally). Exonerated after full audit of the reporter's list: Picking
+Meister (targets container CONTENTS only, filters on isItemAllowed), Tidy
+Up Meister (transfers OUT of inventory only), Proximity Inventory (no
+transfer code of its own), Carry Visible Items (script-only hand models,
+no Lua), Organized Categories core + fix (category relabels / crash
+guard).
+
 ## v2.1.19
 
 ### Console WARN spam from repair/orphan menus on 42.20+

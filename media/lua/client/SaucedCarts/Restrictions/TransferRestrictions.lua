@@ -518,6 +518,25 @@ local function initTransferActionHook()
                 local isBlocked = isBlockedDestination(destContainer)
                 local capacityBlocked = isVehicle and not vehicleContainerHasRoomClient(destContainer, item)
 
+                -- Common Sense interop (VB_CommonSense 3750253491, field
+                -- report 2026-08-18): its ground "Equip" submenu lists every
+                -- InventoryContainer and runs transferIfNeeded -> vanilla
+                -- transfer of the CART into the player's MAIN inventory (its
+                -- follow-up ISWearClothing no-ops on a cart, so the cart just
+                -- rests in the pocket). Main inventory is the one destination
+                -- our server-side isItemAllowed deliberately permits (our own
+                -- equip pipeline transits it — via direct AddItem, never via
+                -- vanilla ISInventoryTransferAction, verified), so this hook
+                -- is the only gate that can see the foreign path. Kill the
+                -- action: a per-instance isValid=false makes the vanilla
+                -- queue discard it — the supported rejection path (returning
+                -- fake actions breaks queues; see hook design note above).
+                local destParent = destContainer:getParent()
+                if destParent and instanceof(destParent, "IsoPlayer") then
+                    action.isValid = function() return false end
+                    SaucedCarts.debug("Transfer action: cart->main-inventory invalidated (foreign equip path)")
+                end
+
                 if isBlocked or capacityBlocked then
                     -- Check notification cooldown
                     local cartId = item:getID()
@@ -941,6 +960,14 @@ SaucedCarts.TransferRestrictions = TransferRestrictions
 
 -- Test hook: pure discriminator that gates the transferItemsByWeight fast-path.
 TransferRestrictions._transferInvolvesCart = transferInvolvesCart
+
+-- Test hooks: install the ISInventoryTransferAction.new wrapper against a
+-- stubbed class (offline kit has no vanilla actions at file load). The reset
+-- clears the once-guard so each test can wrap a fresh stub.
+TransferRestrictions._initTransferActionHook = initTransferActionHook
+TransferRestrictions._resetTransferActionHook = function()
+    transferActionHookInitialized = false
+end
 
 -- Test hooks: the post-createMenu grab sweep's pure pieces.
 TransferRestrictions._sweepMenuForCartGrabs = sweepMenuForCartGrabs

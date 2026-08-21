@@ -88,4 +88,73 @@ tests["transferInvolvesCart_false_for_stack_wrapped_non_cart"] = function()
         "stack-wrapped plain item involves no cart")
 end
 
+-- ============================================================================
+-- ISInventoryTransferAction.new hook: foreign cart->main-inventory transfers
+-- are invalidated (VB_CommonSense "Equip from ground" interop, 2026-08-18).
+-- Main inventory is the one destination the server-side isItemAllowed must
+-- keep permitting (our equip pipeline transits it via direct AddItem), so
+-- this client hook is the only gate that sees the foreign vanilla-transfer
+-- path. Floor and vehicle destinations must stay untouched: floor is the
+-- drop flow, vehicle is the trunk-stow flow.
+-- ============================================================================
+
+local function makeDest(parentClass, containerType)
+    return {
+        -- kit instanceof recognizes table mocks by _type (same convention as
+        -- cartMock above)
+        getParent = function() return parentClass and { _type = parentClass } or nil end,
+        getType = function() return containerType or "none" end,
+        getCapacityWeight = function() return 0 end,
+        getCapacity = function() return 50 end,
+    }
+end
+
+local function installHookOnStub()
+    -- Fresh stub class per test; the module wrapper installs over it.
+    local class = {}
+    class.new = function(self, character, item, src, dest, time)
+        return { isValid = function() return "original" end }
+    end
+    _G.ISInventoryTransferAction = class
+    TR._resetTransferActionHook()
+    TR._initTransferActionHook()
+    return class
+end
+
+local function makeCharacter()
+    return { getID = function() return 1 end }
+end
+
+tests["hook_invalidates_cart_to_main_inventory"] = function()
+    local class = installHookOnStub()
+    local action = class.new(class, makeCharacter(), cartMock(),
+        makeDest("IsoGridSquare", "floor"), makeDest("IsoPlayer", "none"), 50)
+    return Assert.equal(action:isValid(), false,
+        "vanilla cart->main-inv transfer must be invalidated (queue discards it)")
+end
+
+tests["hook_leaves_non_cart_to_main_inventory_alone"] = function()
+    local class = installHookOnStub()
+    local action = class.new(class, makeCharacter(), plainItem(),
+        makeDest("IsoGridSquare", "floor"), makeDest("IsoPlayer", "none"), 50)
+    return Assert.equal(action:isValid(), "original",
+        "ordinary loot into the pocket is none of our business")
+end
+
+tests["hook_leaves_cart_to_floor_alone"] = function()
+    local class = installHookOnStub()
+    local action = class.new(class, makeCharacter(), cartMock(),
+        makeDest("IsoPlayer", "none"), makeDest("IsoGridSquare", "floor"), 50)
+    return Assert.equal(action:isValid(), "original",
+        "cart drop-to-floor must survive (the drop flow)")
+end
+
+tests["hook_leaves_cart_to_vehicle_alone"] = function()
+    local class = installHookOnStub()
+    local action = class.new(class, makeCharacter(), cartMock(),
+        makeDest("IsoGridSquare", "floor"), makeDest("BaseVehicle", "TruckBed"), 50)
+    return Assert.equal(action:isValid(), "original",
+        "cart into a vehicle trunk must survive (the stow flow)")
+end
+
 return tests

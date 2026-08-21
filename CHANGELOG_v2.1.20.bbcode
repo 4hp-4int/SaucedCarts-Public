@@ -1,0 +1,16 @@
+[h1]SaucedCarts v2.1.20[/h1]
+
+[b]Carts can no longer end up in your pocket, no matter which mod tries to put them there.[/b]
+Two separate reports this week of shopping carts sitting in a player's main inventory like a can of beans. Different mods, different code paths, same root cause: the game asks containers "is this item allowed in you?", and for your main inventory we were answering yes — a leftover from an old version of our equip code that no longer needs it. Every polite mod and the game itself took that answer at face value. We now answer no. Common Sense's ground Equip, mass-grab selections, and anything else that plays by the rules will simply skip or grey out the cart. Carts go on the ground, in your hands, or in a vehicle — the pocket was never on the list.
+
+[b]Found along the way: a base-game bug that mods can trigger.[/b]
+The game's right-click Grab on a multi-selection only safety-checks the FIRST selected row, then grabs everything. Select a pile of loot with a cart (or a generator!) among it and the whole selection gets grabbed past the checks. Mods that make multi-selection work better — like Nicks Inventory Selection Fix, which is a good mod doing its job — make this easier to hit. Our fix blocks the cart's part of the grab while the rest of your selection transfers normally; you'll see the "can't fit this cart in there" message. To be clear: that mod does nothing wrong, and neither did the others reported alongside it — we audited all six and the fault was in the base game plus our own too-generous answer.
+
+[b]Already have a cart stuck in your inventory?[/b]
+Just drop it. Dropping was never restricted, and once it's on the ground everything works as normal.
+
+[h1]Compatibility[/h1]
+[list]
+[*][b]Save-safe.[/b] No save changes, no new options, no migration. Safe to apply mid-run.
+[*]If a mod legitimately needs to move a cart into a player inventory for some reason, it can still do so with the game's low-level item calls — the block applies to the standard transfer checks. Addon authors: talk to us if this affects you.
+[/list]

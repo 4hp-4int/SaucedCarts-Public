@@ -154,15 +154,26 @@ local function initContainerRestrictions()
 
                 -- Carts can go to:
                 -- 1. Ground (IsoGridSquare parent) - drop operations
-                -- 2. Player's main inventory (IsoPlayer parent) - pickup/equip operations
-                -- 3. Vehicle containers (BaseVehicle parent) - trunk/glovebox storage
-                -- Block: bags, backpacks, furniture, etc.
+                -- 2. Vehicle containers (BaseVehicle parent) - trunk/glovebox storage
+                -- Block: player main inventory, bags, backpacks, furniture, etc.
                 if instanceof(parent, "IsoGridSquare") then
                     -- Ground is allowed - this is a drop operation
                     shouldBlock = false
                 elseif instanceof(parent, "IsoPlayer") then
-                    -- Player's main inventory is allowed - needed for pickup/equip
-                    shouldBlock = false
+                    -- v2.1.20: main inventory is now BLOCKED. The old allowance
+                    -- ("needed for pickup/equip") was a vestige: our equip
+                    -- pipeline moves the cart with raw AddItem
+                    -- (ISCartEquipAction), which never consults isItemAllowed,
+                    -- so blocking here cannot break it. What the allowance DID
+                    -- do was tell every well-behaved mod that carts belong in
+                    -- pockets: Picking Meister filters its area-pickup on
+                    -- destContainer:isItemAllowed (P4PickingMeister.lua:112)
+                    -- and pocketed carts precisely because we said yes;
+                    -- vanilla ISInventoryTransferAction:isValid and the
+                    -- loot-pane Grab self-gate consult it too. Blocking makes
+                    -- all of them exclude carts at the source.
+                    shouldBlock = true
+                    SaucedCarts.debug("isItemAllowed: blocking cart -> player main inventory")
                 elseif instanceof(parent, "BaseVehicle") then
                     -- v2.1.14 vanilla parity: allowed, no server capacity block
                     shouldBlock = false
