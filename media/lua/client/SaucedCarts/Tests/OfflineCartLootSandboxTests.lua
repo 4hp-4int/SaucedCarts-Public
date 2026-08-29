@@ -265,20 +265,69 @@ tests["fill_skips_items_banned_by_the_removal_list"] = function()
         and Assert.equal(weight, 0, "no weight added")
 end
 
-tests["fill_thins_out_on_a_rare_loot_world"] = function()
-    -- Modifier 0.5 -> keep while rng(1000) < 500. pickWeighted consumes one
-    -- rng per item first (single-entry pool, any value picks it), then
-    -- rollKeep consumes one. Script the pairs: keep, skip, keep, skip.
+tests["fill_redirects_rather_than_thins_on_a_rare_loot_world"] = function()
+    -- REWEIGHT, not reject (2026-08-29 balance decision). Suppression used to
+    -- pick an item and then bin it, and the binned pick still consumed one of
+    -- `count` — so a firearms-suppressed survivor cache arrived close to
+    -- EMPTY. A cart is meant to be a reward, so a suppressed category should
+    -- redirect the budget instead of deleting it.
+    --
+    -- Now the modifier scales the PICK WEIGHT at pool-build time. A partially
+    -- suppressed context still fills its count; only the composition shifts.
     local placed
     withPD({ GigamartCannedFood = { items = { "Base.TinnedSoup", 10 } } }, function()
         withItemStub(1, function()
             local cart = makeCart(500)
             placed = CartLoot.fillCart(cart, "grocery", "loaded", 4,
-                scriptRng({ 0, 100, 0, 900, 0, 100, 0, 900 }),
+                scriptRng({ 0, 0, 0, 0 }),
                 modFnFor({ ["Base.TinnedSoup"] = 0.5 }))
         end)
     end)
-    return Assert.equal(placed, 2, "half the picks survive a 0.5 loot modifier (got " .. tostring(placed) .. ")")
+    return Assert.equal(placed, 4,
+        "a 0.5 modifier no longer eats picks; the cart still fills (got "
+        .. tostring(placed) .. ")")
+end
+
+tests["fill_suppressed_category_loses_share_to_the_rest"] = function()
+    -- The composition half of the same decision. Two items, equal base weight,
+    -- one suppressed to 0.1 — the survivor should dominate the pool. Asserted
+    -- on the POOL rather than by sampling, so it is deterministic.
+    local weights
+    withPD({ GigamartCannedFood = { items = {
+        "Base.TinnedSoup", 10,
+        "Base.Pistol",     10,
+    } } }, function()
+        local pool = CartLoot.buildWeightedPool({ "GigamartCannedFood" },
+            modFnFor({ ["Base.TinnedSoup"] = 1.0, ["Base.Pistol"] = 0.1 }))
+        weights = {}
+        for _, e in ipairs(pool) do weights[e.type] = e.weight end
+    end)
+
+    if not Assert.equal(weights["Base.TinnedSoup"], 10,
+        "unsuppressed item keeps its full weight") then return false end
+    return Assert.equal(weights["Base.Pistol"], 1,
+        "suppressed item is scaled down but still reachable")
+end
+
+tests["fill_fully_suppressed_context_yields_an_empty_cart"] = function()
+    -- The edge case the handover doc asked to pin. Under the old reject path
+    -- this emptied out by binning every pick; under reweighting the pool comes
+    -- back empty and fillCart returns early on the #pool == 0 guard. Same
+    -- outcome, different code path — and the hard guarantee (modifier 0 NEVER
+    -- spawns) is preserved either way.
+    local placed, weight
+    withPD({ GigamartCannedFood = { items = { "Base.TinnedSoup", 10 } } }, function()
+        withItemStub(1, function()
+            local cart = makeCart(500)
+            placed, weight = CartLoot.fillCart(cart, "grocery", "loaded", 4,
+                scriptRng({ 0, 0, 0, 0 }),
+                modFnFor({ ["Base.TinnedSoup"] = 0 }))
+        end)
+    end)
+    if not Assert.equal(placed, 0, "nothing is placed from a fully banned context") then
+        return false
+    end
+    return Assert.equal(weight, 0, "and no weight is consumed")
 end
 
 tests["fill_unchanged_on_a_normal_loot_world"] = function()
@@ -340,6 +389,121 @@ tests["pad_ignores_category_rarity_for_junk"] = function()
     end)
     return Assert.isTrue(count > 0, "junk still pads on a rare-loot world (got " .. count .. ")")
         and Assert.isTrue(finalW >= 16.5, "reaches the partial target (got " .. finalW .. ")")
+end
+
+-- ============================================================================
+-- OnCreate placeholders (spawner stubs) never enter the pool
+-- ============================================================================
+-- Guns of Marz injects `*_Spawner` stubs straight into GunStoreGuns and
+-- ArmyStorageGuns — two of the three lists the "survivor" context draws from.
+-- They are base:weapon with no Ranged, so the sandbox gate classifies them as
+-- MELEE and a firearms-suppressed server still gets guns in survivor carts.
+-- They also resolve a TICK LATER off an OnTick queue, so fillCart measures a
+-- stub's weight and WorldSpawning picks the cart's visual model from it.
+--
+-- Filtering on OnCreate (Item.getLuaCreate, java-api index:101) needs no
+-- knowledge of any specific mod.
+
+--- Stub getScriptManager():FindItem(t):getLuaCreate(). `withCreate` is a set
+--- of full types that carry an OnCreate handler.
+local function withScriptManager(withCreate, fn)
+    local orig = _G.getScriptManager
+    _G.getScriptManager = function()
+        return {
+            FindItem = function(_, typ)
+                return { getLuaCreate = function() return withCreate[typ] end }
+            end,
+        }
+    end
+    local ok, err = pcall(fn)
+    _G.getScriptManager = orig
+    if not ok then error(err) end
+end
+
+tests["pool_excludes_oncreate_placeholder_items"] = function()
+    local types = {}
+    withScriptManager({ ["MarzGuns.World_Army_Rifle_Spawner"] = "MarzGuns_OnCreate.SelectItem" }, function()
+        withPD({ ArmyStorageGuns = { items = {
+            "MarzGuns.World_Army_Rifle_Spawner", 15,
+            "Base.Pistol",                       10,
+        } } }, function()
+            local pool = CartLoot.buildWeightedPool({ "ArmyStorageGuns" })
+            for _, e in ipairs(pool) do types[e.type] = true end
+        end)
+    end)
+    if not Assert.isTrue(types["Base.Pistol"],
+        "a normal item is still in the pool") then return false end
+    return Assert.isFalse(types["MarzGuns.World_Army_Rifle_Spawner"] or false,
+        "the OnCreate spawner stub never enters the pool")
+end
+
+tests["pool_lookup_failure_does_not_empty_the_pool"] = function()
+    -- Fail-safe. No script manager (offline, early boot) must mean "treat as a
+    -- normal item", never "filter everything" — that would silently produce
+    -- empty carts everywhere.
+    local n
+    withPD({ ArmyStorageGuns = { items = { "Base.Pistol", 10 } } }, function()
+        local orig = _G.getScriptManager
+        _G.getScriptManager = nil
+        n = #CartLoot.buildWeightedPool({ "ArmyStorageGuns" })
+        _G.getScriptManager = orig
+    end)
+    return Assert.equal(n, 1, "unreachable script manager leaves the pool intact")
+end
+
+-- ============================================================================
+-- Junk padding prefers the context's own tables
+-- ============================================================================
+
+tests["pad_prefers_the_contexts_own_junk"] = function()
+    -- All 1350 vanilla tables carry a junk block; 292 are non-empty. A grocery
+    -- cart padded with a dishcloth reads better than one padded with planks.
+    local placedTypes = {}
+    withPD({
+        GigamartCannedFood = { items = { "Base.TinnedSoup", 10 },
+                               junk  = { rolls = 1, items = { "Base.DishCloth", 10 } } },
+    }, function()
+        local orig = instanceItem
+        instanceItem = function(typ)
+            placedTypes[#placedTypes + 1] = typ
+            return F.item({ id = 970000 + #placedTypes, fullType = typ, weight = 3 })
+        end
+        local cart = makeCart(50)
+        CartLoot.padToFillState(cart, 0.33, zeroRng, modFnFor(nil, 1.0), "grocery")
+        instanceItem = orig
+    end)
+
+    if not Assert.isTrue(#placedTypes > 0, "padding actually placed something") then
+        return false
+    end
+    for _, t in ipairs(placedTypes) do
+        if t ~= "Base.DishCloth" then
+            return Assert.equal(t, "Base.DishCloth",
+                "padding drew from the context's junk table, not JUNK_POOL")
+        end
+    end
+    return Assert.isTrue(true, "every padded item came from the context's junk table")
+end
+
+tests["pad_falls_back_to_global_junk_when_context_has_none"] = function()
+    -- The common case: ~78% of vanilla junk blocks are empty.
+    local placedTypes = {}
+    withPD({
+        GigamartCannedFood = { items = { "Base.TinnedSoup", 10 }, junk = { items = {} } },
+    }, function()
+        local orig = instanceItem
+        instanceItem = function(typ)
+            placedTypes[#placedTypes + 1] = typ
+            return F.item({ id = 971000 + #placedTypes, fullType = typ, weight = 3 })
+        end
+        local cart = makeCart(50)
+        CartLoot.padToFillState(cart, 0.33, zeroRng, modFnFor(nil, 1.0), "grocery")
+        instanceItem = orig
+    end)
+
+    if not Assert.isTrue(#placedTypes > 0, "padding still happened") then return false end
+    return Assert.isFalse(placedTypes[1] == "Base.DishCloth",
+        "an empty context junk block falls back to the global JUNK_POOL")
 end
 
 return tests

@@ -191,6 +191,51 @@ spawning nothing. The sandbox read happens per spawn rather than being cached,
 because `getCurrentLootMultiplier` is a function of world age and an admin can
 retune mid-session.
 
+### Cart loot: reweight instead of reject, thematic junk, no spawner stubs
+
+Three findings from the CartLoot review (`docs/HANDOVER_CARTLOOT_REVIEW.md`).
+
+**Sandbox rarity is now folded into the pick weight rather than applied as a
+pick-then-reject roll.** The old shape picked an item and binned it on a failed
+roll, and the binned pick still consumed one of the tier's `count` — so
+suppression made carts *thinner* rather than differently composed, and a
+firearms-suppressed survivor cache arrived close to empty. `buildWeightedPool`
+now takes the modifier and scales each entry's weight by it, and `fillCart` no
+longer calls `rollKeep` (applying both would double-dip). Aggregate odds for any
+given suppressed item are unchanged; only substitution differs. The hard
+guarantee is preserved by construction: modifier 0 means weight 0 means the
+entry never enters the pool, so removal-list and category-None items still never
+spawn. A fully suppressed context now returns early on the `#pool == 0` guard
+instead of emptying out by binning every pick — same outcome, different path,
+pinned by `fill_fully_suppressed_context_yields_an_empty_cart`. Scaling is
+downward only; a modifier above 1.0 does not inflate past the tier's budget.
+
+**`OnCreate` placeholder items are excluded from the pool.** Several weapon
+packs inject stubs into vanilla distribution lists — Guns of Marz puts
+`*_Spawner` entries into `GunStoreGuns` and `ArmyStorageGuns`, two of the three
+lists the `survivor` context draws from. They break cart loot twice over. The
+sandbox gate reads the wrong item: a stub is `base:weapon` with no `Ranged` and
+no ammo type, so `getLootType` classifies it as *melee* and a server that set
+firearms to Extremely Rare still gets guns in survivor carts. And the stub
+resolves a tick later off an `OnTick` retry queue (at `instanceItem` time it has
+no container yet), so `fillCart` measures a placeholder's weight and
+`WorldSpawning` picks the cart's visual model from it — a cart can render nearly
+empty and then quietly contain a rifle, a magazine and two boxes of ammo.
+`CartLoot.isPlaceholderItem` filters on `Item.getLuaCreate()`, which is
+Lua-exposed, so this needs no knowledge of any specific mod and costs nothing
+real: the spawner families duplicate guns already reachable from the same lists.
+A lookup failure is treated as "normal item" — never as "filter everything",
+which would silently produce empty carts.
+
+**Junk padding prefers the context's own tables.** Every vanilla distribution
+table carries a `junk` sub-table beside `items` and we only ever read `items`.
+Measured across all 1350 tables in `ProceduralDistributions`: all 1350 have a
+junk block, 292 are non-empty (Paperwork in 91, DishCloth in 40, Doodle in 33).
+That is thematic, per-container clutter — exactly what the global `JUNK_POOL`
+approximates. `padToFillState` takes an optional `contextKey` and draws from
+`buildJunkPool` when the context has any, falling back to `JUNK_POOL` for the
+~78% that do not. `WorldSpawning` passes `request.context`.
+
 ### Technical
 
 - Cart-push pose release is now covered. `OfflineCartPoseReleaseTests.lua` (new)

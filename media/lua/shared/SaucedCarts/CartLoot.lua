@@ -285,26 +285,123 @@ end
 --- (or a missing ProceduralDistributions global, e.g. offline) are skipped.
 ---@param names string[]
 ---@return table[]
-function CartLoot.buildWeightedPool(names)
+--- Does this item type only exist to turn into something else on creation?
+---
+--- `OnCreate = Foo.Bar` in an item script is stored as Item.luaCreate and
+--- fires at instantiation (InventoryItem.java:4558). Several weapon packs use
+--- it for placeholder entries injected straight into vanilla distribution
+--- lists — Guns of Marz puts `*_Spawner` stubs into GunStoreGuns and
+--- ArmyStorageGuns, which the "survivor" context draws from.
+---
+--- They break cart loot two ways:
+---   * the sandbox gate reads the WRONG item. A spawner stub is base:weapon
+---     with no Ranged and no ammo type, so getLootType classifies it as MELEE
+---     — a server that set firearms to Extremely Rare still gets guns in
+---     survivor carts, scaled by the melee slider instead.
+---   * it resolves a TICK LATER, off an OnTick retry queue, because at
+---     instanceItem time the item has no container yet. fillCart therefore
+---     measures a stub's weight, and WorldSpawning picks the cart's visual
+---     model from that — so a cart can look near-empty and then quietly
+---     contain a rifle, a magazine and two boxes of ammo.
+---
+--- Filtering by OnCreate rather than by name needs no knowledge of any
+--- specific mod, and costs nothing real: the spawner families duplicate guns
+--- already reachable from the same lists.
+---@param itemType string full type
+---@return boolean
+function CartLoot.isPlaceholderItem(itemType)
+    if not itemType then return false end
+    local ok, luaCreate = pcall(function()
+        local script = getScriptManager and getScriptManager():FindItem(itemType)
+        return script and script.getLuaCreate and script:getLuaCreate()
+    end)
+    -- Unreachable script manager (offline tests, early boot) => treat as a
+    -- normal item. Never silently empty the pool on a lookup failure.
+    if not ok then return false end
+    return type(luaCreate) == "string" and luaCreate ~= ""
+end
+
+--- Walk a flat `type1, weight1, type2, weight2, ...` distribution array into
+--- weighted pool entries, applying the sandbox gate as a WEIGHT rather than a
+--- later coin flip. See buildWeightedPool for why.
+---@param items table flat array
+---@param pool table accumulator
+---@param modFn function|nil (itemType, isJunk) -> modifier
+---@param isJunk boolean
+local function absorbDistArray(items, pool, modFn, isJunk)
+    if type(items) ~= "table" then return end
+    local i, n = 1, #items
+    while i + 1 <= n do
+        local t = items[i]
+        local w = tonumber(items[i + 1]) or 1
+        if type(t) == "string" and w > 0 and not CartLoot.isPlaceholderItem(t) then
+            if modFn then
+                local m = modFn(t, isJunk)
+                if type(m) ~= "number" then m = 1 end
+                -- 0 (removal list / category None) drops the entry outright:
+                -- the same hard guarantee the old reject path gave.
+                -- Above 1 is NOT allowed to inflate — scaling is downward only,
+                -- matching the tier's weight budget.
+                if m > 0 then
+                    pool[#pool + 1] = { type = t, weight = w * (m < 1 and m or 1) }
+                end
+            else
+                pool[#pool + 1] = { type = t, weight = w }
+            end
+        end
+        i = i + 2
+    end
+end
+
+--- Build the weighted pick pool for a set of distribution list names.
+---
+--- SANDBOX RARITY IS FOLDED INTO THE WEIGHT, not applied as a pick-then-reject
+--- roll. The old shape picked an item and then binned it on a failed roll,
+--- which consumed one of the tier's `count` either way — so suppression made
+--- carts THINNER rather than differently composed, and a firearms-suppressed
+--- survivor cache arrived close to empty. A cart is meant to be a reward; a
+--- suppressed category should redirect the budget, not delete it.
+---
+--- Aggregate odds for any given suppressed item are unchanged. What changes is
+--- the substitution behaviour: the cart still fills from whatever remains, so
+--- firearms-off yields a cache of ammo and gear instead of nothing.
+---@param names table list of ProceduralDistributions.list keys
+---@param modFn function|nil loot-modifier lookup; omitted = no scaling
+---@return table pool
+function CartLoot.buildWeightedPool(names, modFn)
     local pool = {}
     local PD = ProceduralDistributions
     if type(PD) ~= "table" or type(PD.list) ~= "table" then return pool end
     for _, name in ipairs(names) do
         local dist = PD.list[name]
-        local items = dist and dist.items
-        if type(items) == "table" then
-            -- items is a flat array: type1, weight1, type2, weight2, ...
-            local i = 1
-            local n = #items
-            while i + 1 <= n do
-                local t = items[i]
-                local w = tonumber(items[i + 1]) or 1
-                if type(t) == "string" and w > 0 then
-                    pool[#pool + 1] = { type = t, weight = w }
-                end
-                i = i + 2
-            end
-        end
+        absorbDistArray(dist and dist.items, pool, modFn, false)
+    end
+    return pool
+end
+
+--- Build a junk pool from the CONTEXT'S OWN distribution tables.
+---
+--- Every vanilla table carries a `junk` sub-table beside `items` and we never
+--- read it: measured across all 1350 tables in ProceduralDistributions, all
+--- 1350 have a junk block and 292 are non-empty (Paperwork in 91, DishCloth in
+--- 40, Doodle in 33, the character photos in 24 each). That is thematic,
+--- per-container clutter — exactly what the global JUNK_POOL approximates.
+--- A grocery cart padded with a dishcloth and paperwork reads better than one
+--- padded with planks and jars.
+---
+--- Returns an empty pool for the ~78% of contexts whose junk blocks are all
+--- empty; padToFillState falls back to JUNK_POOL there.
+---@param names table list of ProceduralDistributions.list keys
+---@param modFn function|nil loot-modifier lookup
+---@return table pool
+function CartLoot.buildJunkPool(names, modFn)
+    local pool = {}
+    local PD = ProceduralDistributions
+    if type(PD) ~= "table" or type(PD.list) ~= "table" then return pool end
+    for _, name in ipairs(names) do
+        local dist = PD.list[name]
+        local junk = dist and dist.junk
+        absorbDistArray(junk and junk.items, pool, modFn, true)
     end
     return pool
 end
@@ -348,22 +445,22 @@ function CartLoot.fillCart(cartItem, contextKey, tier, count, rng, modFn)
     local container = cartItem.getItemContainer and cartItem:getItemContainer()
     if not container or not container.AddItem then return 0, 0 end
 
-    local poolKey = (tier == "survivor") and "survivor" or contextKey
-    local pool = CartLoot.buildWeightedPool(CartLoot.poolFor(poolKey))
-    if #pool == 0 then return 0, 0 end
-
     modFn = modFn or CartLoot.lootModifierFor
+
+    local poolKey = (tier == "survivor") and "survivor" or contextKey
+    -- Sandbox rarity is applied HERE, as pick weight. Do not also roll per
+    -- pick — that would apply the modifier twice. A fully suppressed context
+    -- yields an empty pool and returns early on the guard below, which is the
+    -- same outcome the old reject path reached by binning every pick.
+    local pool = CartLoot.buildWeightedPool(CartLoot.poolFor(poolKey), modFn)
+    if #pool == 0 then return 0, 0 end
 
     local budget = WEIGHT_BUDGET[tier] or 10
     local placed, weightUsed = 0, 0
     for _ = 1, (count or 0) do
         if weightUsed >= budget then break end
         local typ = CartLoot.pickWeighted(pool, rng)
-        -- Sandbox loot rarity, per item, exactly as a vanilla container would
-        -- see it: a rejected pick is simply not placed. A harder world
-        -- therefore yields a thinner cart rather than a differently-themed
-        -- one — we never re-roll to "make up" the count.
-        if typ and CartLoot.rollKeep(modFn(typ, false), rng) then
+        if typ then
             local li = instanceItem(typ)
             if li then
                 local w = (li.getActualWeight and li:getActualWeight())
@@ -402,7 +499,7 @@ end
 ---             but a filler type on the admin removal list is still skipped.
 ---@return number junkCount
 ---@return number junkWeight
-function CartLoot.padToFillState(cartItem, targetRatio, rng, modFn)
+function CartLoot.padToFillState(cartItem, targetRatio, rng, modFn, contextKey)
     if not cartItem or not targetRatio then return 0, 0 end
     local container = cartItem.getItemContainer and cartItem:getItemContainer()
     if not container or not container.AddItem or not container.getCapacity then
@@ -413,16 +510,31 @@ function CartLoot.padToFillState(cartItem, targetRatio, rng, modFn)
 
     modFn = modFn or CartLoot.lootModifierFor
 
+    -- Prefer the CONTEXT'S own junk (thematic, per-container) and fall back to
+    -- the global JUNK_POOL, which is the common case — about 78% of vanilla
+    -- junk blocks are empty. Placeholder and zero-modifier entries are already
+    -- filtered out during pool construction.
+    local ctxJunk = contextKey and CartLoot.buildJunkPool(CartLoot.poolFor(contextKey), modFn) or nil
+    local useCtx = ctxJunk and #ctxJunk > 0
+
     local target = targetRatio * capacity
     local junkCount, junkWeight, guard = 0, 0, 0
     while container:getCapacityWeight() < target
         and junkWeight < JUNK_WEIGHT_CAP
         and guard < JUNK_MAX_ITEMS do
         guard = guard + 1
-        local typ = JUNK_POOL[1 + rng(#JUNK_POOL)]
-        -- Banned filler is skipped, not substituted: the guard counter still
-        -- advances, so an all-banned JUNK_POOL terminates instead of spinning.
-        if typ and modFn(typ, true) <= 0 then typ = nil end
+        local typ
+        if useCtx then
+            typ = CartLoot.pickWeighted(ctxJunk, rng)
+        else
+            typ = JUNK_POOL[1 + rng(#JUNK_POOL)]
+            -- The global pool is a bare list, so it still needs the gate here.
+            -- Junk bypasses category rarity (vanilla's isJunk clamp) but must
+            -- still obey the removal list. Banned filler is skipped, not
+            -- substituted: the guard counter still advances, so an all-banned
+            -- JUNK_POOL terminates instead of spinning.
+            if typ and not CartLoot.rollKeep(modFn(typ, true), rng) then typ = nil end
+        end
         local li = typ and instanceItem(typ)
         if li then
             local w = (li.getActualWeight and li:getActualWeight())

@@ -405,8 +405,12 @@ local function processSpawnQueue()
                     -- its own, especially with a big CapacityMultiplier. Capped
                     -- so a huge cart isn't stuffed. See CartLoot.padToFillState.
                     local targetRatio = SaucedCarts.CartLoot.fillTargetFor(load.tier)
+                    -- Context passed so the padding can draw from THIS
+                    -- container family's own junk tables (a grocery cart gets
+                    -- dishcloths and paperwork, not planks) and only fall back
+                    -- to the global JUNK_POOL when they are empty.
                     local junkCount, junkWeight = SaucedCarts.CartLoot.padToFillState(
-                        item, targetRatio, ZombRand)
+                        item, targetRatio, ZombRand, nil, request.context)
 
                     -- Canonical capacity-based visual (same path as in-game fills)
                     -- now reflects loot + junk. updateCartVisual sets the model +
