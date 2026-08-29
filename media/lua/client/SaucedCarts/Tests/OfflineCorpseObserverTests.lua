@@ -217,11 +217,15 @@ tests["server_load_handler_broadcasts_removeGhostCorpse_with_ghost_id"] = functi
         ghostX = 0, ghostY = 0, ghostZ = 0,
     })
 
-    -- Read captured broadcasts.
+    -- Read captured broadcasts. Select the ZOMBIE-kind purge explicitly: the
+    -- handler now also emits a body-kind purge for the corpse it publishes at
+    -- the load site, so "last removeGhostCorpse wins" would grab the wrong one.
     local broadcasts = Net.getCapturedBroadcasts()
     local removeGhostBroadcast = nil
     for _, b in ipairs(broadcasts) do
-        if b.command == "removeGhostCorpse" then removeGhostBroadcast = b end
+        if b.command == "removeGhostCorpse" and b.args.kind == "zombie" then
+            removeGhostBroadcast = b
+        end
     end
 
     Net.disableTestMode()
@@ -231,12 +235,14 @@ tests["server_load_handler_broadcasts_removeGhostCorpse_with_ghost_id"] = functi
     w:teardown()
 
     if not Assert.isTrue(ok, "load handler succeeded") then return false end
-    if not Assert.isTrue(removeGhostBroadcast ~= nil,
-        "server broadcasts removeGhostCorpse after load") then return false end
-    if not Assert.equal(removeGhostBroadcast.args.bodyId, 12345,
-        "broadcast carries zombie's onlineId so each client can purge") then return false end
-    return Assert.equal(removeGhostBroadcast.args.kind, "zombie",
-        "broadcast carries kind='zombie' for clients to dispatch via cell.getZombieList")
+    -- INVERTED 2026-08-29. The server used to broadcast a zombie-kind purge so
+    -- every client would destroy its grapple wrapper. That wrapper is the id
+    -- carrier vanilla needs to clean up each client's own stale body, so the
+    -- broadcast was asking clients to break their own cleanup. It is gone.
+    -- kind="body" is still broadcast (no wrapper, no vanilla carrier) and is
+    -- covered by the body-purge tests below.
+    return Assert.isTrue(removeGhostBroadcast == nil,
+        "no zombie-kind purge is broadcast — vanilla owns wrapper cleanup")
 end
 
 --- Build a getCell() mock exposing one grapple-wrapper zombie plus an
@@ -292,30 +298,43 @@ local function installGhostCell(opts)
     return env
 end
 
-tests["client_never_purges_wrapper_synchronously"] = function()
-    -- THE v2.1.16 FIX. The zombie branch used to remove the wrapper the
-    -- instant the broadcast landed. That wrapper carries reanimatedBodyId,
-    -- which vanilla's ZombieOnGroundState reads to purge this client's
-    -- stranded ghost body (ZombieOnGroundState.java:56, :115) — so killing
-    -- it early killed the only cleanup, leaving a body on the ground while
-    -- the corpse sat in the cart. That body kept counting toward CorpseCount,
-    -- so corpse sickness never cleared either.
+tests["client_never_touches_the_grapple_wrapper"] = function()
+    -- THE CONTRACT, as settled by live measurement 2026-08-29. We do not
+    -- remove the grapple wrapper. Ever. Not synchronously, not on a deferral.
     --
-    -- Contract: the wrapper MUST survive the handler call.
+    -- The wrapper carries the original body's ObjectID in its replicated
+    -- reanimatedBodyId (IsoDeadBody.java:2045 -> NetworkZombieAI:182 ->
+    -- ZombiePacket), and every client uses it to clean up its OWN stale copy
+    -- via IsoDeadBody.removeDeadBody once the wrapper reaches
+    -- ZombieOnGroundState (:56-57, :115-116). Destroying the wrapper destroys
+    -- that carrier, so the body we were trying to clear gets stranded instead.
+    --
+    -- v2.1.16 tried to solve this with a 60-tick deferral. That did not make
+    -- it safe, only less likely: across live runs the wrapper was sometimes
+    -- gone by tick 60 and sometimes still present, so it was a race with a
+    -- varying outcome. A dry run had BOTH clients still holding the wrapper at
+    -- expiry — meaning the live purge would have destroyed the carrier on the
+    -- observer, the one client that actually had a stale body.
+    --
+    -- Verified with the purge removed: nothing leaks. Server showed zero
+    -- wrappers and zero bodies near the grab site; both players confirmed
+    -- nothing visible. Vanilla clears the body AND retires the wrapper.
+    --
+    -- If this test fails, someone re-added the purge. Read the block in
+    -- CorpseStorage.lua before "fixing" it.
     local env = installGhostCell({ onlineId = 999 })
 
     CS.handleRemoveGhostCorpse({ bodyId = 999, kind = "zombie",
         x = 0, y = 0, z = 0 })
-
-    local purgedEarly = env.removed.fromWorld
     CS._flushGhostPurges()   -- production drains via Events.OnTick
     env.restore()
 
-    if not Assert.isTrue(purgedEarly == false,
-        "wrapper left alive so vanilla gets its cleanup window") then return false end
-    if not Assert.isTrue(env.removed.fromWorld,
-        "wrapper purged once the deferral expires") then return false end
-    return Assert.isTrue(env.removed.fromSquare, "removeFromSquare called on deferred purge")
+    if not Assert.isFalse(env.removed.fromWorld,
+        "wrapper is never removed from the world") then return false end
+    if not Assert.isFalse(env.removed.fromSquare,
+        "wrapper is never removed from its square") then return false end
+    return Assert.equal(#CS._pendingGhostPurges, 0,
+        "and nothing is left queued against it")
 end
 
 tests["client_defers_regardless_of_extra_payload_fields"] = function()
@@ -337,8 +356,9 @@ tests["client_defers_regardless_of_extra_payload_fields"] = function()
     if not Assert.isTrue(purgedEarly == false,
         "stale id fields do not re-enable a synchronous wrapper purge") then return false end
     if not Assert.isTrue(env.removedBody == nil,
-        "no body is removed by id — that path is gone, vanilla owns the ghost") then return false end
-    return Assert.isTrue(env.removed.fromWorld, "wrapper still retired on the deferral")
+        "no body is removed by id — vanilla owns the grab-site ghost") then return false end
+    return Assert.isFalse(env.removed.fromWorld,
+        "and the wrapper is still not touched on the deferral either")
 end
 
 tests["client_deferral_survives_missing_zombie_at_expiry"] = function()
@@ -365,6 +385,122 @@ tests["client_deferral_survives_missing_zombie_at_expiry"] = function()
 
     if not Assert.isTrue(ok, "draining a vanished wrapper does not error") then return false end
     return Assert.equal(drained, 0, "queue is emptied even when the wrapper is already gone")
+end
+
+--- Build a getCell() mock with one square holding one body, where the body's
+--- per-VM getID() and its network-stable ObjectID deliberately DISAGREE.
+--- `appearsAfter` delays the body's arrival by N purge attempts, standing in
+--- for an AddCorpseToMapPacket that has not been processed yet.
+local function installBodyCell(opts)
+    local env = { attempts = 0 }
+    local live, appearsAfter = true, opts.appearsAfter or 0
+
+    env.body = {
+        _type = "IsoDeadBody",
+        getID              = function() return opts.legacyId or -999 end,
+        getObjectIDAsLong  = function() return opts.objectId end,
+    }
+    local sq = {
+        getDeadBodys = function()
+            env.attempts = env.attempts + 1
+            local present = live and env.attempts > appearsAfter
+            return {
+                size = function() return present and 1 or 0 end,
+                get  = function() return env.body end,
+            }
+        end,
+        removeCorpse = function(self, b, bRemote)
+            env.removedBody, env.removedRemote = b, bRemote
+            live = false
+        end,
+    }
+
+    local prevGetCell = _G.getCell
+    _G.getCell = function()
+        return {
+            getZombieList = function()
+                return { size = function() return 0 end, get = function() return nil end }
+            end,
+            getObjectList = function() return { remove = function() end } end,
+            getGridSquare = function(self, x, y, z)
+                return (x == 7 and y == 8 and z == 0) and sq or nil
+            end,
+        }
+    end
+    env.restore = function() _G.getCell = prevGetCell end
+    return env
+end
+
+tests["client_body_purge_matches_object_id_not_per_vm_id"] = function()
+    -- IsoMovingObject.getID() is a static per-VM counter (IsoMovingObject.java:
+    -- 95, :161), so the server's id for a body means nothing on a client.
+    -- ObjectID is the key vanilla itself uses for corpse packets and the one
+    -- AddCorpseToMapPacket (:55, :85) stamps onto the client's copy.
+    --
+    -- Sensitivity: against the old getID()-only match this fails — the body's
+    -- getID() is -999 and the broadcast carries 4321.
+    local env = installBodyCell({ objectId = 4321, legacyId = -999 })
+
+    CS.handleRemoveGhostCorpse({ bodyId = 4321, kind = "body", x = 7, y = 8, z = 0 })
+    CS._flushGhostPurges()
+    env.restore()
+
+    if not Assert.equal(env.removedBody, env.body,
+        "body matched by ObjectID and removed") then return false end
+    return Assert.isTrue(env.removedRemote,
+        "removed with bRemote=true — we are the end of the chain, no re-broadcast")
+end
+
+tests["client_body_purge_is_deferred_not_inline"] = function()
+    -- The corpse being deleted is one the server published with sendCorpse a
+    -- moment earlier. AddCorpseToMap travels on its own ordered channel and
+    -- this command on another, so an inline attempt can run before the corpse
+    -- exists locally. The purge therefore rides the same ~1s deferral the
+    -- wrapper purge uses — long enough that the add has landed, without
+    -- introducing a retry loop.
+    local env = installBodyCell({ objectId = 4322, legacyId = -998 })
+
+    CS.handleRemoveGhostCorpse({ bodyId = 4322, kind = "body", x = 7, y = 8, z = 0 })
+    local removedInline = env.removedBody
+    CS._flushGhostPurges()
+    env.restore()
+
+    if not Assert.isNil(removedInline,
+        "nothing removed inline — the corpse may not have arrived yet") then return false end
+    if not Assert.equal(env.removedBody, env.body,
+        "removed once the deferral expires") then return false end
+    return Assert.equal(#CS._pendingGhostPurges, 0, "queue drained after the attempt")
+end
+
+tests["client_body_purge_missing_target_drains_without_error"] = function()
+    -- A corpse that never materializes locally (this client was never near the
+    -- load site) is the common case, not a failure. One attempt, log the miss,
+    -- drop the entry — it must not error and must not pin the queue.
+    local env = installBodyCell({ objectId = 4323, legacyId = -997, appearsAfter = 9999 })
+
+    local ok = pcall(function()
+        CS.handleRemoveGhostCorpse({ bodyId = 4323, kind = "body", x = 7, y = 8, z = 0 })
+        CS._flushGhostPurges()
+    end)
+    env.restore()
+
+    if not Assert.isTrue(ok, "a missed purge does not error") then return false end
+    if not Assert.isNil(env.removedBody, "nothing was removed") then return false end
+    if not Assert.equal(env.attempts, 1,
+        "exactly one attempt — no retry loop") then return false end
+    return Assert.equal(#CS._pendingGhostPurges, 0, "entry dropped after its single attempt")
+end
+
+tests["client_body_purge_without_coords_is_a_safe_noop"] = function()
+    -- Guard the enqueue path: a malformed payload must not queue an entry
+    -- that can never resolve.
+    local before = #CS._pendingGhostPurges
+    local ok = pcall(function()
+        CS.handleRemoveGhostCorpse({ bodyId = 4324, kind = "body" })
+    end)
+    if not Assert.isTrue(ok, "missing coords does not error") then return false end
+    return Assert.equal(#CS._pendingGhostPurges, before,
+        "nothing queued for a body purge with no square")
 end
 
 tests["client_receiving_removeGhostCorpse_with_unknown_id_is_safe_noop"] = function()

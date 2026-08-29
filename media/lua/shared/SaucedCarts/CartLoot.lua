@@ -17,6 +17,13 @@
 --          containers from), so addon items registered into those lists appear
 --          in carts for free. We control the COUNT ourselves (vanilla
 --          fillContainer would overfill a high-capacity cart).
+--
+-- SANDBOX:  a loaded cart is a container of loot, so it answers to the same
+--          sandbox knobs every other container does — see the "SANDBOX LOOT
+--          SETTINGS" section below. A server running Insane loot rarity, a
+--          banned-item list, or late-game loot decay would otherwise find carts
+--          quietly handing out the loot the rest of the world was tuned to
+--          withhold.
 -- ============================================================================
 
 require "SaucedCarts/Core"
@@ -121,6 +128,108 @@ function CartLoot.poolFor(contextKey)
 end
 
 -- ============================================================================
+-- SANDBOX LOOT SETTINGS
+-- ============================================================================
+-- Three vanilla knobs, applied where vanilla applies them:
+--
+--   1. PER-ITEM CATEGORY RARITY — `ItemPickerJava.getLootModifier(itemType)`
+--      returns the multiplier for that item's loot category (the B42
+--      FoodLootNew / WeaponLootNew / ToolLootNew / … sandbox floats: 1.0 is
+--      normal, Apocalypse ships 0.6-0.8, Insane bottoms out near 0.05). It
+--      ALSO returns 0.0 when the item sits on the admin `LootItemRemovalList`
+--      or its whole category is set to None (ItemPickerJava.java:1497-1512),
+--      which is why a zero is an unconditional skip and not just a low roll:
+--      vanilla's own container path returns a 0.0 spawn chance for those
+--      (getActualSpawnChance:2104-2106). Calling this from Lua is vanilla's
+--      own idiom — StoryTable_Initialization.lua:9 does exactly this.
+--
+--   2. LOOT DECAY OVER TIME — `getSandboxOptions():getCurrentLootMultiplier()`
+--      (SandboxOptions.java:1283-1290, `1 - diminishedLootPercentage/100`).
+--      Vanilla folds this into the per-item spawn chance; we fold it into the
+--      cart's load chance instead — same net effect on a two-stage
+--      decide-then-fill design, without double-dipping the same scalar.
+--
+--   3. RemoveStoryLoot — the survivor cache (weapons + ammo abandoned in a
+--      cart) is a hand-authored narrative stash, i.e. exactly the "randomized
+--      world story" loot this option exists to switch off. When it's on, that
+--      tier degrades to an ordinary loaded cart rather than to empty.
+--
+-- Scaling is DOWNWARD only: a modifier at or above 1.0 keeps the designed
+-- load, it never inflates it past the tier's weight budget.
+
+--- Loot-category multiplier for an item type, mirroring vanilla's junk rule.
+--- Returns 1.0 (i.e. no gating) when ItemPickerJava isn't reachable — offline
+--- tests and any context without a loaded script manager keep legacy
+--- behaviour rather than silently spawning nothing.
+---@param itemType string|nil full type, e.g. "Base.Plank"
+---@param isJunk boolean|nil junk padding: vanilla clamps a nonzero modifier to
+---                          1.0 (ItemPickerJava.java:2086-2092), so filler is
+---                          exempt from category scaling but still obeys the
+---                          removal list
+---@return number modifier 0 = never spawn
+function CartLoot.lootModifierFor(itemType, isJunk)
+    if not itemType then return 0 end
+
+    -- No type-guard on the Java global on purpose: Kahlua's `type()` for an
+    -- exposed Java class is not a value we should be asserting on, and a guard
+    -- that guessed wrong would silently disable the whole gate in-game while
+    -- every offline test kept passing. Let pcall be the only gate — a nil
+    -- ItemPickerJava raises on index and lands in the same fallback.
+    local ok, value = pcall(function()
+        return ItemPickerJava.getLootModifier(itemType)
+    end)
+    if not ok or type(value) ~= "number" then return 1.0 end
+
+    -- Vanilla's isJunk clamp, inlined rather than calling the two-arg overload
+    -- (Kahlua resolves Java overloads by arity and we only need the one rule).
+    if isJunk and value > 0 then return 1.0 end
+    return value
+end
+
+--- Keep-or-skip roll against a loot multiplier (pure).
+--- 0 never keeps, >= 1 always keeps, fractional keeps with p = modifier.
+---@param modifier number
+---@param rng fun(n:number):number
+---@return boolean
+function CartLoot.rollKeep(modifier, rng)
+    if type(modifier) ~= "number" or modifier <= 0 then return false end
+    if modifier >= 1 then return true end
+    return rng(1000) < math.floor(modifier * 1000 + 0.5)
+end
+
+--- Current world loot-decay multiplier, clamped to [0,1]. 1.0 when the
+--- sandbox isn't reachable.
+---@return number
+function CartLoot.worldLootMultiplier()
+    local ok, value = pcall(function()
+        return getSandboxOptions():getCurrentLootMultiplier()
+    end)
+    if not ok or type(value) ~= "number" then return 1.0 end
+    if value < 0 then return 0 end
+    if value > 1 then return 1 end
+    return value
+end
+
+--- Is RemoveStoryLoot on? False when the sandbox isn't reachable.
+---@return boolean
+function CartLoot.storyLootRemoved()
+    local ok, value = pcall(function()
+        return getSandboxOptions():getOptionByName("RemoveStoryLoot"):getValue()
+    end)
+    return (ok and value == true) or false
+end
+
+--- Read the live sandbox into the options table decideCartLoad takes. Kept
+--- separate so the decision itself stays pure and offline-testable.
+---@return table { worldMult = number, removeStoryLoot = boolean }
+function CartLoot.sandboxLootOptions()
+    return {
+        worldMult       = CartLoot.worldLootMultiplier(),
+        removeStoryLoot = CartLoot.storyLootRemoved(),
+    }
+end
+
+-- ============================================================================
 -- DECISION (pure)
 -- ============================================================================
 -- rng(n) returns an int in [0, n-1] like ZombRand. Call order (so tests can
@@ -135,14 +244,30 @@ end
 --- poolFor at fill time).
 ---@param density number sandbox enum 1..4 (1=Off)
 ---@param rng fun(n:number):number
+---@param opts table|nil { worldMult = number, removeStoryLoot = boolean } —
+---            from CartLoot.sandboxLootOptions(); omitting it means "no
+---            sandbox scaling", i.e. the original pre-gate behaviour
 ---@return table { tier = "empty"|"light"|"loaded"|"survivor", count = number }
-function CartLoot.decideCartLoad(density, rng)
+function CartLoot.decideCartLoad(density, rng, opts)
     density = density or LOAD_DEFAULT
     local chance = LOAD_CHANCE[density] or LOAD_CHANCE[LOAD_DEFAULT]
+
+    -- Loot decay over time thins carts exactly as it thins every other
+    -- container. Scaling the LOAD CHANCE (not the per-item roll) keeps this
+    -- scalar applied once; the per-item gate in fillCart owns category rarity.
+    local worldMult = opts and opts.worldMult
+    if type(worldMult) == "number" and worldMult < 1 then
+        chance = chance * (worldMult > 0 and worldMult or 0)
+    end
+
     if chance <= 0 then return { tier = "empty", count = 0 } end
     if rng(100) >= chance then return { tier = "empty", count = 0 } end
 
-    if rng(1000) < SURVIVOR_PERMILLE then
+    -- The survivor roll is consumed unconditionally, so the rng stream up to
+    -- this decision point is identical with and without RemoveStoryLoot; only
+    -- the branch taken after a HIT differs (survivor -> ordinary loaded cart).
+    local survivorRoll = rng(1000)
+    if survivorRoll < SURVIVOR_PERMILLE and not (opts and opts.removeStoryLoot) then
         return { tier = "survivor", count = 2 + rng(3) }      -- 2..4 weapons/ammo
     end
     if rng(100) < LIGHT_SPLIT then
@@ -213,9 +338,12 @@ end
 ---@param tier string "light"|"loaded"|"survivor" (empty handled by caller)
 ---@param count number target item count
 ---@param rng fun(n:number):number
+---@param modFn fun(itemType:string, isJunk:boolean):number|nil loot-modifier
+---             lookup; defaults to CartLoot.lootModifierFor. Injected so tests
+---             can drive the sandbox gate without a live ItemPickerJava.
 ---@return number placedCount
 ---@return number placedWeight
-function CartLoot.fillCart(cartItem, contextKey, tier, count, rng)
+function CartLoot.fillCart(cartItem, contextKey, tier, count, rng, modFn)
     if tier == "empty" or not cartItem then return 0, 0 end
     local container = cartItem.getItemContainer and cartItem:getItemContainer()
     if not container or not container.AddItem then return 0, 0 end
@@ -224,12 +352,18 @@ function CartLoot.fillCart(cartItem, contextKey, tier, count, rng)
     local pool = CartLoot.buildWeightedPool(CartLoot.poolFor(poolKey))
     if #pool == 0 then return 0, 0 end
 
+    modFn = modFn or CartLoot.lootModifierFor
+
     local budget = WEIGHT_BUDGET[tier] or 10
     local placed, weightUsed = 0, 0
     for _ = 1, (count or 0) do
         if weightUsed >= budget then break end
         local typ = CartLoot.pickWeighted(pool, rng)
-        if typ then
+        -- Sandbox loot rarity, per item, exactly as a vanilla container would
+        -- see it: a rejected pick is simply not placed. A harder world
+        -- therefore yields a thinner cart rather than a differently-themed
+        -- one — we never re-roll to "make up" the count.
+        if typ and CartLoot.rollKeep(modFn(typ, false), rng) then
             local li = instanceItem(typ)
             if li then
                 local w = (li.getActualWeight and li:getActualWeight())
@@ -263,9 +397,12 @@ end
 ---@param cartItem InventoryItem
 ---@param targetRatio number 0..1
 ---@param rng fun(n:number):number
+---@param modFn fun(itemType:string, isJunk:boolean):number|nil see fillCart.
+---             Junk is exempt from category rarity (vanilla's isJunk clamp)
+---             but a filler type on the admin removal list is still skipped.
 ---@return number junkCount
 ---@return number junkWeight
-function CartLoot.padToFillState(cartItem, targetRatio, rng)
+function CartLoot.padToFillState(cartItem, targetRatio, rng, modFn)
     if not cartItem or not targetRatio then return 0, 0 end
     local container = cartItem.getItemContainer and cartItem:getItemContainer()
     if not container or not container.AddItem or not container.getCapacity then
@@ -274,6 +411,8 @@ function CartLoot.padToFillState(cartItem, targetRatio, rng)
     local capacity = container:getCapacity() or 0
     if capacity <= 0 then return 0, 0 end
 
+    modFn = modFn or CartLoot.lootModifierFor
+
     local target = targetRatio * capacity
     local junkCount, junkWeight, guard = 0, 0, 0
     while container:getCapacityWeight() < target
@@ -281,6 +420,9 @@ function CartLoot.padToFillState(cartItem, targetRatio, rng)
         and guard < JUNK_MAX_ITEMS do
         guard = guard + 1
         local typ = JUNK_POOL[1 + rng(#JUNK_POOL)]
+        -- Banned filler is skipped, not substituted: the guard counter still
+        -- advances, so an all-banned JUNK_POOL terminates instead of spinning.
+        if typ and modFn(typ, true) <= 0 then typ = nil end
         local li = typ and instanceItem(typ)
         if li then
             local w = (li.getActualWeight and li:getActualWeight())

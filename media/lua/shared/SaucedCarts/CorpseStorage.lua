@@ -447,12 +447,26 @@ end
 --- nil if no such body is present. Used by the direct-from-world load
 --- path where the client identifies the target via coords + id rather
 --- than via the grapple state.
+---
+--- Matches ObjectID first. The client sends the body's ObjectID, which is the
+--- only identifier that survives the trip: IsoMovingObject.getID() comes from
+--- a static per-VM counter (IsoMovingObject.java:95, :161), so the client's
+--- getID() for a body is unrelated to the server's. The legacy getID() pass
+--- is kept so a pre-fix client, which sent that per-VM value, still resolves
+--- on the (rare) occasions it happened to coincide.
 local function findBodyAtSquare(x, y, z, bodyId)
     if not (x and y and z and bodyId and getCell) then return nil end
     local sq = getCell():getGridSquare(x, y, z)
     if not sq or not sq.getDeadBodys then return nil end
     local bodies = sq:getDeadBodys()
     if not bodies then return nil end
+    for i = 0, bodies:size() - 1 do
+        local b = bodies:get(i)
+        if b and b.getObjectIDAsLong then
+            local ok, oid = pcall(function() return b:getObjectIDAsLong() end)
+            if ok and oid == bodyId then return b end
+        end
+    end
     for i = 0, bodies:size() - 1 do
         local b = bodies:get(i)
         if b and b.getID and b:getID() == bodyId then return b end
@@ -647,27 +661,95 @@ function CorpseStorage.handleLoadCorpseToCart(player, args)
 
         local weight = corpseItem.getActualWeight and corpseItem:getActualWeight() or gateWeight
 
-        cartContainer:AddItem(corpseItem)
-        -- Stamp body's deathTime onto the new item BEFORE any other handler
-        -- (network broadcast, removeCorpse, invalidate) can touch it. The
+        -- Stamp the body's deathTime onto the new item BEFORE the move, so the
+        -- modData is already on the item when the transfer broadcasts it. The
         -- restore on unload uses this to resume vanilla's rot ticker at the
         -- correct stage; without it, stored corpses freeze in time.
         CorpseStorage.stampDeathTime(corpseItem, deadBody)
-        if sendAddItemToContainer then
-            sendAddItemToContainer(cartContainer, corpseItem)
+
+        -- === ONE PIPELINE ===
+        -- This used to be a hand-rolled AddItem + sendAddItemToContainer +
+        -- setDrawDirty, i.e. a SECOND item-movement pipeline running beside
+        -- performCartTransfer. Every cross-cutting cart concern then had to be
+        -- remembered twice, and three times it wasn't:
+        --   * loot-respawn flags (fixed 2026-06 in the transfer path only)
+        --   * ground-cart visual refresh — the live dedi run on 2026-08-29
+        --     shows GroundVisualReconciler's 15s sweep healing the cart after
+        --     every corpse load, because nothing repainted it at the time
+        --   * the world-cleanup exemption — found the same day, a ground cart
+        --     still unflagged after two corpse loads and two unloads
+        --
+        -- The floor->container branch is exactly the right shape for this: a
+        -- freshly created corpse item has no world item, so that branch's
+        -- world-removal block is skipped and what remains is the AddItem, the
+        -- broadcast, repairContainerUpdate (nested-container sync we were
+        -- missing entirely here) and setDrawDirty. The chokepoint wrapper then
+        -- supplies updateCartVisual and markDropPersistent for free.
+        --
+        -- Pass the body's square as the source so the branch is selected;
+        -- srcContainer stays nil because the item genuinely came from nowhere
+        -- — deadBody:getItem() minted it a moment ago.
+        --
+        -- LATE-BOUND ON PURPOSE. performCartTransfer lives in
+        -- CartTransferInterceptor, which requires THIS module — so we cannot
+        -- require it back without a cycle. At runtime the ordering is fine
+        -- (every shared file is loaded long before any handler fires), but a
+        -- missing function must be loud: silently refusing every corpse load
+        -- is exactly the kind of quiet breakage that takes a session to find.
+        local bodySquare = deadBody.getSquare and deadBody:getSquare()
+        if type(SaucedCarts.performCartTransfer) ~= "function" then
+            SaucedCarts.error(
+                "loadCorpseToCart: SaucedCarts.performCartTransfer is missing — " ..
+                "CartTransferInterceptor did not load. Corpse loading is disabled " ..
+                "until that is fixed.")
+            CorpseStorage._notifyLoadFailure(player, "fallback")
+            return false
         end
-        -- Mark cart dirty so the inventory panel repaints. Same fix as
-        -- the transfer-path setDrawDirty bug: without this, the corpse
-        -- item is server-authoritatively in the cart but the player's
-        -- UI doesn't refresh until they close/reopen the panel.
-        if cartContainer.setDrawDirty then cartContainer:setDrawDirty(true) end
+        local moved = SaucedCarts.performCartTransfer(
+            player, corpseItem, nil, cartContainer, nil, bodySquare)
+        if not moved then
+            SaucedCarts.log(function()
+                return "loadCorpseToCart: performCartTransfer refused the corpse " ..
+                    "into cart " .. tostring(cart.getID and cart:getID() or "?") ..
+                    " — leaving the body in the world"
+            end)
+            CorpseStorage._notifyLoadFailure(player, "fallback")
+            return false
+        end
 
         -- H1 reconcile: cart's corpse count just went up. Register the
         -- new count at the cart's current tile (player sq if equipped,
         -- cart world item sq if grounded).
         CorpseStorage.reconcile(cart, CorpseStorage.cartTargetSquare(cart, player))
 
-        local sq = deadBody.getSquare and deadBody:getSquare()
+        -- Captured before the move (performCartTransfer does not touch the
+        -- body, but removeCorpse below clears getSquare(), so read it once).
+        local sq = bodySquare
+
+        -- DELIBERATELY NO sendCorpse HERE — settled live 2026-08-29, do not
+        -- "fix" this.
+        --
+        -- The tempting reasoning: an MP client never builds its own corpse
+        -- (IsoGameCharacter.die:15358 sends clients down
+        -- NetworkCharacterAI.onDied to wait for AddCorpseToMapPacket, which is
+        -- the only thing that registers a body in the client's ObjectIDManager,
+        -- AddCorpseToMapPacket.java:55/:85). killToCorpse ran dieNetwork ->
+        -- becomeCorpse() server-side only, so no client has this body and the
+        -- removeCorpse broadcast below is a no-op on all of them. All true.
+        --
+        -- It is also harmless, because there is nothing on the clients to
+        -- remove. Two dual-client dedi runs with the roles SWAPPED between
+        -- them: the grappling client purged its wrapper both times, the
+        -- observer had nothing to purge both times, the server tile ended with
+        -- zero bodies and zero world objects, and neither player saw anything
+        -- at the tile. The behaviour tracks the ROLE, not the client.
+        --
+        -- Publishing a corpse here would materialize one on every nearby
+        -- client that we would then have to chase and delete — and the delete
+        -- cannot be ordered against the add (AddCorpseToMap is reliability=3
+        -- RELIABLE_ORDERED, RemoveCorpseFromMap is reliability=2 unordered),
+        -- so it would trade a real new failure mode for a problem that does
+        -- not exist. tools/probe-corpse-ghost.lua reproduces the check.
         if sq and sq.removeCorpse then
             pcall(function() sq:removeCorpse(deadBody, false) end)
         end
@@ -675,15 +757,22 @@ function CorpseStorage.handleLoadCorpseToCart(player, args)
             pcall(function() deadBody:invalidateCorpse() end)
         end
 
-        -- Purge the client-side ghost. Vanilla's reanimate() teardown
-        -- doesn't send RemoveCorpseFromMap, so clients keep the original
-        -- body in their local world forever — it renders as a flat corpse
-        -- at the pickup location. Broadcast the id + coords so every
-        -- client can jump directly to the square without scanning.
-        if ghostBodyId and SaucedCarts.Network and SaucedCarts.Network.broadcast then
+        -- Grab-site ghost, kind="body" ONLY.
+        --
+        -- The grapple case (kind="zombie") is deliberately NOT broadcast any
+        -- more: vanilla cleans that up itself via the wrapper's replicated
+        -- reanimatedBodyId, and our old broadcast asked clients to destroy the
+        -- wrapper — i.e. the id carrier vanilla needs. See the "WE DELIBERATELY
+        -- DO NOT PURGE THE GRAPPLE WRAPPER" block for the measurements.
+        --
+        -- kind="body" is a different situation and still needs telling: the
+        -- target was already a dead body, no reanimate() ran, so there is no
+        -- wrapper carrying an id and no vanilla cleanup to wait for.
+        if ghostKind == "body" and ghostBodyId
+            and SaucedCarts.Network and SaucedCarts.Network.broadcast then
             SaucedCarts.Network.broadcast("removeGhostCorpse", {
                 bodyId = ghostBodyId,
-                kind   = ghostKind,
+                kind   = "body",
                 x = ghostX, y = ghostY, z = ghostZ,
             })
         end
@@ -722,51 +811,127 @@ SaucedCarts.Network.registerServerHandler("loadCorpseToCart", CorpseStorage.hand
 -- right-click / loot the ghost body, but any interaction fails server-side
 -- because the body is no longer in the server's ObjectIDManager.
 --
--- Fix: when our load succeeds, server broadcasts the ORIGINAL bodyId
--- (parsed from the grappled zombie's tostring) and each client scans its
--- local world for that IsoDeadBody and removes it with bRemote=true (no
--- re-broadcast — we're already the chain terminator).
-
--- How long to leave the wrapper zombie alive before removing it. THIS IS THE
--- FIX: vanilla's ZombieOnGroundState (:56 and :115) calls
--- IsoDeadBody.removeDeadBody(ownerZombie...reanimatedBodyId) — the only code
--- that can purge the client's stranded ghost body, and it reads that id off
--- the wrapper. Destroying the wrapper the instant the broadcast landed killed
--- the cleanup before it could run, which is what left bodies on the ground in
--- MP while the corpse was already in the cart.
+-- THAT IS VANILLA'S PROBLEM AND VANILLA SOLVES IT — for the grapple case.
+-- reanimate() stamps the original body's ObjectID onto the wrapper zombie, it
+-- replicates in ZombiePacket, and each client clears its own stale copy when
+-- the wrapper reaches ZombieOnGroundState. We used to "help" by destroying the
+-- wrapper, which removed the id carrier and stranded the body instead. See the
+-- "WE DELIBERATELY DO NOT PURGE THE GRAPPLE WRAPPER" block below.
 --
--- ~1s at 60fps: long enough for a zombie packet to land and force the state,
--- short enough that a dead wrapper isn't visibly loitering. Verified against
--- a live dedi with two clients — 12/12 purges cleared the ghost this way.
+-- What we still handle is kind="body": the grapple target was ALREADY a dead
+-- body, so no reanimate() ran, no wrapper exists, and there is no vanilla
+-- carrier to wait for. The server names that body by ObjectID and each client
+-- removes its local copy with bRemote=true (no re-broadcast — we are the chain
+-- terminator).
+
+-- Deferral before the body purge runs. ~1s at 60fps: long enough for the
+-- corpse traffic to have landed on this client, short enough to feel instant.
+-- Kept as a deferral rather than an inline removal because this command and
+-- the corpse packets travel on separate channels.
 local GHOST_PURGE_DEFER_TICKS = 60
 
---- Rip the grapple-wrapper zombie out of the local world by onlineId.
+-- Deliberately still SINGLE-SHOT: one attempt when the deferral expires, then
+-- the entry is dropped. A retry loop was tried and removed — the only thing it
+-- bought was tolerance for AddCorpseToMap (its own ordered channel) landing
+-- after our command, and a full second is already enormous next to packet
+-- delivery on an established connection. What was worth keeping is saying so
+-- when the attempt misses, so a surviving ghost is diagnosable instead of
+-- silent.
+
+-- ============================================================================
+-- WE DELIBERATELY DO NOT PURGE THE GRAPPLE WRAPPER — vanilla owns this
+-- ============================================================================
+-- Settled by measurement on a two-client dedi, 2026-08-29. Do not re-add it.
+--
+-- HOW VANILLA CLEANS UP. reanimate() stamps the ORIGINAL body's ObjectID onto
+-- the wrapper zombie (IsoDeadBody.java:2045), NetworkZombieAI:182 ships it in
+-- ZombiePacket, and EVERY CLIENT calls
+-- IsoDeadBody.removeDeadBody(reanimatedBodyId) once the wrapper reaches
+-- ZombieOnGroundState (:56-57 and :115-116, both GameClient.client-gated).
+-- That resolves each client's own stale copy through its ObjectIDManager and
+-- removes it with bRemote=true. The wrapper is the ID CARRIER for its own
+-- cleanup.
+--
+-- WHY OUR PURGE WAS WORSE THAN USELESS. It removed the wrapper from the cell
+-- lists, so the wrapper never ticked again, so ZombieOnGroundState never ran,
+-- so removeDeadBody never fired — stranding the very body it was meant to
+-- clear. The 60-tick deferral did not fix that, it only widened the window.
+--
+-- AND THE TIMING WAS NEVER RELIABLE. Across runs the observer's wrapper was
+-- sometimes gone by tick 60 and sometimes still present, so the purge was a
+-- race whose outcome varied run to run. A dry run (report presence, change
+-- nothing) had BOTH clients at present=true — i.e. with the purge live we
+-- would have destroyed the carrier on the observer, the one client that
+-- actually had a stale body to clear.
+--
+-- WHAT HAPPENS WITH IT GONE: nothing leaks. Dry-run verification — server had
+-- zero grapple wrappers and zero IsoDeadBody within three tiles of the grab
+-- site, and both players confirmed nothing visible on either screen. Vanilla
+-- removes the stale body AND retires the wrapper on its own.
+--
+-- The kind="body" purge below is a different case and is kept: that path has
+-- no wrapper and no reanimate(), so there is no vanilla carrier to protect.
+
+--- Remove a local IsoDeadBody from a known square by its ObjectID.
+---
+--- ObjectID is the ONLY body identifier that means the same thing on the
+--- server and on a client: IsoMovingObject.getID() is handed out by a static
+--- per-VM counter (IsoMovingObject.java:95, :161), so comparing it across the
+--- wire matches nothing (or worse, matches the wrong body). ObjectID is what
+--- vanilla itself keys RemoveCorpseFromMapPacket on, and AddCorpseToMapPacket
+--- (:55, :85) is what stamps it onto the client's copy.
+---
+--- Legacy fallback: servers older than this build sent the per-VM getID(), so
+--- try ObjectID across the whole square first and only then fall back, rather
+--- than letting a getID() coincidence beat a real ObjectID match.
 ---@return boolean purged
-local function purgeGrappleZombie(onlineId)
-    local cell = getCell and getCell()
-    local zombies = cell and cell.getZombieList and cell:getZombieList()
-    if not zombies then return false end
-    for i = zombies:size() - 1, 0, -1 do
-        local z = zombies:get(i)
-        if z and z.getOnlineID and z:getOnlineID() == onlineId then
-            pcall(function() z:removeFromWorld() end)
-            pcall(function() z:removeFromSquare() end)
-            pcall(function() cell:getObjectList():remove(z) end)
-            pcall(function() cell:getZombieList():remove(z) end)
-            SaucedCarts.log(function()
-                return "removeGhostCorpse: PURGED local grapple-zombie onlineId=" ..
-                    tostring(onlineId)
-            end)
-            return true
+local function purgeBodyAtSquare(bodyId, x, y, z)
+    if not (bodyId and x and y and z and getCell) then return false end
+    local sq = getCell():getGridSquare(x, y, z)
+    if not sq or not sq.getDeadBodys then return false end
+    local bodies = sq:getDeadBodys()
+    if not bodies then return false end
+
+    local function removeBody(b)
+        -- bRemote=true: we are the end of the removal chain, no re-broadcast.
+        pcall(function() sq:removeCorpse(b, true) end)
+        SaucedCarts.log(function()
+            return "removeGhostCorpse: PURGED local body " .. tostring(bodyId) ..
+                " at " .. x .. "," .. y
+        end)
+    end
+
+    for i = bodies:size() - 1, 0, -1 do
+        local b = bodies:get(i)
+        if b and b.getObjectIDAsLong then
+            local ok, oid = pcall(function() return b:getObjectIDAsLong() end)
+            if ok and oid == bodyId then removeBody(b) return true end
         end
+    end
+    for i = bodies:size() - 1, 0, -1 do
+        local b = bodies:get(i)
+        if b and b.getID and b:getID() == bodyId then removeBody(b) return true end
     end
     return false
 end
 
--- Deferred wrapper purges. Array + explicit counter: PZ's Kahlua has no
--- standard `next`, so an emptiness check needs a maintained count.
+-- Deferred purges. Array + explicit counter: PZ's Kahlua has no standard
+-- `next`, so an emptiness check needs a maintained count.
 local pendingGhostPurges = {}
 local pendingGhostCount  = 0
+
+--- Run one purge attempt for a queued entry.
+---@return boolean purged
+local function attemptGhostPurge(p)
+    -- Only kind="body" reaches the queue; see the block above for why the
+    -- wrapper is left alone.
+    return purgeBodyAtSquare(p.id, p.x, p.y, p.z)
+end
+
+local function dropPendingAt(i)
+    table.remove(pendingGhostPurges, i)
+    pendingGhostCount = pendingGhostCount - 1
+end
 
 local function ghostPurgeTick()
     if pendingGhostCount == 0 then return end
@@ -774,17 +939,25 @@ local function ghostPurgeTick()
         local p = pendingGhostPurges[i]
         p.ticks = p.ticks - 1
         if p.ticks <= 0 then
-            -- Vanilla had its window; take the wrapper out regardless so we
-            -- never leak a dead zombie into the client's world.
-            purgeGrappleZombie(p.onlineId)
-            table.remove(pendingGhostPurges, i)
-            pendingGhostCount = pendingGhostCount - 1
+            if not attemptGhostPurge(p) then
+                -- A body purge that finds nothing is usually benign: this
+                -- client was never near the load site, or vanilla's own
+                -- RemoveCorpseFromMap already took it. Kept at .log because if
+                -- a player DOES report a body they can see and cannot touch,
+                -- this line is the first thing to grep for, and it has to be
+                -- visible without -debug and on a dedi.
+                SaucedCarts.log(function()
+                    return "removeGhostCorpse: MISS on body id=" .. tostring(p.id) ..
+                        " — nothing to purge locally"
+                end)
+            end
+            dropPendingAt(i)
         end
     end
 end
 
---- Force every pending purge to run now. Test hook — production drains
---- via the OnTick handler below.
+--- Force every pending purge to run now. Test hook — production drains via
+--- the OnTick handler below.
 function CorpseStorage._flushGhostPurges()
     for i = 1, #pendingGhostPurges do
         pendingGhostPurges[i].ticks = 0
@@ -813,53 +986,37 @@ function CorpseStorage.handleRemoveGhostCorpse(args)
     -- zombie's name (client-side zombie names are null — the
     -- ReanimatedCorpse_IsoDeadBody prefix is set only on server).
     if args.kind == "zombie" then
-        -- NEVER purge the wrapper synchronously. Vanilla's
-        -- ZombieOnGroundState -> IsoDeadBody.removeDeadBody(reanimatedBodyId)
-        -- is what clears this client's stranded ghost body, and it reads that
-        -- id off the wrapper we're about to destroy. Queue it instead and let
-        -- vanilla go first; see GHOST_PURGE_DEFER_TICKS and the ROAD NOT TAKEN
-        -- block above for why we don't try to purge the body ourselves.
-        pendingGhostCount = pendingGhostCount + 1
-        pendingGhostPurges[#pendingGhostPurges + 1] = {
-            onlineId = targetId,
-            ticks    = GHOST_PURGE_DEFER_TICKS,
-        }
-        SaucedCarts.log(function()
-            return "removeGhostCorpse: deferring wrapper purge for onlineId=" ..
-                tostring(targetId) .. " by " .. GHOST_PURGE_DEFER_TICKS ..
-                " ticks so vanilla ZombieOnGroundState can clean up the ghost body"
+        -- No-op by design. Older servers (<= 2.1.20) broadcast this so the
+        -- client could destroy the grapple wrapper; that turned out to remove
+        -- the very object vanilla needs to clean itself up. See the block
+        -- above. Accepted and ignored so a new client on an old server behaves
+        -- sanely rather than erroring.
+        SaucedCarts.debug(function()
+            return "removeGhostCorpse: ignoring legacy zombie-kind purge for onlineId=" ..
+                tostring(targetId) .. " (vanilla owns wrapper cleanup)"
         end)
         return
     end
 
-    -- Default / kind "body": look up the IsoDeadBody by square + id.
-    if not (args.x and args.y and args.z and getCell) then
+    -- Default / kind "body": the IsoDeadBody at a known square (the grapple
+    -- target was already dead, so vanilla never made a wrapper zombie). Queued
+    -- on the same deferral as the wrapper rather than removed inline — this
+    -- command and the corpse traffic travel on separate channels, so an inline
+    -- attempt can run before the client's view of the square has settled.
+    if not (args.x and args.y and args.z) then
         SaucedCarts.log("removeGhostCorpse: missing coords, cannot locate body")
         return
     end
-    local sq = getCell():getGridSquare(args.x, args.y, args.z)
-    if not sq or not sq.getDeadBodys then
-        SaucedCarts.log(function()
-            return "removeGhostCorpse: no square at " .. args.x .. "," .. args.y .. "," .. args.z
-        end)
-        return
-    end
-    local bodies = sq:getDeadBodys()
-    if not bodies then return end
-    for i = bodies:size() - 1, 0, -1 do
-        local b = bodies:get(i)
-        if b and b.getID and b:getID() == targetId then
-            pcall(function() sq:removeCorpse(b, true) end)
-            SaucedCarts.log(function()
-                return "removeGhostCorpse: PURGED local body " .. tostring(targetId) ..
-                    " at " .. args.x .. "," .. args.y
-            end)
-            return
-        end
-    end
+    pendingGhostCount = pendingGhostCount + 1
+    pendingGhostPurges[#pendingGhostPurges + 1] = {
+        kind  = "body",
+        id    = targetId,
+        x = args.x, y = args.y, z = args.z,
+        ticks = GHOST_PURGE_DEFER_TICKS,
+    }
     SaucedCarts.log(function()
-        return "removeGhostCorpse: body id " .. targetId ..
-            " NOT FOUND in square (" .. bodies:size() .. " bodies present)"
+        return "removeGhostCorpse: queued body purge for objectId=" ..
+            tostring(targetId) .. " at " .. args.x .. "," .. args.y .. "," .. args.z
     end)
 end
 
@@ -922,7 +1079,6 @@ SaucedCarts.Network.registerClientHandler("loadCorpseFailed", CorpseStorage.hand
 CorpseStorage._findCartNearPlayer = findCartNearPlayer
 CorpseStorage._resolveDeadBody    = resolveDeadBody
 CorpseStorage._inFlight           = inFlight
-CorpseStorage._purgeGrappleZombie  = purgeGrappleZombie
 CorpseStorage._pendingGhostPurges  = pendingGhostPurges
 
 SaucedCarts.CorpseStorage = CorpseStorage

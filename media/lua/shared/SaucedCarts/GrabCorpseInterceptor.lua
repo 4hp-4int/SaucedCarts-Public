@@ -73,6 +73,16 @@ function ISGrabCorpseItem:complete()
     local srcCart = containerToCart(srcContainer)
     if not srcCart then return origComplete(self) end
 
+    -- Taking a corpse back OUT is using the cart too, so a ground cart earns
+    -- the world-cleanup exemption here. Done BEFORE the age branches below
+    -- because they leave by different routes — the common case (age <
+    -- skeletonAt) delegates straight to vanilla's complete, which does
+    -- srcContainer:DoRemoveItem itself and never touches performCartTransfer,
+    -- where the ordinary transfer-time exemption lives. Mirrors the matching
+    -- call on the load side in CorpseStorage.handleLoadCorpseToCart; see the
+    -- note there for the live evidence. No-op on an equipped cart.
+    SaucedCarts.markDropPersistent(srcCart)
+
     -- Effective-age check. Threshold is `skeletonAt` (= sandbox
     -- HoursForCorpseRemoval), matching vanilla `updateBodies`'s despawn
     -- boundary for non-skeleton zombie corpses (IsoDeadBody.java:1534).

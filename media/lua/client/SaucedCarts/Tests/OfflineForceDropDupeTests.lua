@@ -122,8 +122,19 @@ local function makeMockSquare()
         local worldObj = {
             _type = "IsoWorldInventoryObject",
             _item = item,
+            -- Vanilla's AddWorldInventoryItem does NOT set this; only the
+            -- caller can (ISDropWorldItemAction.lua:85 et al). Defaulting to
+            -- false is the whole point — it's what makes the cleanup-exemption
+            -- tests below fail against unfixed code.
+            _ignoreRemoveSandbox = false,
+            _setIgnoreCount = 0,
             getItem = function(me) return me._item end,
             getSquare = function(_) return sq end,
+            setIgnoreRemoveSandbox = function(me, b)
+                me._ignoreRemoveSandbox = b
+                me._setIgnoreCount = me._setIgnoreCount + 1
+            end,
+            isIgnoreRemoveSandbox = function(me) return me._ignoreRemoveSandbox end,
         }
         table.insert(self._worldObjects, worldObj)
         if item and item.setWorldItem then item:setWorldItem(worldObj) end
@@ -379,6 +390,131 @@ tests["force_drop_guard_allows_normal_drop"] = function()
     if not Assert.equal(sq:getWorldObjects():size(), 1,
         "guarded drop on clean state produces 1 world item") then return false end
     return Assert.isNil(ch:getPrimaryHandItem(), "primary cleared after normal drop")
+end
+
+-- ============================================================================
+-- WORLD-CLEANUP EXEMPTION ON VANILLA'S FORCE-DROP
+-- ============================================================================
+-- The second thing the guard has to do, added after a player reported a cart
+-- that vanished near a corpse they had moved with it.
+--
+-- Vanilla's forceDropHeavyItems (ISEquipWeaponAction.lua:74-97) grounds the
+-- held item with a bare AddWorldInventoryItem and never calls
+-- setIgnoreRemoveSandbox — unlike EVERY other vanilla player-drop path
+-- (ISDropWorldItemAction.lua:85, ISDropVehicleItemAction.lua:51,
+-- ItemSpawner.java:37, each commented "avoid the item to be removed by the
+-- SandboxOption WorldItemRemovalList"). That flag has exactly one reader in
+-- the engine: the discard filter in IsoGridSquare.load (IsoGridSquare.java:
+-- 3311), which throws unflagged world items away as the chunk deserializes.
+--
+-- A cart carries base:heavyitem, so it goes through this path constantly —
+-- and the corpse-storage beta leans on two callers of it in particular,
+-- ISGrabCorpseAction:perform (:48) and ISGrabCorpseItem:complete (:60). Left
+-- unflagged, the cart is silently gone the next time that chunk loads.
+--
+-- v2.1.16 flagged the five drop paths SaucedCarts owns. This is the sixth and
+-- it belongs to vanilla: a pass-through wrapper inherits the wrapped
+-- function's omissions, so the guard has to apply the flag itself.
+--
+-- Sensitivity: all three "is it exempt" assertions fail against pre-fix code,
+-- where the flag is never set and stays false.
+
+tests["force_drop_guard_exempts_dropped_cart_from_world_cleanup"] = function()
+    local sq = makeMockSquare()
+    local inv = makeInventory()
+    local cart = makeCart("ShoppingCart")
+    inv:AddItem(cart)
+
+    local ch = makeCharacter(sq, inv)
+    ch:setPrimaryHandItem(cart)
+    ch:setSecondaryHandItem(cart)
+
+    local guarded = SaucedCarts.ForceDropGuard.makeGuardedForceDrop(
+        makeVanillaForceDrop(), isCartForTest)
+    guarded(ch)
+
+    -- Guard against passing by simply not dropping anything.
+    if not Assert.equal(sq:getWorldObjects():size(), 1,
+        "the cart actually reached the ground") then return false end
+
+    local wi = cart:getWorldItem()
+    if not Assert.isTrue(wi ~= nil, "dropped cart has a world item") then return false end
+    return Assert.isTrue(wi:isIgnoreRemoveSandbox(),
+        "cart vanilla force-dropped is exempt from the chunk-load cleanup filter")
+end
+
+tests["force_drop_guard_exempts_cart_from_secondary_hand"] = function()
+    -- Vanilla drops each hand independently. A cart held only in the off-hand
+    -- takes the second branch of forceDropHeavyItems and must be flagged too.
+    local sq = makeMockSquare()
+    local inv = makeInventory()
+    local cart = makeCart("ShoppingCart")
+    inv:AddItem(cart)
+
+    local ch = makeCharacter(sq, inv)
+    ch:setSecondaryHandItem(cart)
+
+    local guarded = SaucedCarts.ForceDropGuard.makeGuardedForceDrop(
+        makeVanillaForceDrop(), isCartForTest)
+    guarded(ch)
+
+    if not Assert.equal(sq:getWorldObjects():size(), 1,
+        "off-hand cart actually reached the ground") then return false end
+    return Assert.isTrue(cart:getWorldItem():isIgnoreRemoveSandbox(),
+        "off-hand cart is exempt too")
+end
+
+tests["force_drop_guard_reflags_cart_it_short_circuits"] = function()
+    -- When the stale-ref guard fires, vanilla never runs — but the cart is
+    -- already on the ground, possibly grounded by an EARLIER unflagged
+    -- force-drop. Re-flagging is free (idempotent setter) and rescues exactly
+    -- that cart, so the exemption pass must not be skipped on this branch.
+    local sq = makeMockSquare()
+    local inv = makeInventory()
+    local cart = makeCart("ShoppingCart")
+    sq:AddWorldInventoryItem(cart, 0.5, 0.5, 0)  -- already grounded, unflagged
+
+    local ch = makeCharacter(sq, inv)
+    ch:setPrimaryHandItem(cart)
+
+    local guarded = SaucedCarts.ForceDropGuard.makeGuardedForceDrop(
+        makeVanillaForceDrop(), isCartForTest)
+    guarded(ch)
+
+    if not Assert.equal(sq:getWorldObjects():size(), 1,
+        "guard still prevented the dupe") then return false end
+    return Assert.isTrue(cart:getWorldItem():isIgnoreRemoveSandbox(),
+        "already-grounded cart picks up the exemption it was missing")
+end
+
+tests["force_drop_guard_leaves_non_cart_heavy_items_alone"] = function()
+    -- Precision contract. Vanilla's missing flag affects every heavy item
+    -- (generators, corpses, other mods' gear), but SaucedCarts owns carts and
+    -- nothing else — silently changing cleanup behaviour for items we did not
+    -- add would be an unscoped global change. A non-cart heavy item must come
+    -- out of the guard exactly as vanilla left it.
+    local sq = makeMockSquare()
+    local inv = makeInventory()
+    local generator = makeCart("Generator")
+    generator._type = "InventoryItem"   -- not an InventoryContainer → not a cart
+    inv:AddItem(generator)
+
+    local ch = makeCharacter(sq, inv)
+    ch:setPrimaryHandItem(generator)
+
+    local guarded = SaucedCarts.ForceDropGuard.makeGuardedForceDrop(
+        makeVanillaForceDrop(), isCartForTest)
+    guarded(ch)
+
+    if not Assert.isFalse(isCartForTest(generator),
+        "fixture really is not a cart") then return false end
+    if not Assert.equal(sq:getWorldObjects():size(), 1,
+        "vanilla still dropped it") then return false end
+    local wi = generator:getWorldItem()
+    if not Assert.equal(wi._setIgnoreCount, 0,
+        "we never touch the flag on items we do not own") then return false end
+    return Assert.isFalse(wi:isIgnoreRemoveSandbox(),
+        "non-cart heavy item keeps vanilla's behaviour")
 end
 
 -- Self-register

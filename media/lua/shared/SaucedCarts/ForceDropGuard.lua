@@ -58,6 +58,22 @@ function ForceDropGuard.makeGuardedForceDrop(originalFn, isCartFn)
             return originalFn(character)
         end
 
+        -- Snapshot the carts vanilla may be about to drop. Taken BEFORE the
+        -- stale-ref guard below (which clears hands) and before delegation
+        -- (which also clears hands) — afterwards there is no way to tell
+        -- which items forceDropHeavyItems moved into the world.
+        local heldCarts = {}
+        pcall(function()
+            local primary = character:getPrimaryHandItem()
+            if primary and isCartFn(primary) then
+                heldCarts[#heldCarts + 1] = primary
+            end
+            local secondary = character:getSecondaryHandItem()
+            if secondary and secondary ~= primary and isCartFn(secondary) then
+                heldCarts[#heldCarts + 1] = secondary
+            end
+        end)
+
         pcall(function()
             local primary = character:getPrimaryHandItem()
             if primary and isCartFn(primary) then
@@ -90,7 +106,33 @@ function ForceDropGuard.makeGuardedForceDrop(originalFn, isCartFn)
             end
         end)
 
-        return originalFn(character)
+        local result = originalFn(character)
+
+        -- Vanilla's forceDropHeavyItems (ISEquipWeaponAction.lua:74-97) puts the
+        -- held item on the ground with a bare AddWorldInventoryItem and NEVER
+        -- calls setIgnoreRemoveSandbox — unlike every other vanilla player-drop
+        -- path (ISDropWorldItemAction.lua:85, ISDropVehicleItemAction.lua:51,
+        -- ItemSpawner.java:37, all commented "avoid the item to be removed by
+        -- the SandboxOption WorldItemRemovalList"). A cart carries
+        -- base:heavyitem, so ISGrabCorpseAction:perform, ISGrabCorpseItem:
+        -- complete, ISEnterVehicle, ISEquipWeaponAction and friends all drop it
+        -- through here. Left unflagged, that cart is the one player-placed
+        -- object the chunk-load cleanup filter (IsoGridSquare.java:3311, the
+        -- ONLY reader of the flag) will discard — the cart silently isn't there
+        -- when the chunk comes back.
+        --
+        -- v2.1.16 flagged the five drop paths SaucedCarts owns; this is the
+        -- sixth, and it is vanilla's. A pass-through wrapper inherits the
+        -- wrapped function's omissions, so the flag has to be applied here.
+        --
+        -- markDropPersistent is nil-safe and idempotent: a cart still in hands
+        -- has no world item and is skipped, and re-flagging an already-exempt
+        -- cart is a no-op.
+        for i = 1, #heldCarts do
+            SaucedCarts.markDropPersistent(heldCarts[i])
+        end
+
+        return result
     end
 end
 

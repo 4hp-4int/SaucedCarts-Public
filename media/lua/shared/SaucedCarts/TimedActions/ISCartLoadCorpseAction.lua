@@ -63,7 +63,19 @@ local function captureGhost(character)
 
     if instanceof(g, "IsoDeadBody") then
         local bsq = g.getCurrentSquare and g:getCurrentSquare()
-        local id = g.getID and g:getID()
+        -- ObjectID, not getID(). IsoMovingObject.getID() is handed out by a
+        -- static per-VM counter (IsoMovingObject.java:95, :161), so the id
+        -- this client holds for a body is unrelated to the server's and the
+        -- server-side lookup could never match it. ObjectID is the
+        -- network-stable key vanilla itself uses for corpse packets; the
+        -- server tries it first and still falls back to getID() for clients
+        -- that predate this change.
+        local id
+        if g.getObjectIDAsLong then
+            local okOid, oid = pcall(function() return g:getObjectIDAsLong() end)
+            if okOid and type(oid) == "number" and oid >= 0 then id = oid end
+        end
+        if not id then id = g.getID and g:getID() end
         SaucedCarts.log(function()
             return "captureGhost: body kind, bodyId=" .. tostring(id) ..
                 " sq=" .. (bsq and (bsq:getX() .. "," .. bsq:getY() .. "," .. bsq:getZ()) or "nil")

@@ -364,8 +364,13 @@ local function processSpawnQueue()
             local offsetY = 0.3 + ZombRand(40) / 100  -- 0.3-0.7
 
             -- Decide whether this cart spawns loaded (mostly empty; see CartLoot).
+            -- lootOpts carries the VANILLA loot sandbox (decay-over-time +
+            -- RemoveStoryLoot); per-item category rarity is applied inside
+            -- fillCart. Read per spawn, not cached — getCurrentLootMultiplier
+            -- is a function of world age and an admin can retune mid-session.
             local density = SandboxVars.SaucedCarts and SandboxVars.SaucedCarts.LoadedCartSpawns
-            local load = SaucedCarts.CartLoot.decideCartLoad(density, ZombRand)
+            local lootOpts = SaucedCarts.CartLoot.sandboxLootOptions()
+            local load = SaucedCarts.CartLoot.decideCartLoad(density, ZombRand, lootOpts)
 
             local cart
             if load.tier == "empty" then

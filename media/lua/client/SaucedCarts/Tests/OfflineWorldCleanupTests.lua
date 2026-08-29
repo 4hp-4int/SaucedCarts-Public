@@ -427,6 +427,99 @@ local function withSandbox(opts, fn)
     if not ok then error(err) end
 end
 
+-- ============================================================================
+-- USING A GROUND CART EXEMPTS IT — the loot-spawn hole
+-- ============================================================================
+-- Second player report: "carts disappear on chunk load/unload after being left
+-- unattended for a while."
+--
+-- The five drop paths above all cover carts a PLAYER put down. They say nothing
+-- about a cart the player FOUND. WorldSpawning deliberately does not flag its
+-- spawns — right while the cart is untouched scenery, since fresh unhandled
+-- loot being sweepable is the vanilla contract — but nothing forces you to
+-- equip a ground cart to load it. So a found cart can be in daily use and still
+-- carry ignoreRemoveSandbox=false forever, and the chunk-load filter
+-- (IsoGridSquare.java:3311, the flag's only reader) discards it once
+-- GameTime.getWorldAgeHours() passes dropTime + HoursForWorldItemRemoval.
+-- dropTime is stamped by the IsoWorldInventoryObject ctor (:102) and is
+-- serialized (:485/:428), so that clock starts at spawn and survives reloads —
+-- which is exactly "left it a while, came back, gone".
+--
+-- Contract: loading or unloading a ground cart marks it player-handled.
+-- Sensitivity: the first two fail without the chokepoint's markDropPersistent
+-- calls (the cart is dropped unflagged and stays that way).
+
+--- A cart sitting in the world with NO exemption — i.e. what WorldSpawning
+--- leaves behind. Returns (cart, square).
+local function makeLootSpawnedGroundCart()
+    local sq = F.square(0, 0, 0)
+    local cart = makeCart()
+    sq:AddWorldInventoryItem(cart, 0.5, 0.5, 0, false)
+    return cart, sq
+end
+
+--- Is this cart's world item exempt? Distinct from worldItemsExempt, which
+--- walks the whole square — here we care about one specific cart.
+local function cartExempt(cart)
+    local wi = cart.getWorldItem and cart:getWorldItem()
+    if not wi then return nil end       -- nil = no world item at all
+    return wi._private.ignoreRemoveSandbox == true
+end
+
+tests["loading_a_found_ground_cart_exempts_it_from_world_cleanup"] = function()
+    local cart, _ = makeLootSpawnedGroundCart()
+    if not Assert.isFalse(cartExempt(cart),
+        "precondition: a loot-spawned cart starts unflagged") then return false end
+
+    local src = F.container({ typeName = "shelves", capacity = 50 })
+    local loot = F.item({ id = 401, fullType = "Base.Screwdriver" })
+    src:AddItem(loot)
+
+    local player = F.player({ square = F.square(0, 0, 0) })
+    local ok = SaucedCarts.performCartTransfer(player, loot, src, cart:getItemContainer())
+
+    if not Assert.isTrue(ok, "the transfer itself succeeded") then return false end
+    return Assert.isTrue(cartExempt(cart),
+        "putting something in a found cart marks it player-handled")
+end
+
+tests["unloading_a_found_ground_cart_exempts_it_from_world_cleanup"] = function()
+    -- Symmetric: taking your stuff back out is just as much "using it".
+    local cart, _ = makeLootSpawnedGroundCart()
+    local stored = F.item({ id = 402, fullType = "Base.Plank" })
+    cart:getItemContainer():AddItem(stored)
+    if not Assert.isFalse(cartExempt(cart),
+        "precondition: still unflagged after a raw AddItem") then return false end
+
+    local dest = F.container({ typeName = "shelves", capacity = 50 })
+    local player = F.player({ square = F.square(0, 0, 0) })
+    local ok = SaucedCarts.performCartTransfer(player, stored, cart:getItemContainer(), dest)
+
+    if not Assert.isTrue(ok, "the transfer itself succeeded") then return false end
+    return Assert.isTrue(cartExempt(cart),
+        "taking something out of a found cart marks it player-handled too")
+end
+
+tests["transfer_into_equipped_cart_has_no_world_item_to_flag"] = function()
+    -- Precision + fail-safe. An equipped cart has no world item, so
+    -- markDropPersistent must no-op rather than throw and abort the move —
+    -- the chokepoint runs inside a pcall, but a throw there would silently
+    -- skip the visual refresh that shares it.
+    local cart = makeCart()   -- never placed in the world
+    local src = F.container({ typeName = "shelves", capacity = 50 })
+    local loot = F.item({ id = 403, fullType = "Base.Nails" })
+    src:AddItem(loot)
+
+    local player = F.player({ square = F.square(0, 0, 0) })
+    local ok = SaucedCarts.performCartTransfer(player, loot, src, cart:getItemContainer())
+
+    if not Assert.isTrue(ok, "transfer into an equipped cart still succeeds") then return false end
+    if not Assert.isNil(cartExempt(cart),
+        "equipped cart has no world item — nothing to flag") then return false end
+    return Assert.isTrue(cart:getItemContainer():contains(loot),
+        "and the item actually moved")
+end
+
 --- Exact-segment CSV membership (trims each piece, no substring false hits).
 local function csvContains(csv, entry)
     local pos = 1

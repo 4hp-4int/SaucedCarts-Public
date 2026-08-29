@@ -585,8 +585,12 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
         -- re-add the same id to the floor panel each cycle.
         -- Vanilla ISDropWorldItemAction:complete uses this same pattern.
         local worldItem = dropSquare:AddWorldInventoryItem(item, dx, dy, dz, false)
+        -- Route the cleanup exemption through the shared helper rather than
+        -- poking setIgnoreRemoveSandbox directly: grepping for
+        -- markDropPersistent is how we audit "is every drop path covered?", and
+        -- a raw setter here reads as a gap that isn't one.
+        SaucedCarts.markDropPersistent(worldItem)
         if worldItem and worldItem.getWorldItem and worldItem:getWorldItem() then
-            worldItem:getWorldItem():setIgnoreRemoveSandbox(true)
             if worldItem:getWorldItem().transmitCompleteItemToClients then
                 worldItem:getWorldItem():transmitCompleteItemToClients()
             end
@@ -725,6 +729,33 @@ do
                 end
                 if destCart and destCart ~= srcCart and SaucedCarts.updateCartVisual then
                     SaucedCarts.updateCartVisual(destCart, player)
+                end
+
+                -- A cart a player is loading or unloading is a cart the player
+                -- is USING, whatever put it there. That matters because
+                -- WorldSpawning deliberately leaves loot-spawned carts without
+                -- the world-cleanup exemption — correct while the cart is
+                -- untouched scenery ("fresh unhandled loot being sweepable IS
+                -- the vanilla contract"), wrong the moment someone's cooler is
+                -- in it. Nothing forces you to equip a ground cart to fill it,
+                -- so without this a found-and-used cart keeps
+                -- ignoreRemoveSandbox=false forever and the chunk-load filter
+                -- (IsoGridSquare.java:3311, the flag's only reader) eats it
+                -- once it passes HoursForWorldItemRemoval — "left it a while,
+                -- came back, gone".
+                --
+                -- This is the same handled-vs-unhandled line vanilla draws at
+                -- ISDropWorldItemAction.lua:85, applied at the moment the cart
+                -- crosses it. Equipped carts have no world item, so
+                -- markDropPersistent no-ops on them; re-flagging an
+                -- already-exempt cart is free.
+                --
+                -- Deliberately independent of WorldCleanupGuard: this touches
+                -- only our own object, never the admin's WorldItemRemovalList,
+                -- so it needs no opt-in.
+                SaucedCarts.markDropPersistent(srcCart)
+                if destCart ~= srcCart then
+                    SaucedCarts.markDropPersistent(destCart)
                 end
             end)
         end

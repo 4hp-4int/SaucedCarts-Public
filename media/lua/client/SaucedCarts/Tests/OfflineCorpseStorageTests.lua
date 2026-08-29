@@ -39,6 +39,10 @@ local F = PZTestKit.Fixtures
 require "SaucedCarts/Core"
 require "SaucedCarts/Network"
 require "SaucedCarts/CorpseStorage"
+-- The load path funnels through SaucedCarts.performCartTransfer, which
+-- lives here. CorpseStorage cannot require it back (CartTransferInterceptor
+-- requires CorpseStorage), so the test has to pull it in explicitly.
+require "SaucedCarts/CartTransferInterceptor"
 
 local CS = SaucedCarts.CorpseStorage
 
@@ -112,12 +116,18 @@ local function makeDeadBody(opts)
     opts = opts or {}
     local priv = {
         id           = opts.id or 42,
+        -- Deliberately NOT equal to id. getID() is a static per-VM counter
+        -- (IsoMovingObject.java:95, :161) while ObjectID is the network-stable
+        -- key vanilla uses for corpse packets — keeping them distinct in the
+        -- fixture is what stops a test from passing on the wrong one.
+        objectId     = opts.objectId or ((opts.id or 42) + 1000),
         square       = opts.square,
         invalidated  = 0,
         corpseItem   = opts.corpseItem or makeCorpseItem({ weight = opts.corpseWeight or 60.0 }),
     }
     local b = { _type = "IsoDeadBody" }
     b.getID             = function(self) return priv.id end
+    b.getObjectIDAsLong = function(self) return priv.objectId end
     b.getItem           = function(self) return priv.corpseItem end
     b.getSquare         = function(self) return priv.square end
     b.invalidateCorpse  = function(self) priv.invalidated = priv.invalidated + 1 end
@@ -309,6 +319,16 @@ tests["handle_happy_path_grapple_body_via_id_lookup"] = function()
     local cart = makeRegisteredCart({ capacity = 150 })
     player:getInventory():AddItem(cart)
 
+    -- Run as the server. The add-broadcast now comes from performCartTransfer,
+    -- which correctly gates it on isServer() — the old hand-rolled call in this
+    -- handler was ungated and fired even on a client, which was pointless at
+    -- best. The no-double-send guarantee is what matters, and it only means
+    -- anything in the context that actually broadcasts.
+    local origIsServer = _G.isServer
+    local origSendCmd  = _G.sendServerCommand
+    _G.isServer = function() return true end
+    _G.sendServerCommand = function() end
+
     local ok = CS.handleLoadCorpseToCart(player, {
         cartId    = cart:getID(),
         ghostId   = 501,
@@ -316,6 +336,8 @@ tests["handle_happy_path_grapple_body_via_id_lookup"] = function()
         ghostX    = 0, ghostY = 0, ghostZ = 0,
     })
 
+    _G.isServer = origIsServer
+    _G.sendServerCommand = origSendCmd
     _G.instanceof = origIO
 
     local cartContainer = cart:getItemContainer()
