@@ -1,0 +1,21 @@
+[h1]SaucedCarts v2.1.21[/h1]
+
+[b]Carts left in the world could vanish. Three ways that could happen, all closed.[/b]
+The game has a cleanup setting that sweeps away items lying on the ground after a while, and it is supposed to skip anything a player put there deliberately. Every drop the mod itself performs was already marked as deliberate. What we missed were the carts that reach the ground some other way. The game's own "your hands are too full, drop that" code puts a cart down without marking it — that fires when you grab a corpse, take one back out of a container, or get into a vehicle. A cart you found in the world and started using stayed marked as untouched scenery no matter how much of your gear went into it, because nothing says you have to pick a cart up to load it. And carts used with the corpse feature had the same gap on both the loading and unloading side. All three now mark the cart as yours the moment you actually use it, so it is still there when you come back for it. The symptom this fixes is the worst kind: you park a loaded cart somewhere, wander off, return, and the cart and everything in it is simply gone.
+
+[b]Corpse loading in multiplayer is properly wired up now.[/b]
+This is the opt-in corpse feature, still off by default. Loading a body into a cart used to run down its own private code path, separate from every other way items move into a cart, which meant it quietly missed things the normal path handles: the cart's appearance did not refresh when you loaded a body (a background repair sweep was fixing it about fifteen seconds later, which is why it looked laggy rather than broken), items inside bags inside the cart did not sync correctly, and the cart never got marked as in-use for the cleanup problem above. Corpse loading now goes through the same well-tested path as everything else, so it inherits all of that automatically.
+
+[b]Bodies left lying at the spot where you grabbed them.[/b]
+Two separate problems, both fixed. We were identifying corpses over the network using an ID number that means different things on different machines, so the cleanup was essentially matching at random. That now uses the same identifier the game itself uses for corpses, so it finds the right body every time. Separately, we were destroying the game's own temporary stand-in for a grabbed corpse, and it turns out that stand-in is exactly what the game uses to tidy up afterwards. Removing it left the leftover body stranded permanently, which is the very thing we were trying to prevent. We tested this on a live two-player server with the cleanup switched off entirely and confirmed the game handles it correctly on its own, so we now leave it alone.
+
+[b]Loaded carts respect your loot settings.[/b]
+Carts that spawn in the world with items already in them now obey the same loot options as every other container: per-category rarity, the loot-thins-out-over-time setting, banned item lists, and the option that turns off hand-placed story stashes. Previously a server running low loot settings would find shopping carts quietly handing out gear the rest of the world had been tuned to withhold. Harder settings now produce thinner carts rather than differently-stocked ones, and a cart never spawns with something an admin has banned. If your settings are at normal or generous, nothing changes.
+
+[h1]Compatibility[/h1]
+[list]
+[*][b]Save-safe.[/b] No save changes, no new options, no migration. Safe to apply mid-run.
+[*][b]Carts already lost to this are not recoverable[/b] — the cleanup deletes them at the point the area reloads. Carts still in your world are protected from now on, and any cart you use from here on gets marked the first time you put something in or take something out.
+[*][b]Multiplayer servers:[/b] update the server and the clients. A player still on an older version gets the fixes that run server-side, but the corpse cleanup improvements need the newer client too. Nothing breaks in the mixed state; an old client on a new server and a new client on an old server both behave sanely.
+[*][b]Corpse storage remains an opt-in beta[/b] and is still off unless you switch it on in the sandbox options.
+[/list]

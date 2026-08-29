@@ -2,6 +2,225 @@
 
 All notable changes to SaucedCarts are documented here. Latest version first.
 
+## v2.1.21
+
+### Carts swept by world cleanup: three paths that never got the exemption
+
+`isIgnoreRemoveSandbox` has exactly one reader — the discard filter in
+`IsoGridSquare.load` (IsoGridSquare.java:3311) — so a world cart without it is
+silently discarded during chunk deserialization once it passes
+`HoursForWorldItemRemoval`. v2.1.16 flagged the five drop paths SaucedCarts
+owns. Three more turned up live on the dedi this cycle, all of them cases where
+a cart reaches or sits in the world by a route that never calls our own drop
+code.
+
+**Vanilla's `forceDropHeavyItems` — the sixth drop path, and it is vanilla's.**
+`ISEquipWeaponAction.lua:74-97` puts the held item on the ground with a bare
+`AddWorldInventoryItem` and never calls `setIgnoreRemoveSandbox`, unlike
+`ISDropWorldItemAction.lua:85`, `ISDropVehicleItemAction.lua:51` and
+`ItemSpawner.java:37`, which all do, each with the comment "avoid the item to be
+removed by the SandboxOption WorldItemRemovalList". Carts carry
+`base:heavyitem`, so `ISGrabCorpseAction:perform`, `ISGrabCorpseItem:complete`,
+`ISEnterVehicle` and `ISEquipWeaponAction` all drop them through here.
+`ForceDropGuard.makeGuardedForceDrop` wrapped that function but only cleared
+stale hand refs (dupe vector V1) before delegating — and a pass-through wrapper
+inherits the wrapped function's omissions. It now snapshots held carts BEFORE
+the stale-ref guard runs (that guard clears hands, and so does vanilla, so the
+snapshot has to come first) and applies `markDropPersistent` to each after
+delegation.
+
+**Transfer time.** `WorldSpawning` deliberately leaves loot-spawned carts
+unflagged — correct while the cart is untouched scenery, wrong the moment
+someone's cooler is in it. Nothing forces you to equip a ground cart in order to
+fill it, so a found-and-used cart kept `ignoreRemoveSandbox=false` forever:
+"left it a while, came back, gone." The `performCartTransfer` chokepoint now
+flags both the source and the destination cart on every transfer — the same
+handled-vs-unhandled line vanilla draws at `ISDropWorldItemAction.lua:85`,
+applied at the moment the cart crosses it. Deliberately independent of
+`WorldCleanupGuard`: this touches only our own object, never the admin's
+`WorldItemRemovalList`, so it needs no opt-in. Equipped carts have no world
+item, so the call no-ops on them.
+
+**Corpse in and out.** The load side inherits the flag through the pipeline
+convergence below. The unload side needs its own call, because the common case
+(`age < skeletonAt`) delegates straight to vanilla's `ISGrabCorpseItem:complete`,
+which does `srcContainer:DoRemoveItem` itself and never reaches
+`performCartTransfer`.
+
+Folded in along the way: `performCartTransfer`'s own drop branch now routes
+through `markDropPersistent` instead of poking `setIgnoreRemoveSandbox`
+directly. Grepping for that helper is how this audit gets done, and a raw setter
+reads as a gap that isn't one.
+
+### Corpse loading converged onto the transfer pipeline
+
+`handleLoadCorpseToCart` did its own `AddItem` + `sendAddItemToContainer` +
+`setDrawDirty`, which made it a second item-movement pipeline running beside
+`performCartTransfer`. Every cross-cutting cart concern then had to be
+remembered twice, and three times it wasn't: loot-respawn flags (fixed 2026-06
+in the transfer path only), ground-cart visual refresh (the live dedi log shows
+`GroundVisualReconciler`'s ~15s sweep healing the cart after *every* corpse
+load — the safety net acting as the mechanism), and the world-cleanup exemption
+above.
+
+The load is now
+`SaucedCarts.performCartTransfer(player, corpseItem, nil, cartContainer, nil, bodySquare)`.
+The floor→container branch is exactly the right shape: a freshly minted corpse
+item (`deadBody:getItem()`) has no world item, so that branch's world-removal
+block is skipped and what remains is the `AddItem`, the server-gated broadcast,
+`repairContainerUpdate` (nested-container sync the corpse path never had at all)
+and `setDrawDirty`. The chokepoint wrapper then supplies `updateCartVisual` and
+`markDropPersistent` for free. The body's square is passed as the source to
+select the branch; `srcContainer` stays nil because the item genuinely came from
+nowhere.
+
+`performCartTransfer` is referenced late by necessity — `CartTransferInterceptor`
+requires `CorpseStorage`, so `CorpseStorage` cannot require it back without a
+cycle. The reference is guarded with an explicit `type(...) ~= "function"` check
+that logs through `.error()`, because the silent failure mode (every corpse load
+quietly refused) is a session-eater. Behaviour change worth knowing: the
+add-broadcast is now `isServer()`-gated, where the old hand-rolled call was
+ungated and fired on clients too.
+
+The unload side is deliberately NOT converged. Vanilla `ISGrabCorpseItem:complete`
+→ `pickUpCorpseItem` means "take it out and DRAG it"; `performCartTransfer`'s
+drop branch means "take it out and PUT IT DOWN". Different operations, not
+duplicates.
+
+### The grapple-wrapper purge is gone — vanilla owns that cleanup
+
+Removed after a live dry run proved it was pure hazard. `reanimate()` stamps the
+original body's ObjectID onto the grapple wrapper zombie
+(IsoDeadBody.java:2045), `NetworkZombieAI:182` writes it into `ZombiePacket`, and
+every client calls `IsoDeadBody.removeDeadBody(reanimatedBodyId)` once the
+wrapper reaches `ZombieOnGroundState` (:56-57 and :115-116, both
+`GameClient.client`-gated), which resolves each client's own stale copy through
+its `ObjectIDManager`. **The wrapper is the ID carrier for its own cleanup.**
+`purgeGrappleZombie` removed it from the cell lists, so the wrapper never ticked
+again, so `ZombieOnGroundState` never ran, so `removeDeadBody` never fired —
+stranding the exact body the purge existed to prevent. The v2.1.16 60-tick
+deferral did not make that safe, it only widened the window.
+
+The timing was never stable either, which is what killed the "it only ever fires
+where it's harmless" defence: across runs the observer's wrapper was sometimes
+already gone at tick 60 and sometimes still present. The dry run had BOTH
+clients at `present=true` — so with the purge live we would have destroyed the
+carrier on the observer, the one client that actually holds a stale body. (The
+actor's client has none: `ISGrabCorpseAction` defines `:complete()` so it
+replicates, and the actor's own client ran `pickUpCorpse` → `reanimate()` and
+removed its local copy itself.)
+
+Dry-run result, reporting presence and changing nothing: the server showed zero
+`ReanimatedForGrappleOnly` wrappers and zero `IsoDeadBody` within three tiles of
+the grab site, and both players confirmed nothing visible on either screen.
+Vanilla clears the stale body and retires the wrapper unaided.
+
+Deleted: `purgeGrappleZombie`, the zombie branch of `handleRemoveGhostCorpse`
+(now a logged no-op, so a new client on a ≤2.1.20 server still broadcasting it
+behaves sanely rather than erroring), the server-side zombie-kind
+`removeGhostCorpse` broadcast, and the `_purgeGrappleZombie` test hook. Kept:
+the `kind="body"` purge — that path has no wrapper and no `reanimate()`, so
+there is no vanilla carrier to protect.
+
+Settled and commented in place at the same time: no `sendCorpse` at load time.
+An MP client never builds its own corpse, so no client has this body and the
+`removeCorpse` broadcast is a no-op on all of them — but publishing one would
+materialize a corpse on every nearby client that we would then have to chase and
+delete, and the delete cannot be ordered against the add (`AddCorpseToMap` is
+reliability=3 RELIABLE_ORDERED, `RemoveCorpseFromMap` is reliability=2
+unordered). It would trade a real new failure mode for a problem that does not
+exist.
+
+### Corpse ghost purge re-keyed to ObjectID
+
+The client sent, and the server matched on, `IsoMovingObject.getID()` — handed
+out by a static per-VM counter (IsoMovingObject.java:95, :161), so the id one
+client holds for a body is unrelated to the server's and the lookup could never
+match except by coincidence. `captureGhost`, `findBodyAtSquare` and the
+client-side purge now key on `getObjectIDAsLong()`, the network-stable
+identifier vanilla itself uses for corpse packets and stamps onto the client's
+copy in `AddCorpseToMapPacket` (:55, :85). ObjectID is tried across the whole
+square first, with the legacy `getID()` pass kept afterwards so a pre-fix client
+still resolves on the rare occasions it happened to coincide — and so that a
+real ObjectID match always beats a `getID()` coincidence. The body purge stays
+single-shot on the same 60-tick deferral (a retry loop was tried and removed;
+its only value was tolerating `AddCorpseToMap` landing after our command, and a
+full second is already enormous next to packet delivery on an established
+connection) but now logs a MISS when it finds nothing, so a player reporting a
+body they can see and cannot touch leaves something greppable instead of
+silence.
+
+### Added: loaded carts obey the vanilla loot sandbox
+
+A loaded cart is a container of loot, so it answers to the same knobs every
+other container does. A server running Insane loot rarity, a banned-item list,
+or late-game loot decay would otherwise find carts quietly handing out the loot
+the rest of the world was tuned to withhold. Three vanilla settings, each
+applied where vanilla applies it:
+
+- **Per-item category rarity.** `ItemPickerJava.getLootModifier(itemType)`
+  returns the item's loot-category multiplier (the B42 `FoodLootNew` /
+  `WeaponLootNew` / `ToolLootNew` / … sandbox floats) and returns 0.0 when the
+  item sits on the admin `LootItemRemovalList` or its whole category is set to
+  None (ItemPickerJava.java:1497-1512). That is why a zero is an unconditional
+  skip rather than just a low roll: vanilla's own container path returns a 0.0
+  spawn chance for those (`getActualSpawnChance`:2104-2106). Calling this from
+  Lua is vanilla's own idiom (StoryTable_Initialization.lua:9). Junk padding
+  gets vanilla's `isJunk` clamp (ItemPickerJava.java:2086-2092) — exempt from
+  category scaling, still subject to the removal list, and a banned filler type
+  is skipped rather than substituted (the guard counter still advances, so an
+  all-banned junk pool terminates instead of spinning).
+- **Loot decay over time.** `getSandboxOptions():getCurrentLootMultiplier()`
+  (SandboxOptions.java:1283-1290, `1 - diminishedLootPercentage/100`). Vanilla
+  folds this into the per-item spawn chance; we fold it into the cart's load
+  chance instead — the same net effect on a two-stage decide-then-fill design,
+  without double-dipping the same scalar.
+- **RemoveStoryLoot.** The survivor cache (weapons and ammo abandoned in a cart)
+  is a hand-authored narrative stash, i.e. exactly the randomized world story
+  this option exists to switch off. With it on, that tier degrades to an ordinary
+  loaded cart rather than to empty, and the survivor roll is still consumed
+  unconditionally so the RNG stream up to that decision is identical either way.
+
+Scaling is downward only: a modifier at or above 1.0 keeps the designed load and
+never inflates it past the tier's weight budget. A rejected pick is simply not
+placed — a harder world yields a thinner cart rather than a differently-themed
+one, and we never re-roll to make up the count. Every lookup falls back to "no
+gating" when the Java side isn't reachable, so offline tests and any context
+without a loaded script manager keep legacy behaviour rather than silently
+spawning nothing. The sandbox read happens per spawn rather than being cached,
+because `getCurrentLootMultiplier` is a function of world age and an admin can
+retune mid-session.
+
+### Technical
+
+- Cart-push pose release is now covered. `OfflineCartPoseReleaseTests.lua` (new)
+  locks the release half of the pose contract after a B42.20 dedi report
+  concluding "we found no reset for those three variables in the codebase". The
+  reset does exist (`SaucedCarts.clearCartPose`), and the load-bearing caller is
+  not any individual put-down path but `CartStateHandler`'s per-frame hand-state
+  transition — driven off `getPrimaryHandItem()`, so it fires for every way a
+  cart can leave the hands, successful drop or not, including the reported
+  failure path where the put-down lands the cart back in the player's main
+  inventory. No code change was needed; the wiring was simply untested, which is
+  the part the report was actually about.
+- Suite 570/570, up from 528. New files: `OfflineCartLootSandboxTests.lua`,
+  `OfflineCartPoseReleaseTests.lua`, `OfflineCorpseCartExemptionTests.lua`.
+- Sensitivity-proven throughout: neutering the shared chokepoint's
+  `markDropPersistent` breaks the corpse exemption test (proving it now inherits
+  from the shared path), and reverting the convergence to a direct `AddItem`
+  breaks both the exemption and the repaint test. The three force-drop exemption
+  tests all fail against neutered code, while
+  `_leaves_non_cart_heavy_items_alone` correctly stays green as a precision
+  no-op contract — we own carts, not every heavyitem.
+- `OfflineCorpseObserverTests.lua` gained `client_never_touches_the_grapple_wrapper`
+  (asserts the wrapper is never removed, neither synchronously nor deferred, and
+  that nothing stays queued); its server-broadcast test now asserts that no
+  zombie-kind broadcast is sent at all.
+- Offline tests exercising the corpse path must
+  `require "SaucedCarts/CartTransferInterceptor"` explicitly or the handler
+  no-ops — that broke 7 existing tests when the convergence landed.
+- Save-safe: `SCHEMA_VERSION` stays 3, `API_VERSION` stays 1, no migration.
+
 ## v2.1.20
 
 ### Common Sense's ground "Equip" no longer pockets carts
