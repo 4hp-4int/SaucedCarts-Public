@@ -390,6 +390,60 @@ tests["applyMultipliers_stamps_weight_reduction_on_outer_container"] = function(
     return true
 end
 
+tests["applyMultipliers_allows_a_full_hundred_percent_reduction"] = function()
+    -- Player report: "items added to the cart should not increase the
+    -- encumbrance of the player". 100 is the value that does exactly that, the
+    -- option tooltip says so in as many words ("100 = items weigh nothing"),
+    -- and the sandbox option was capped at max = 99 — so a player who read the
+    -- tooltip and tried to follow it could not. The engine has always accepted
+    -- it: InventoryContainer.setWeightReduction clamps to [0, 100], not [0, 99].
+    F.withSandbox("SaucedCarts", { WeightReduction = 100, CapacityMultiplier = 100 }, function()
+        local cart = makeRegisteredCart({ initialWeightReduction = 95 })
+        SaucedCarts.applyMultipliers(cart)
+        Assert.equal(cart:getWeightReduction(), 100,
+            "100% reaches the wrapper unclamped — the option's max was the only limit")
+    end)
+    return true
+end
+
+tests["weight_reduction_contract_matches_vanillas_equipped_weight_formula"] = function()
+    -- Documents WHAT the setting actually does, because it reliably confuses
+    -- people. InventoryContainer.getEquippedWeight (java:289-296) is:
+    --
+    --   actualWeight * equippedOrWornEncumbranceMultiplier
+    --     + contentsWeight * (1 - reduction/100)
+    --
+    -- Two independent terms. The reduction scales ONLY the contents; the
+    -- cart's own weight is never reduced by it. So "95% weight reduction" does
+    -- not mean "carry a heavy cart for free" — it means the stuff inside
+    -- weighs 5% of normal, and you always pay for the cart itself.
+    -- equippedOrWornEncumbranceMultiplier is 0.3 (defines.lua:60).
+    local function equippedWeight(actual, contents, reduction)
+        local mult = (reduction > 0) and (1.0 - reduction / 100.0) or 1.0
+        return actual * 0.3 + contents * mult
+    end
+
+    -- An 8kg cart holding 50kg, at the 95 default: 2.4 for the cart, 2.5 for
+    -- the load.
+    local at95 = equippedWeight(8.0, 50.0, 95)
+    if not Assert.isTrue(math.abs(at95 - 4.9) < 0.001,
+        "at 95 a full cart costs 4.9kg (2.4 cart + 2.5 contents), got " .. tostring(at95)) then
+        return false
+    end
+
+    -- At 100 the contents term vanishes entirely — the reporter's expectation.
+    local at100 = equippedWeight(8.0, 50.0, 100)
+    if not Assert.isTrue(math.abs(at100 - 2.4) < 0.001,
+        "at 100 only the cart's own weight remains, got " .. tostring(at100)) then
+        return false
+    end
+
+    -- And the floor is not zero: 100% reduction still leaves the cart itself.
+    -- Anyone expecting a truly weightless pushed cart needs a different lever.
+    return Assert.isTrue(at100 > 0,
+        "even at 100 the cart's own weight is still carried")
+end
+
 tests["applyMultipliers_reapplies_weight_reduction_past_oneshot_guard"] = function()
     -- Existing carts already have SaucedCarts_multipliersApplied = true, which
     -- short-circuits applyMultipliers. Weight reduction must STILL re-stamp so a

@@ -236,6 +236,35 @@ approximates. `padToFillState` takes an optional `contextKey` and draws from
 `buildJunkPool` when the context has any, falling back to `JUNK_POOL` for the
 ~78% that do not. `WorldSpawning` passes `request.context`.
 
+### Weight Reduction can now actually be set to 100
+
+Player report: "it does add to the player's encumbrance... the items added to
+the cart should not increase the encumbrance of the player". Accurate, and the
+setting that fixes it was unreachable.
+
+`InventoryContainer.getEquippedWeight` (java:289-296) is two independent terms:
+
+```java
+actualWeight * equippedOrWornEncumbranceMultiplier + contentsWeight * (1 - reduction/100)
+```
+
+The reduction scales **only the contents**; the container's own weight is never
+touched by it. `equippedOrWornEncumbranceMultiplier` is 0.3 (`defines.lua:60`),
+so an 8kg cart holding 50kg costs 2.4kg for the cart plus 2.5kg for the load at
+the 95 default — 4.9kg total. At 100 the contents term is exactly zero and only
+the cart's own 2.4kg remains.
+
+`InventoryContainer.setWeightReduction` clamps to [0, 100], and our own option
+tooltip says verbatim "100 = items weigh nothing" — but the sandbox option was
+declared `max = 99`, so a player who read the tooltip and tried to follow it
+could not. Now `max = 100`. **The default is unchanged at 95.**
+
+Worth stating plainly because it reliably confuses people: this is a
+per-container reduction on the CONTENTS, not a "carry a heavy item for free"
+switch. The cart's own weight is always paid. 100% is the floor vanilla's
+formula allows — a truly weightless pushed cart would need a different
+mechanism entirely.
+
 ### Technical
 
 - Cart-push pose release is now covered. `OfflineCartPoseReleaseTests.lua` (new)
