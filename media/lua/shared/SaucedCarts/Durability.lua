@@ -134,6 +134,29 @@ function SaucedCarts.Durability.applyAccumulatedDamage(cart, player)
     return cart:getCondition()
 end
 
+--- What the cart's condition WOULD be if accumulated damage were applied now.
+--- Pure: mutates nothing.
+---
+--- Needed because applyAccumulatedDamage has side effects a client must not
+--- perform in MP — it writes the new condition AND resets
+--- SaucedCarts_distancePushed to the remainder. A client that wants to know
+--- "would this drop break the cart?" has to ask without spending the distance,
+--- because the server-side handler needs the un-reset value to reach the same
+--- answer. Same projection AnimationSync.handleInstantDrop does before
+--- deciding broke-vs-survived.
+---@param cart InventoryItem
+---@return number projected condition after pending damage (0 = would break)
+function SaucedCarts.Durability.projectCondition(cart)
+    if not cart or not cart.getCondition then return 0 end
+    local current = cart:getCondition() or 0
+    local md = cart.getModData and cart:getModData()
+    local distance = (md and md.SaucedCarts_distancePushed) or 0
+    if distance <= 0 then return current end
+    local damage = math.floor(distance / TILES_PER_DAMAGE)
+    local projected = current - damage
+    return projected > 0 and projected or 0
+end
+
 --- Reset the threshold marker on a cart. Called by the repair flow so
 --- the player gets fresh warnings the next time the cart starts taking
 --- damage.

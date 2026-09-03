@@ -265,6 +265,53 @@ switch. The cart's own weight is always paid. 100% is the floor vanilla's
 formula allows — a truly weightless pushed cart would need a different
 mechanism entirely.
 
+### A cart that broke as you dropped it could stay on the server's books
+
+Player report (MP): "I unequipped it and dropped it completely out of my
+inventory. A few minutes later the server still seemed to think I was carrying
+it. The weight kept increasing over time, causing Pain, Muscle Strain and
+increasingly severe Weight moodles. God Mode didn't fix it."
+
+**The escalation is vanilla's, and it means only ONE stale reference is needed.**
+Above `HEAVY_LOAD` level 2, `BodyDamage.java:2313-2326` deals health damage and
+calls `addBackMuscleStrain`. `BodyDamage.java:2070-2082` then recomputes
+`setMaxWeight(maxWeightBase * weightMod - numStrengthReducers)`, where
+`numStrengthReducers` climbs with the `INJURED` moodle (+1/+2/+3 at levels
+2/3/4). So over-encumbrance causes injury, injury shrinks carrying capacity, and
+the same carried weight reads as heavier next cycle. Nothing has to accumulate
+for the moodles to worsen indefinitely, and God Mode does not help because it
+suppresses the damage without removing the item or clearing the moodles.
+
+**Our part was a single stale reference.**
+`ISDropWorldItemAction.complete` defines `complete`, so it replicates and its
+body runs on the player's client too. Its cart-break branch did
+`inventory:Remove(item)` plus `sendRemoveItemFromContainer` — which from a
+client is `SyncItemDelete`, `requiredCapability = Capability.EditItem`, admin
+only (`SyncItemDeletePacket.java:8`, verified on 42.20.4). The server refuses
+it, so the client loses the cart locally while the server goes on counting its
+weight. The unequip path had already solved this in v2.1.19 by delegating to
+`requestInstantDrop` (`ContainerRestrictions:270`); the drop path was missed.
+
+The fix mirrors it, with two constraints. It **projects** rather than applies:
+`applyAccumulatedDamage` writes the new condition *and* resets
+`distancePushed` to the remainder, so a client running it would send an
+already-spent distance and the server would reach a different verdict. New pure
+helper `SaucedCarts.Durability.projectCondition(cart)` — the same projection
+`AnimationSync.handleInstantDrop` already did inline, now shared. And it is
+**scoped to the break case**: a normal drop still falls through to vanilla's own
+replicated `complete()`, which syncs correctly unaided.
+
+Only the break path was affected, so a cart had to be at or near zero condition
+as it was put down. Carts already stuck this way are recoverable — the server
+still holds the cart, so a full relog surfaces it in the inventory again and a
+clean drop sticks.
+
+Tests written before the fix and confirmed to fail against the old code
+(`OfflineDropActionTests.lua`, which previously only exercised `isValid`): no
+local `Remove` on an MP client, no admin-only delete packet, delegation
+actually sent, and a singleplayer precision test that the local path still
+works where there is no server to delegate to.
+
 ### Technical
 
 - Cart-push pose release is now covered. `OfflineCartPoseReleaseTests.lua` (new)

@@ -472,6 +472,53 @@ local function initDropActionHook()
         end)
 
         if isCart then
+            -- MP CLIENT + THIS DROP WOULD BREAK THE CART -> delegate, mutate nothing.
+            --
+            -- complete() replicates (the class defines it), so this body runs on
+            -- the player's client too. The break branch below removes the cart
+            -- from the inventory and calls sendRemoveItemFromContainer — which
+            -- from a client is SyncItemDelete, requiredCapability =
+            -- Capability.EditItem, admin only (SyncItemDeletePacket.java:8,
+            -- verified 42.20.4). The server refuses it, so the client loses the
+            -- cart locally while the SERVER GOES ON COUNTING ITS WEIGHT.
+            --
+            -- That single stale reference is enough to produce the whole
+            -- reported spiral, because the escalation is vanilla's: past
+            -- HEAVY_LOAD level 2, BodyDamage:2313-2326 adds back muscle strain
+            -- and health damage, and BodyDamage:2070-2082 shrinks maxWeight as
+            -- the INJURED moodle climbs — so the same carried weight reads as
+            -- heavier each cycle. God Mode does not help: it stops the damage
+            -- without removing the item.
+            --
+            -- Projected, not applied: applyAccumulatedDamage would write the new
+            -- condition and reset distancePushed to the remainder, and the server
+            -- handler needs that un-reset value to reach the same verdict.
+            -- Non-breaking drops deliberately fall through to vanilla's own
+            -- replicated complete(), which syncs correctly on its own.
+            if isClient() and self.character and self.character.getOnlineID
+                and self.character:getOnlineID() then
+                local wouldBreak = false
+                pcall(function()
+                    wouldBreak = SaucedCarts.Durability.projectCondition(self.item) <= 0
+                end)
+                if wouldBreak then
+                    pcall(function()
+                        local md = self.item:getModData()
+                        if SaucedCarts.Network and SaucedCarts.Network.sendToServer then
+                            SaucedCarts.Network.sendToServer(self.character,
+                                "requestInstantDrop", {
+                                    cartId = self.item:getID(),
+                                    distancePushed = (md and md.SaucedCarts_distancePushed) or 0,
+                                })
+                        end
+                        SaucedCarts.clearCartPose(self.character)
+                    end)
+                    SaucedCarts.debug("Drop would break cart - delegated to server (MP-safe)")
+                    pcall(function() ISBaseTimedAction.perform(self) end)
+                    return
+                end
+            end
+
             -- Wrap durability logic in pcall - never break vanilla drop
             local cartBroke = false
             pcall(function()
