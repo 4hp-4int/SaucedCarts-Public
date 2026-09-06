@@ -41,6 +41,16 @@ end
 
 
 return {
+    -- Real-engine mode (pz-test-kit EngineBridge): projectzomboid.jar's
+    -- classes, vanilla + SaucedCarts scripts parsed by the real
+    -- ScriptManager, PZEngine.instanceItem minting real items — including
+    -- real InventoryContainers with real ItemContainer inventories, the
+    -- exact thing this config's header said kept tests in-game-only.
+    -- Engine test files guard on PZEngine.available(); no PZ install (CI)
+    -- means they contribute nothing. The global instanceItem is untouched
+    -- (no engine_items): the offline suite is fixture-based by design.
+    engine = true,
+
     -- Cross-mod: none required.
     dependencies = {},
 
