@@ -167,36 +167,104 @@ end
 
 --- Find the cart by stored ID
 --- Re-finds the cart using stored primitives (MP-safe)
-function ISCartEquipAction:findCart()
-    -- Search player inventory first
-    local playerInv = self.character:getInventory()
-    if playerInv then
-        local items = playerInv:getItems()
-        for i = 0, items:size() - 1 do
-            local item = items:get(i)
-            if item:getID() == self.cartId then
-                return item
-            end
+--- Depth-first search of a container for the cart by ID, descending into
+--- nested containers (a cart CAN reach the inside of a bag: vanilla "put in
+--- container" has no cart-specific gate, and the client's containsID check —
+--- which routes to this action — is not recursive either, so the server must
+--- match the client's reachability or the equip desyncs). Depth-capped:
+--- containers do not legitimately nest deeper than a few levels, and a
+--- corrupt self-referencing chain must not hang the server.
+---@param container ItemContainer|nil
+---@param depth number|nil
+---@return InventoryItem|nil
+function ISCartEquipAction:searchContainerForCart(container, depth)
+    if not container then return nil end
+    depth = depth or 0
+    if depth > 4 then return nil end
+
+    local items = container:getItems()
+    if not items then return nil end
+    for i = 0, items:size() - 1 do
+        local item = items:get(i)
+        if item:getID() == self.cartId then
+            return item
+        end
+        if instanceof(item, "InventoryContainer") then
+            local inner = item.getInventory and item:getInventory() or nil
+            local found = self:searchContainerForCart(inner, depth + 1)
+            if found then return found end
         end
     end
+    return nil
+end
 
-    -- If source was a vehicle, search nearby vehicle containers
-    if self.sourceType == "vehicle" and self.vehicleX then
-        local square = getCell():getGridSquare(self.vehicleX, self.vehicleY, self.vehicleZ)
-        if square then
-            -- Search vehicles on this square and adjacent squares
-            for dx = -1, 1 do
-                for dy = -1, 1 do
-                    local checkSquare = getCell():getGridSquare(self.vehicleX + dx, self.vehicleY + dy, self.vehicleZ)
-                    if checkSquare then
-                        local vehicle = checkSquare:getVehicleContainer()
-                        if vehicle then
-                            local found = self:searchVehicleForCart(vehicle)
+--- Scan the squares in a (2r+1)² window around x,y,z for the cart: vehicle
+--- part containers and world container objects (crates, shelves, lockers).
+---@return InventoryItem|nil
+function ISCartEquipAction:searchSquaresForCart(x, y, z, radius)
+    if not x or not y or not z then return nil end
+    local cell = getCell()
+    if not cell then return nil end
+    for dx = -radius, radius do
+        for dy = -radius, radius do
+            local square = cell.getGridSquare and cell:getGridSquare(x + dx, y + dy, z) or nil
+            if square then
+                local vehicle = square.getVehicleContainer and square:getVehicleContainer() or nil
+                if vehicle then
+                    local found = self:searchVehicleForCart(vehicle)
+                    if found then return found end
+                end
+                if square.getObjects then
+                    local objects = square:getObjects()
+                    if objects then
+                        for i = 0, objects:size() - 1 do
+                            local obj = objects:get(i)
+                            local container = obj and obj.getContainer and obj:getContainer() or nil
+                            local found = self:searchContainerForCart(container)
                             if found then return found end
                         end
                     end
                 end
             end
+        end
+    end
+    return nil
+end
+
+--- Server-side cart re-resolution from the action's serialized primitives
+--- (cartId, sourceType, vehicleX/Y/Z). This runs on the AUTHORITATIVE copy of
+--- a replicating action: a miss here after the client predicted the equip is
+--- the reported "I try to push it and it just goes into my inventory". So the
+--- ladder must cover every location the client would have offered "Push" for,
+--- not just the tidy ones:
+---   1. Player inventory, recursively (a cart nested in a bag).
+---   2. The carried vehicle coords, 5x5 (long vehicles put the trunk further
+---      from the reference square than the old 3x3 reached).
+---   3. Last resort, ANY sourceType: the squares around the CHARACTER — the
+---      player clicked the cart, so it is within reach. Covers world
+---      containers (the client labels those "inventory"), vehicles whose
+---      square was nil at click time (coords never captured), and drift
+---      beyond the window. ID-exact matching everywhere: the ladder can
+---      widen but never resolve the wrong item.
+function ISCartEquipAction:findCart()
+    -- 1. Player inventory, recursive.
+    local found = self:searchContainerForCart(self.character:getInventory())
+    if found then return found end
+
+    -- 2. Carried vehicle coords.
+    if self.sourceType == "vehicle" and self.vehicleX then
+        found = self:searchSquaresForCart(self.vehicleX, self.vehicleY, self.vehicleZ, 2)
+        if found then return found end
+    end
+
+    -- 3. Around the character.
+    if self.character and self.character.getX then
+        local cx = self.character:getX()
+        local cy = self.character:getY()
+        local cz = self.character:getZ()
+        if cx and cy and cz then
+            found = self:searchSquaresForCart(math.floor(cx), math.floor(cy), math.floor(cz), 2)
+            if found then return found end
         end
     end
 

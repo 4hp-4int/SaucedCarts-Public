@@ -208,6 +208,42 @@ tests["engine_nested_bag_in_cart_transfers_whole"] = function()
     return Assert.equal(bag:getInventory():getItems():size(), 1, "and nothing duplicated inside")
 end
 
+tests["engine_findCart_resolves_through_real_nested_containers"] = function()
+    -- The server-side equip resolver (ISCartEquipAction:findCart) walking
+    -- REAL Java containers: cart nested inside a real duffel inside the
+    -- "player inventory". The mock matrix (OfflineEquipResolutionTests)
+    -- proves the ladder's shape; this proves the walk against the real
+    -- getItems/instanceof/getInventory surface it runs on in production.
+    require "SaucedCarts/TimedActions/ISCartEquipAction"
+
+    local backpack = PZEngine.instanceItem("Base.Bag_BigHikingBag")
+    local duffel = PZEngine.instanceItem("Base.Bag_DuffelBag")
+    local cart = PZEngine.instanceItem("SaucedCarts.ShoppingCart")
+    duffel:getInventory():AddItem(cart)
+    backpack:getInventory():AddItem(duffel)
+
+    local action = setmetatable({
+        character  = { getInventory = function() return backpack:getInventory() end,
+                       getX = function() return nil end,
+                       getY = function() return nil end,
+                       getZ = function() return nil end },
+        cartId     = cart:getID(),
+        sourceType = "inventory",
+    }, { __index = ISCartEquipAction })
+
+    local found = action:findCart()
+    if not Assert.isTrue(found ~= nil, "nested real cart resolves") then return false end
+    if not Assert.equal(found:getID(), cart:getID(), "and it is the exact item") then return false end
+
+    -- ID-exactness on real items too: a different id resolves nothing.
+    local miss = setmetatable({
+        character  = action.character,
+        cartId     = cart:getID() + 1,
+        sourceType = "inventory",
+    }, { __index = ISCartEquipAction })
+    return Assert.isTrue(miss:findCart() == nil, "wrong id resolves nothing")
+end
+
 tests["engine_additem_does_not_enforce_capacity"] = function()
     -- Load-bearing lore made executable: ItemContainer.AddItem enforces
     -- NOTHING — capacity is the CALLER's job (TransactionManager server-
