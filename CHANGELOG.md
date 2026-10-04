@@ -87,6 +87,19 @@ The unload side is deliberately NOT converged. Vanilla `ISGrabCorpseItem:complet
 drop branch means "take it out and PUT IT DOWN". Different operations, not
 duplicates.
 
+### Pushing a cart that's inside a bag
+
+The findCart ladder (recursive inventory walk, ground-bag and world-container
+search) made the SERVER able to re-find a nested cart, but the client menu
+never reached it: `ContextMenu.isInPlayerInventory` used `containsID`, top level
+only, so a cart in a carried bag went to the loot handler -- which knew only
+ground and vehicle -- and failed with "Could not find cart location". Now any
+depth counts as carried (`getOutermostContainer`), a cart in ANY container
+(crate, bag on the ground, vehicle) routes to `ISCartEquipAction`, and
+`findCart`'s square scan also looks inside container items lying on the ground.
+Reproduced and verified live on two clients (bag in inventory, bag on the
+ground).
+
 ### Carts the engine drops itself: death, falls, climbs
 
 The world-cleanup exemption audit had covered every drop SaucedCarts performs

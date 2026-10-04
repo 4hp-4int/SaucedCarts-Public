@@ -1,42 +1,27 @@
 [h1]SaucedCarts v2.1.21[/h1]
 
-[b]Carts left in the world could vanish. Three ways that could happen, all closed.[/b]
-The game has a cleanup setting that sweeps away items lying on the ground after a while, and it is supposed to skip anything a player put there deliberately. Every drop the mod itself performs was already marked as deliberate. What we missed were the carts that reach the ground some other way. The game's own "your hands are too full, drop that" code puts a cart down without marking it — that fires when you grab a corpse, take one back out of a container, or get into a vehicle. A cart you found in the world and started using stayed marked as untouched scenery no matter how much of your gear went into it, because nothing says you have to pick a cart up to load it. And carts used with the corpse feature had the same gap on both the loading and unloading side. All three now mark the cart as yours the moment you actually use it, so it is still there when you come back for it. The symptom this fixes is the worst kind: you park a loaded cart somewhere, wander off, return, and the cart and everything in it is simply gone.
-
-[b]Corpse loading in multiplayer is properly wired up now.[/b]
-This is the opt-in corpse feature, still off by default. Loading a body into a cart used to run down its own private code path, separate from every other way items move into a cart, which meant it quietly missed things the normal path handles: the cart's appearance did not refresh when you loaded a body (a background repair sweep was fixing it about fifteen seconds later, which is why it looked laggy rather than broken), items inside bags inside the cart did not sync correctly, and the cart never got marked as in-use for the cleanup problem above. Corpse loading now goes through the same well-tested path as everything else, so it inherits all of that automatically.
-
-[b]A cart dropped when you die, fall or climb no longer vanishes later.[/b]
-When you die, take a bad fall, or climb through a window with a cart in your hands, the game itself drops the cart, and it did so without marking it as yours. On servers that clean up items left on the ground, that cart could disappear the next time the area loaded. It is now marked like every other cart you put down.
-
-[b]Corpses dragged out of a cart onto the ground can be picked up again.[/b]
-A body taken out of a cart this way appeared on the ground but could not be grabbed or interacted with, because it was placed with its old position from wherever it first died. It now goes through the game's own corpse placement, so it lands exactly where you dropped it, for you and everyone else on the server. A broken cart spilling a corpse had the same problem and is fixed too. Thanks to the commenter who reproduced this on a dedicated server and sent the fix.
-
-[b]Bodies left lying at the spot where you grabbed them.[/b]
-Two separate problems, both fixed. We were identifying corpses over the network using an ID number that means different things on different machines, so the cleanup was essentially matching at random. That now uses the same identifier the game itself uses for corpses, so it finds the right body every time. Separately, we were destroying the game's own temporary stand-in for a grabbed corpse, and it turns out that stand-in is exactly what the game uses to tidy up afterwards. Removing it left the leftover body stranded permanently, which is the very thing we were trying to prevent. We tested this on a live two-player server with the cleanup switched off entirely and confirmed the game handles it correctly on its own, so we now leave it alone.
-
-[b]Loaded carts respect your loot settings.[/b]
-Carts that spawn in the world with items already in them now obey the same loot options as every other container: per-category rarity, the loot-thins-out-over-time setting, banned item lists, and the option that turns off hand-placed story stashes. Previously a server running low loot settings would find shopping carts quietly handing out gear the rest of the world had been tuned to withhold. A cart never spawns with something an admin has banned. If your settings are at normal or generous, nothing changes.
-
-Turning a category down now changes what a cart holds rather than how much. A cart is meant to be a reward for hauling it home, so if you have set firearms to extremely rare, a survivor cache arrives full of ammunition and gear instead of arriving empty. Suppressed items are still just as rare — they simply lose their share of the cart to whatever else belongs there.
-
-Two smaller things in the same area. Carts padded out to look full now use clutter drawn from the kind of place they came from, so a grocery cart gets dishcloths and paperwork rather than planks and jars. And carts no longer pick up the invisible placeholder items that some weapon mods put into the loot tables — those are stand-ins that turn into a real gun a moment after they spawn, which meant a cart could look nearly empty and then quietly contain a rifle, a magazine and two boxes of ammunition. They were also slipping past the firearms rarity setting entirely, because a placeholder is not yet a firearm when the game checks.
-
-[b]The Weight Reduction setting goes up to 100 now.[/b]
-If you would rather a loaded cart cost you nothing to push, you can set it there and the contents stop counting toward your encumbrance entirely. The setting's own description already said that 100 meant items weigh nothing, but the slider stopped one short of it, so nobody could actually do it. The default is unchanged.
-
-Worth explaining what this setting does, because it catches people out: it reduces the weight of what is [i]inside[/i] the cart, not the weight of the cart itself. At the default of 95, a cart holding fifty kilos of loot costs you about two and a half kilos for the load, plus about two and a half for the cart. Turning it up to 100 removes the first number. The second one stays no matter what you set — you are still holding onto the thing.
-
-[b]Pushing a cart no longer chatters to the server.[/b]
-In multiplayer the game used to tell the server how far you had pushed every few steps. It now sends that once, when you put the cart down, which is the only time the server needs it.
-
-[b]About "the server still thinks I'm carrying it".[/b]
-We looked into a report of a cart that kept weighing on a player after they dropped it, and tested every way of putting a cart down on a live server, including carts breaking as they are dropped. In every case the cart left the player's inventory on the server too. What the report describes matches the game's own overload effect: carrying too much hurts you, and being hurt lowers how much you can carry, so you can stay weighed down for a while after you drop the load. A heavily loaded cart can start this, because the cart itself always counts toward your weight and the contents still count for a little.
-
-[h1]Compatibility[/h1]
+[h1]Carts stop disappearing[/h1]
 [list]
-[*][b]Save-safe.[/b] No save changes, no new options, no migration. Safe to apply mid-run.
-[*][b]Carts already lost to this are not recoverable[/b] — the cleanup deletes them at the point the area reloads. Carts still in your world are protected from now on, and any cart you use from here on gets marked the first time you put something in or take something out.
-[*][b]Multiplayer servers:[/b] update the server and the clients. A player still on an older version gets the fixes that run server-side, but the corpse cleanup improvements need the newer client too. Nothing breaks in the mixed state; an old client on a new server and a new client on an old server both behave sanely.
-[*][b]Corpse storage remains an opt-in beta[/b] and is still off unless you switch it on in the sandbox options.
+[*]Carts left on the ground no longer vanish on servers that clean up dropped items. This covers every way a cart ends up on the ground, including carts you found and used where they stood, and carts the game drops for you when you die, fall, or climb through a window.
+[/list]
+
+[h1]Fixes[/h1]
+[list]
+[*]You can push a cart that is inside a bag, whether the bag is in your inventory or on the ground.
+[*]Corpses taken out of a cart land where you drop them and can be picked up again.
+[*]Corpse loading works properly in multiplayer, and bodies no longer get left behind where you grabbed them.
+[*]Weight Reduction can now be set to 100, so a cart's contents weigh nothing.
+[*]Pushing a cart no longer sends constant updates to the server.
+[/list]
+
+[h1]Loot[/h1]
+[list]
+[*]Carts that spawn with items now follow your server's loot settings, including rarity and banned items. Rarer categories are replaced with other fitting items instead of leaving the cart empty.
+[/list]
+
+[h1]Good to know[/h1]
+[list]
+[*]Weight Reduction lowers the weight of what's inside the cart, not the cart itself. Carrying too much can injure you, which lowers how much you can carry for a while, even after you put the load down.
+[*]Save-safe. In multiplayer, update the server and every player.
+[*]Corpse storage is still an opt-in beta, off by default.
 [/list]
