@@ -409,6 +409,55 @@ tests["world_equip_window_is_bounded"] = function()
     end)
 end
 
+-- The findCart report's own setup, reproduced live 2026-10-04: a cart inside a
+-- bag. The server's ladder handled it, but the CLIENT menu never reached it --
+-- its inventory check was top-level only (containsID), so a nested cart went
+-- to the loot handler and "Could not find cart location".
+
+tests["world_menu_counts_a_cart_in_a_carried_bag_as_in_inventory"] = function()
+    require "SaucedCarts/ContextMenu"
+    local CM = SaucedCarts.ContextMenu or require "SaucedCarts/ContextMenu"
+    local isIn = CM and CM._isInPlayerInventory
+    if not Assert.notNil(isIn, "ContextMenu exposes its inventory check") then return false end
+    return inWorld(function(w)
+        local bag = PZEngine.instanceItem("Base.Bag_DuffelBag")
+        local c = cart()
+        bag:getItemContainer():AddItem(c)
+        w.player:getInventory():AddItem(bag)
+        if not Assert.isTrue(isIn(w.player, c), "a cart in a carried duffel is in the player's inventory") then return false end
+        local loose = cart()
+        w.player:getInventory():AddItem(loose)
+        if not Assert.isTrue(isIn(w.player, loose), "a top-level cart still is") then return false end
+        local elsewhere = cart()
+        return Assert.isFalse(isIn(w.player, elsewhere), "a cart nobody carries is not")
+    end)
+end
+
+tests["world_equip_finds_cart_in_a_bag_on_the_ground"] = function()
+    return inWorld(function(w)
+        local bag = PZEngine.instanceItem("Base.Bag_DuffelBag")
+        local c = cart()
+        bag:getItemContainer():AddItem(c)
+        groundAt(1, 0, w):AddWorldInventoryItem(bag, 0.5, 0.5, 0)
+        local action = ISCartEquipAction:new(w.player, c:getID(), "inventory")
+        return Assert.isTrue(action:findCart() == c, "the server re-finds a cart in a bag set down beside the player")
+    end)
+end
+
+tests["world_equip_finds_cart_in_a_bag_in_inventory"] = function()
+    return inWorld(function(w)
+        local bag = PZEngine.instanceItem("Base.Bag_DuffelBag")
+        local c = cart()
+        bag:getItemContainer():AddItem(c)
+        w.player:getInventory():AddItem(bag)
+        local action = ISCartEquipAction:new(w.player, c:getID(), "inventory")
+        if not Assert.isTrue(action:findCart() == c, "resolved through the bag") then return false end
+        action:complete()
+        if not Assert.isTrue(w.player:getPrimaryHandItem() == c, "and equipped: in both hands") then return false end
+        return Assert.isFalse(bag:getItemContainer():contains(c), "out of the bag")
+    end)
+end
+
 -- ── 2.1.21: Weight Reduction 100 ──────────────────────────────────────────
 -- The sandbox max was 99 while the tooltip promised "100 = items weigh
 -- nothing". Executed against the real InventoryContainer: setWeightReduction

@@ -101,16 +101,18 @@ local function onPickupCartFromLoot(items, player, cart)
         return
     end
 
-    -- Second: check if cart is in a container (vehicle or other)
+    -- Second: the cart is inside a container -- a vehicle, a crate, a bag on
+    -- the ground. ISCartEquipAction handles all of them: its complete() takes
+    -- the cart out of whatever container findCart resolved it in, and
+    -- findCart's ladder reaches vehicles (by coords) and anything around the
+    -- character (world containers, bags lying on the ground). Previously only
+    -- the vehicle case was routed and everything else fell through to the
+    -- ground search below and an error.
     local cartContainer = cart:getContainer()
     if cartContainer then
-        local parent = cartContainer:getParent()
-        if parent and instanceof(parent, "BaseVehicle") then
-            -- Cart is in vehicle - ISCartEquipAction handles transfer + equip
-            SaucedCarts.debug(function() return "Cart in vehicle - using ISCartEquipAction for cart ID " .. tostring(cartId) end)
-            onPushCart(items, player, cart)
-            return
-        end
+        SaucedCarts.debug(function() return "Cart in a container - using ISCartEquipAction for cart ID " .. tostring(cartId) end)
+        onPushCart(items, player, cart)
+        return
     end
 
     -- Fallback: Search nearby squares for world item (in case getWorldItem() failed)
@@ -152,11 +154,20 @@ end
 ---@param playerObj IsoPlayer The player
 ---@param item InventoryItem The item to check
 ---@return boolean
+--- Carried by this player at ANY depth -- directly, or inside a bag they
+--- carry. containsID only looks at the top level, so a cart inside a bag
+--- read as "not in my inventory" and went to the loot handler, which knows
+--- only ground and vehicle -- "Could not find cart location" -- and the
+--- server's recursive findCart (2.1.21) was never reached. Live repro
+--- 2026-10-04, the findCart report's own setup: a cart in a duffel in the
+--- player's inventory.
 local function isInPlayerInventory(playerObj, item)
     if not playerObj or not item then return false end
     local playerInv = playerObj:getInventory()
     if not playerInv then return false end
-    return playerInv:containsID(item:getID())
+    if playerInv:containsID(item:getID()) then return true end
+    local outer = item.getOutermostContainer and item:getOutermostContainer()
+    return outer ~= nil and outer == playerInv
 end
 
 -- ============================================================================
@@ -504,6 +515,9 @@ end
 
 Events.OnFillWorldObjectContextMenu.Add(onFillWorldObjectContextMenu)
 Events.OnFillInventoryObjectContextMenu.Add(onFillInventoryObjectContextMenu)
+
+-- Test hooks (pz-test-kit) -- not public API.
+ContextMenu._isInPlayerInventory = isInPlayerInventory
 
 SaucedCarts.debug("ContextMenu loaded")
 

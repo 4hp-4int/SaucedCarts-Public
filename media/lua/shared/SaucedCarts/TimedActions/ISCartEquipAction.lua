@@ -225,6 +225,24 @@ function ISCartEquipAction:searchSquaresForCart(x, y, z, radius)
                         end
                     end
                 end
+                -- Container ITEMS lying on the ground (a bag someone set down).
+                -- They are IsoWorldInventoryObjects, whose getContainer() is
+                -- nil -- the container belongs to the item -- so the object
+                -- walk above never looks inside them.
+                if square.getWorldObjects then
+                    local worldObjects = square:getWorldObjects()
+                    if worldObjects then
+                        for i = 0, worldObjects:size() - 1 do
+                            local wo = worldObjects:get(i)
+                            local it = wo and wo.getItem and wo:getItem() or nil
+                            local inner = it and it.getItemContainer and it:getItemContainer() or nil
+                            if inner then
+                                local found = self:searchContainerForCart(inner)
+                                if found then return found end
+                            end
+                        end
+                    end
+                end
             end
         end
     end
