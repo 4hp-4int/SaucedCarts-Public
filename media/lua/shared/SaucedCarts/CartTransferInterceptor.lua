@@ -424,10 +424,11 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
         -- full IsoDeadBody state in their byteData buffer. Dropping them as
         -- a plain world inventory item leaves them un-grabbable (no
         -- IsoDeadBody exists on the square). Materialize via vanilla's
-        -- loadCorpseFromByteData and register via addCorpse — same path the
-        -- AddCorpseToMapPacket uses on receive.
-        -- Sandbox-gated: when CorpseStorage is off the item drops as a
-        -- regular world inventory item (vanilla behavior).
+        -- IsoGridSquare.tryAddCorpseToWorld (see the note at the call).
+        -- Sandbox-gated: when CorpseStorage is off the item takes the plain
+        -- drop path below -- whose AddWorldInventoryItem itself starts with
+        -- tryAddCorpseToWorld (IsoGridSquare.java:6129), so it still lands
+        -- as a positioned world corpse; this branch adds the rot gate.
         local corpseFeatureOn = SaucedCarts.CorpseStorage
             and SaucedCarts.CorpseStorage.isEnabled
             and SaucedCarts.CorpseStorage.isEnabled()
@@ -476,25 +477,67 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
                 ) end)
                 return true
             end
+            -- Materialize through vanilla's own placement,
+            -- IsoGridSquare.tryAddCorpseToWorld -- the path vanilla's Grab
+            -- (pickUpCorpseItem) and every item->world corpse drop use. It
+            -- deserializes the body, POSITIONS it on this square (x/y/z), sets
+            -- it rendering, registers it (addCorpse), broadcasts it
+            -- (GameServer.sendCorpse) and queues the item for cleanup.
+            --
+            -- The old shape -- loadCorpseFromByteData(dropSquare) + addCorpse +
+            -- sendCorpse -- skipped the positioning: with a square,
+            -- tryLoadCorpseFromByteData only does setSquare/setCurrent
+            -- (InventoryItem.java:524-527), so the body kept the x/y saved in
+            -- its byte data -- wherever it originally died. It sat in this
+            -- square's list while everything that finds a body by POSITION
+            -- (right-click, grab: canBeGrabbedFrom -> getGridSquare(x, y)) looked
+            -- elsewhere, and sendCorpse broadcast the stale position to every
+            -- client: a corpse you could see and not touch. Reported and fixed
+            -- on a dedicated server by a commenter; pinned by
+            -- corpse_unload_drag_rematerializes_the_same_body.
+            --
+            -- Do NOT add sendCorpse here: tryAddCorpseToWorld already
+            -- broadcasts on a server, and a second AddCorpseToMap is the V11
+            -- double-materialization class.
+            local dx, dy = 0.5, 0.5
+            if ISTransferAction and ISTransferAction.GetDropItemOffset then
+                pcall(function()
+                    dx, dy = ISTransferAction.GetDropItemOffset(player, dropSquare, item)
+                end)
+            end
+            local function placeOnSquare()
+                local okPlace, placed = pcall(function()
+                    return dropSquare:tryAddCorpseToWorld(item, dx, dy)
+                end)
+                return okPlace and placed or nil
+            end
             local t0 = getTimestampMs and getTimestampMs() or 0
-            local okLoad, body = pcall(function()
-                return item:loadCorpseFromByteData(dropSquare)
-            end)
+            local body = placeOnSquare()
+            local fallback = false
+            -- Corrupt byteData: tryLoadCorpseFromByteData throws inside
+            -- loadCorpseFromByteData, which falls back to a default body with
+            -- the square -- and createDefaultDeadBody(square) builds it via
+            -- IsoDeadBody(zombie, true, true), which ALREADY adds it to the
+            -- square and world, at the zombie's unset position. So rebuild
+            -- the byteData off-world (square nil: stored, never added) and
+            -- place it through the same vanilla path as the primary. The
+            -- player loses the original body's clothing/inventory but gets a
+            -- grabbable corpse instead of a soft-bricked item.
+            if not body and item.createAndStoreDefaultDeadBody then
+                local okRebuild = pcall(function() return item:createAndStoreDefaultDeadBody(nil) end)
+                if okRebuild then
+                    body = placeOnSquare()
+                    fallback = body ~= nil
+                end
+            end
             local t1 = getTimestampMs and getTimestampMs() or 0
-            if okLoad and body and dropSquare.addCorpse then
-                -- Restore vanilla's rot clock from stamped deathTime so
-                -- updateBodies resumes at the correct rot stage rather than
-                -- treating the rematerialized body as freshly-dead.
-                if SaucedCarts.CorpseStorage.restoreDeathTime then
+            if body then
+                -- Rot clock: the death time survives the byteData round trip
+                -- on its own (EngineCorpseCartTests); re-stamping is a cheap
+                -- guard for items stamped by older versions.
+                if not fallback and SaucedCarts.CorpseStorage.restoreDeathTime then
                     SaucedCarts.CorpseStorage.restoreDeathTime(item, body)
                 end
-                pcall(function() dropSquare:addCorpse(body, false) end)
-                -- H1 reconcile: the cart just lost a corpse. Cart may
-                -- still be equipped / grounded elsewhere; resolve its
-                -- current square and apply the delta. The body we just
-                -- materialized is already on the tile via addCorpse, so
-                -- that tile's CorpseCount is already correctly updated
-                -- by vanilla.
                 local srcCart = containerToCart(srcContainer)
                 if srcCart and SaucedCarts.CorpseStorage
                     and SaucedCarts.CorpseStorage.reconcile then
@@ -503,53 +546,14 @@ function SaucedCarts.performCartTransfer(player, item, srcContainer, destContain
                             SaucedCarts.CorpseStorage.cartTargetSquare(srcCart, player))
                     end)
                 end
-                -- MP: addCorpse alone doesn't broadcast to remote clients —
-                -- IsoDeadBody.addToWorld only updates local CorpseCount +
-                -- ObjectIDManager. Vanilla relies on sendCorpse (Lua-
-                -- exposed wrapper around GameServer.sendCorpse, see
-                -- LuaManager.java:3381) to fire AddCorpseToMapPacket to
-                -- all clients. Without this call, dedi unload leaves
-                -- other clients with no visible body. Safe in SP — the
-                -- Lua wrapper early-returns when GameServer.server is
-                -- false, so no-op in SP / client-only contexts.
-                if isServer() and type(sendCorpse) == "function" then
-                    pcall(function() sendCorpse(body) end)
+                if fallback then
+                    SaucedCarts.log("performCartTransfer: corpse byteData was bad; placed a default fallback body")
                 end
-                local t2 = getTimestampMs and getTimestampMs() or 0
                 SaucedCarts.log(function() return string.format(
-                    "performCartTransfer: materialized corpse at (%d,%d,%d) " ..
-                    "loadBytes=%dms addCorpse=%dms total=%dms",
-                    dropSquare:getX(), dropSquare:getY(), dropSquare:getZ(),
-                    t1 - t0, t2 - t1, t2 - t0
+                    "performCartTransfer: materialized corpse at (%d,%d,%d) in %dms",
+                    dropSquare:getX(), dropSquare:getY(), dropSquare:getZ(), t1 - t0
                 ) end)
                 return true
-            end
-            -- H2 (2026-04-24): primary materialization failed (corrupted
-            -- byteData, Java-internal exception). Try vanilla's secondary
-            -- fallback: createAndStoreDefaultDeadBody synthesizes a random
-            -- default body via the standard IsoDeadBody constructor path.
-            -- User loses the original body's clothing/inventory but gets a
-            -- grabbable corpse instead of a soft-bricked CorpseMale item.
-            if item.createAndStoreDefaultDeadBody then
-                local okFallback, fallbackBody = pcall(function()
-                    return item:createAndStoreDefaultDeadBody(dropSquare)
-                end)
-                if okFallback and fallbackBody and dropSquare.addCorpse then
-                    pcall(function() dropSquare:addCorpse(fallbackBody, false) end)
-                    if isServer() and type(sendCorpse) == "function" then
-                        pcall(function() sendCorpse(fallbackBody) end)
-                    end
-                    local srcCart = containerToCart(srcContainer)
-                    if srcCart and SaucedCarts.CorpseStorage
-                        and SaucedCarts.CorpseStorage.reconcile then
-                        pcall(function()
-                            SaucedCarts.CorpseStorage.reconcile(srcCart,
-                                SaucedCarts.CorpseStorage.cartTargetSquare(srcCart, player))
-                        end)
-                    end
-                    SaucedCarts.log("performCartTransfer: corpse byteData was bad; spawned default fallback body")
-                    return true
-                end
             end
 
             -- Both primary and fallback failed. Put the item BACK in the

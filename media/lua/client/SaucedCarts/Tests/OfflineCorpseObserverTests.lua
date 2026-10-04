@@ -633,31 +633,37 @@ tests["unload_past_skeletonAt_silent_drops_no_addCorpse_no_sendCorpse"] = functi
     return Assert.isTrue(not src:contains(item), "item removed from cart container")
 end
 
-tests["unload_fresh_corpse_materializes_and_broadcasts_sendCorpse"] = function()
-    -- Fresh corpse (under skeletonAt) → loadCorpseFromByteData spawns body,
-    -- addCorpse registers on the tile, and sendCorpse fires for remote
-    -- clients to receive AddCorpseToMapPacket.
+tests["unload_fresh_corpse_materializes_via_tryAddCorpseToWorld"] = function()
+    -- Fresh corpse (under skeletonAt) -> vanilla's
+    -- IsoGridSquare.tryAddCorpseToWorld places it: deserializes, POSITIONS
+    -- it on the square, registers it and broadcasts it (GameServer.sendCorpse
+    -- in Java). SaucedCarts must not add a Lua sendCorpse of its own -- that
+    -- was a second AddCorpseToMap (V11 class). The old shape,
+    -- loadCorpseFromByteData(sq) + addCorpse, left the body at the x/y saved
+    -- in its byte data: listed on the drop square, uninteractable
+    -- (EngineCorpseCartTests proves it against the real engine).
     local restoreSb = installSandbox({ hoursForRemoval = 24, now = 100 })
 
     local sq = F.square(7, 8, 0)
+    local placed, placedItem
+    sq.tryAddCorpseToWorld = function(self, it, x, y)
+        placedItem = it
+        placed = makeDeadBody({ square = self, id = it:getID() })
+        return placed
+    end
     sq.addCorpse = function(self, body, bRemote) self._addedBody = body end
 
-    local materialized
     local item = makeCorpseItemWithStamp({
         id = 9002, stampedDeathTime = 95,  -- effective_age = 5h, fresh
         loadCorpseFromByteData = function(self, dropSq)
-            materialized = makeDeadBody({ square = dropSq, id = self:getID() })
-            return materialized
+            error("must not deserialize directly: the body would keep its saved x/y")
         end,
     })
     local sendCorpseCount = 0
     local prevSendCorpse = _G.sendCorpse
     _G.sendCorpse = function(body) sendCorpseCount = sendCorpseCount + 1 end
-
-    -- Force isServer() to true so the sendCorpse branch fires.
     local prevIsServer = _G.isServer
     _G.isServer = function() return true end
-    -- isClient stays false in this scope.
 
     local src = F.container({ typeName = "TestSrc" })
     src:AddItem(item)
@@ -668,19 +674,18 @@ tests["unload_fresh_corpse_materializes_and_broadcasts_sendCorpse"] = function()
 
     local player = F.player({ square = sq })
 
-    local ok = SaucedCarts.performCartTransfer(
-        player, item, src, nil, sq)
+    local ok = SaucedCarts.performCartTransfer(player, item, src, nil, sq)
 
     _G.isServer = prevIsServer
     _G.sendCorpse = prevSendCorpse
     restoreSb()
 
     if not Assert.isTrue(ok, "performCartTransfer returned true") then return false end
-    if not Assert.isTrue(materialized ~= nil, "loadCorpseFromByteData was called") then return false end
-    if not Assert.equal(sq._addedBody, materialized,
-        "addCorpse called with the rematerialized body") then return false end
-    return Assert.equal(sendCorpseCount, 1,
-        "exactly one sendCorpse broadcast — remote clients receive AddCorpseToMapPacket")
+    if not Assert.isTrue(placed ~= nil, "placed through tryAddCorpseToWorld") then return false end
+    if not Assert.equal(placedItem, item, "with the corpse item") then return false end
+    if not Assert.isNil(sq._addedBody, "no separate addCorpse (vanilla registers it)") then return false end
+    return Assert.equal(sendCorpseCount, 0,
+        "no Lua sendCorpse -- the engine broadcast it; a second would double-materialize")
 end
 
 return tests

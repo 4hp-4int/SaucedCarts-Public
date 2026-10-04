@@ -371,19 +371,11 @@ tests["performCartTransfer_corpse_floor_double_perform_no_dupe"] = function()
         ISTransferAction.GetDropItemOffset = function(p, sq, it) return 0.5, 0.5, 0.0 end
     end
 
-    -- Build a corpse item that counts loadCorpseFromByteData invocations.
+    -- A corpse item; materialization goes through the square's
+    -- tryAddCorpseToWorld (vanilla's placement), counted below.
     local item = makeItem({ id = 910, fullType = "Base.CorpseMale" })
     local loadCalls = 0
-    item.loadCorpseFromByteData = function(self, sq)
-        loadCalls = loadCalls + 1
-        -- Return a mock body so the success branch completes normally.
-        return {
-            getSquare = function() return sq end,
-            getX = function() return sq and sq:getX() or 0 end,
-            getY = function() return sq and sq:getY() or 0 end,
-            getZ = function() return sq and sq:getZ() or 0 end,
-        }
-    end
+    item.loadCorpseFromByteData = function(self, sq) return {} end
     item.isHumanCorpse = function(self) return true end
     item.isAnimalCorpse = function(self) return false end
 
@@ -393,12 +385,17 @@ tests["performCartTransfer_corpse_floor_double_perform_no_dupe"] = function()
     local dropSq = { _type = "IsoGridSquare",
         getX = function() return 1 end, getY = function() return 0 end, getZ = function() return 0 end,
         AddWorldInventoryItem = function(self, it, x, y, h, transmit) return nil end,
-        addCorpse = function(self, body, bRemote) self._addCount = (self._addCount or 0) + 1 end }
+        addCorpse = function(self, body, bRemote) self._addCount = (self._addCount or 0) + 1 end,
+        tryAddCorpseToWorld = function(self, it, x, y)
+            loadCalls = loadCalls + 1
+            return { getSquare = function() return self end,
+                getX = function() return 1.5 end, getY = function() return 0.5 end, getZ = function() return 0 end }
+        end }
 
     -- First invocation: removes item, materializes body, succeeds.
     local ok1 = SaucedCarts.performCartTransfer(chr, item, cart:getItemContainer(), nil, dropSq, nil)
     -- Second invocation (simulates MP double-perform): item already removed
-    -- from src. Without the guard, this would loadCorpseFromByteData again.
+    -- from src. Without the guard, this would materialize a second body.
     local ok2 = SaucedCarts.performCartTransfer(chr, item, cart:getItemContainer(), nil, dropSq, nil)
 
     if ISTransferAction then
@@ -408,7 +405,7 @@ tests["performCartTransfer_corpse_floor_double_perform_no_dupe"] = function()
     if not Assert.isTrue(ok1, "first invocation returns true") then return false end
     if not Assert.isTrue(ok2, "second invocation returns true (idempotent success)") then return false end
     return Assert.equal(loadCalls, 1,
-        "loadCorpseFromByteData called EXACTLY ONCE across two performs — " ..
+        "tryAddCorpseToWorld called EXACTLY ONCE across two performs — " ..
         "idempotence guard prevented V11 MP dupe")
 end
 

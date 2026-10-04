@@ -221,7 +221,7 @@ function SaucedCarts.Durability.dropContentsAndDestroy(cart, player, square)
     -- Drop all items to ground. Two paths:
     --   - Corpse items: route through performCartTransfer so they
     --     materialize as real IsoDeadBody via its floor-drop corpse
-    --     branch (loadCorpseFromByteData + addCorpse + sendCorpse).
+    --     branch (vanilla's IsoGridSquare.tryAddCorpseToWorld).
     --     Otherwise broken-cart corpses would drop as un-grabbable
     --     Base.CorpseMale items with no respawn path.
     --   - Non-corpse items: the original AddWorldInventoryItem path

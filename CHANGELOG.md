@@ -87,6 +87,38 @@ The unload side is deliberately NOT converged. Vanilla `ISGrabCorpseItem:complet
 drop branch means "take it out and PUT IT DOWN". Different operations, not
 duplicates.
 
+### Corpses dragged out of a cart were placed somewhere else
+
+Reported, reproduced and fixed on a dedicated server by a commenter: a corpse
+dragged from the cart's inventory onto the ground showed up but could not be
+interacted with. The drop branch materialized it with
+`loadCorpseFromByteData(dropSquare)` + `addCorpse` + `sendCorpse`. Given a
+square, `tryLoadCorpseFromByteData` only does `setSquare`/`setCurrent`
+(InventoryItem.java:524-527) and never moves the body, so it kept the x/y saved
+in its byte data, which is wherever it originally died. It sat in the drop
+square's list while everything that finds a body by position (right-click,
+grab: `canBeGrabbedFrom` -> `getGridSquare(x, y)`) looked at the old spot, and
+`sendCorpse` broadcast that stale position to every client. The cart-break
+spill (`dropContentsAndDestroy`, which routes corpses through the same branch)
+had the same defect.
+
+Both now go through vanilla's own placement, `IsoGridSquare.tryAddCorpseToWorld`
+(the commenter's fix, and the path vanilla's Grab and every plain corpse drop
+take: `AddWorldInventoryItem` starts with it). It positions the body, registers
+it, broadcasts it (`GameServer.sendCorpse`) and queues the item for cleanup, so
+the Lua `sendCorpse` is gone: a second `AddCorpseToMap` would be the V11 class.
+The corrupt-byteData fallback was broken the same way and worse:
+`createDefaultDeadBody(square)` builds its stand-in with
+`IsoDeadBody(zombie, true, true)`, which already adds it to the world at the
+zombie's unset position, and we then `addCorpse`d it a second time. It now
+rebuilds the byteData off-world (`createAndStoreDefaultDeadBody(nil)`) and
+places the result through the same call.
+
+Pinned against the real engine (EngineCorpseCartTests asserts the body's
+position resolves to the square it lies on, for drag-unload and cart-break; both
+fail on the previous code), and the offline contract tests now require exactly
+one `tryAddCorpseToWorld` and no Lua `sendCorpse`.
+
 ### The grapple-wrapper purge is gone — vanilla owns that cleanup
 
 Removed after a live dry run proved it was pure hazard. `reanimate()` stamps the

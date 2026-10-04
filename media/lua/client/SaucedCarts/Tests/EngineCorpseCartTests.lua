@@ -191,6 +191,20 @@ tests["corpse_unload_drag_rematerializes_the_same_body"] = function()
         if not Assert.equal(corpsesOn(dropSq), 1, "a body is on the ground") then return false end
         local body = dropSq:getDeadBodys():get(0)
         if not Assert.equal(body:getObjectIDAsLong(), args.ghostId, "the same body (ObjectID)") then return false end
+        -- The body must BE where it is listed. Everything that finds a body by
+        -- position (right-click, grab: canBeGrabbedFrom -> getGridSquare(x, y))
+        -- reads its x/y, not which square's list holds it. A commenter's
+        -- dedicated-server report: corpses dragged out of a cart were not
+        -- interactable.
+        if not Assert.equal(math.floor(body:getX()), dropSq:getX(), "body x is on the drop square") then return false end
+        if not Assert.equal(math.floor(body:getY()), dropSq:getY(), "body y is on the drop square") then return false end
+        if not Assert.isTrue(getCell():getGridSquare(body:getX(), body:getY(), body:getZ()) == dropSq,
+            "the square its position resolves to is the one it lies on") then return false end
+        -- tryAddCorpseToWorld broadcasts the body itself on a server; a second
+        -- sendCorpse from Lua would be the V11 double-materialization.
+        for _, sent in ipairs(w.sent) do
+            if not Assert.isFalse(sent == "corpse", "no extra sendCorpse from Lua") then return false end
+        end
         return Assert.equal(corpseItemsIn(c:getInventory()), 0, "cart empty")
     end)
 end
@@ -308,7 +322,10 @@ tests["corpse_cart_break_puts_the_body_back_on_the_ground"] = function()
         local sq = c:getWorldItem():getSquare()
         SaucedCarts.Durability.dropContentsAndDestroy(c, w.player, sq)
         if not Assert.equal(corpsesOn(sq), 1, "the body is back on the ground") then return false end
-        return Assert.equal(sq:getDeadBodys():get(0):getObjectIDAsLong(), args.ghostId, "the same body")
+        local body = sq:getDeadBodys():get(0)
+        if not Assert.isTrue(getCell():getGridSquare(body:getX(), body:getY(), body:getZ()) == sq,
+            "positioned where it lies (interactable)") then return false end
+        return Assert.equal(body:getObjectIDAsLong(), args.ghostId, "the same body")
     end)
 end
 
