@@ -29,6 +29,7 @@ require "SaucedCarts/Core"
 require "SaucedCarts/CartData"
 require "SaucedCarts/CartTransferInterceptor"
 require "SaucedCarts/ForceDropGuard"
+require "SaucedCarts/Durability"
 
 -- ── World harness (shared: Tests/EngineWorld.lua) ─────────────────────────
 
@@ -492,6 +493,255 @@ end
 -- The actual 2.1.21 fix: the option's max was 99, so the engine refused 100
 -- and kept the old value. Through the engine's own typed option, registered
 -- from this mod's real sandbox-options.txt.
+-- ── Cart disappearance: every way a cart reaches the ground, then a reload ─
+-- The mechanism behind every "my cart vanished" report so far is vanilla's
+-- world-item cleanup, which runs INSIDE IsoGridSquare.load: an unflagged world
+-- item matching the removal config is simply not added back when its chunk is
+-- read from disk. PZEngine.reloadSquare saves a real square and loads it back
+-- through vanilla's own code, so the filter decides here exactly as in game.
+--
+-- Config that eats carts and nothing else (from the 2026-08-29 live proof):
+-- WorldItemRemovalList "SaucedCarts.ShoppingCart" (no underscore, so the
+-- family branch matches the whole type) with HoursForWorldItemRemoval 0.
+-- Note the filter's last clause is a STRICT greater-than
+-- (worldAge > dropTime + hours), so even at 0 hours an item is eaten only
+-- once some time has passed since it was dropped -- the tests advance the
+-- clock an hour before reloading.
+
+local function cleanupEatsCarts(fn)
+    local saved = {}
+    for _, name in ipairs({ "WorldItemRemovalList", "HoursForWorldItemRemoval", "ItemRemovalListBlacklistToggle" }) do
+        saved[name] = SandboxOptions.instance:getOptionByName(name):asConfigOption():getValueAsObject()
+    end
+    PZEngine.sandboxSet("ItemRemovalListBlacklistToggle", false)
+    PZEngine.sandboxSet("WorldItemRemovalList", "SaucedCarts.ShoppingCart")
+    PZEngine.sandboxSet("HoursForWorldItemRemoval", 0)
+    local ok, result = pcall(fn)
+    for name, v in pairs(saved) do PZEngine.sandboxSet(name, v) end
+    if not ok then error(result, 0) end
+    return result
+end
+
+--- Advance an hour, reload the square, return the carts (by id) still on it.
+local function survivorsAfterReload(sq)
+    World.setWorldHours(PZEngine.gameTime():getWorldAgeHours() + 1)
+    local fresh = assert(PZEngine.reloadSquare(sq))
+    local ids, objs = {}, fresh:getWorldObjects()
+    for i = 0, objs:size() - 1 do
+        local it = objs:get(i):getItem()
+        if it then ids[it:getID()] = it end
+    end
+    return ids, fresh
+end
+
+local function inReloadWorld(fn)
+    return inWorld(function(w)
+        World.setWorldHours(1000)
+        return cleanupEatsCarts(function() return fn(w) end)
+    end, { realClock = true })
+end
+
+-- The harness's own control: the config really does eat an unflagged cart.
+tests["vanish_control_unflagged_cart_is_eaten_on_reload"] = function()
+    return inReloadWorld(function(w)
+        local c = cart()
+        w.sq:AddWorldInventoryItem(c, 0.5, 0.5, 0)
+        local alive = survivorsAfterReload(w.sq)
+        return Assert.isNil(alive[c:getID()], "an unflagged cart is discarded by vanilla's load filter")
+    end)
+end
+
+tests["vanish_found_cart_used_in_place_survives"] = function()
+    return inReloadWorld(function(w)
+        local c = cart()
+        w.sq:AddWorldInventoryItem(c, 0.5, 0.5, 0)              -- loot-spawned: unflagged
+        local apple = PZEngine.instanceItem("Base.Apple")
+        w.player:getInventory():AddItem(apple)
+        SaucedCarts.performCartTransfer(w.player, apple, w.player:getInventory(), c:getInventory())
+        local alive = survivorsAfterReload(w.sq)
+        local back = alive[c:getID()]
+        if not Assert.notNil(back, "the cart you loaded survives the reload") then return false end
+        return Assert.equal(back:getItemContainer():getItems():size(), 1, "with its contents")
+    end)
+end
+
+tests["vanish_force_dropped_cart_survives"] = function()
+    installForceDrop()
+    return inReloadWorld(function(w)
+        local c = cart()
+        holdCart(w.player, c)
+        forceDropHeavyItems(w.player)
+        local alive = survivorsAfterReload(w.sq)
+        return Assert.notNil(alive[c:getID()], "force-dropped (vehicle entry, corpse grab...) and survived")
+    end)
+end
+
+tests["vanish_instant_dropped_cart_survives"] = function()
+    installDropHook()
+    local handler = SaucedCarts.Network._getServerHandler("requestInstantDrop")
+    return inReloadWorld(function(w)
+        local c = cart()
+        holdCart(w.player, c)
+        handler(w.player, { cartId = c:getID(), distancePushed = 0 })
+        local sq = c:getWorldItem() and c:getWorldItem():getSquare()
+        if not Assert.notNil(sq, "dropped") then return false end
+        local alive = survivorsAfterReload(sq)
+        return Assert.notNil(alive[c:getID()], "drag / V / right-click Unequip drop survived")
+    end)
+end
+
+tests["vanish_vanilla_drop_action_cart_survives"] = function()
+    installDropHook()
+    return inReloadWorld(function(w)
+        local c = cart()
+        holdCart(w.player, c)
+        ISDropWorldItemAction:new(w.player, c, w.sq, 0.5, 0.5, 0, 0, false):complete()
+        local alive = survivorsAfterReload(w.sq)
+        return Assert.notNil(alive[c:getID()], "server-side vanilla drop survived")
+    end)
+end
+
+tests["vanish_broken_cart_payload_survives"] = function()
+    return inReloadWorld(function(w)
+        local c = cart()
+        w.sq:AddWorldInventoryItem(c, 0.5, 0.5, 0)
+        local inner = cart()   -- a cart-type payload, so the cart filter applies to it
+        c:getInventory():AddItem(inner)
+        SaucedCarts.Durability.dropContentsAndDestroy(c, w.player, w.sq)
+        local alive = survivorsAfterReload(w.sq)
+        return Assert.notNil(alive[inner:getID()], "what a breaking cart spilled survived")
+    end)
+end
+
+-- Java's own heavy-item drop. Climbing through a window / frame, up or down a
+-- sheet rope, or over a wall calls IsoGameCharacter.dropHeavyItems, which
+-- treats ANY InventoryContainer as heavy and puts it down with a bare
+-- AddWorldInventoryItem -- no exemption (IsoGameCharacter.java:14950). The
+-- contextual E-key climbs are blocked while pushing (ContextActionRestrictions)
+-- but the right-click "Climb through window" / sheet-rope menu queues vanilla
+-- ISClimbThroughWindow / ISClimbSheetRopeAction, which never pass through it.
+require "SaucedCarts/FallenCartGuard"
+local FCG = SaucedCarts.FallenCartGuard
+
+local function fireEvent(evt, ...)
+    for _, fn in ipairs(Events[evt]._listeners) do fn(...) end
+end
+
+-- The engine's drop, unguarded: the premise. If this ever passes, vanilla
+-- started exempting its own heavy-item drops and the guard is redundant.
+tests["vanish_java_heavy_item_drop_unguarded_is_eaten"] = function()
+    return inReloadWorld(function(w)
+        local c = cart()
+        holdCart(w.player, c)
+        w.player:dropHeavyItems()
+        local wi = c:getWorldItem()
+        if not Assert.notNil(wi, "Java dropped the cart") then return false end
+        local alive = survivorsAfterReload(wi:getSquare())
+        return Assert.isNil(alive[c:getID()], "an engine-dropped cart is unflagged and eaten")
+    end)
+end
+
+-- SP / host: dropHeavyItems fires onItemFall (LuaEventManager.java:828) after
+-- the cart is already in the world. In game the engine fires the event; the
+-- harness has no Java->Lua event bus, so the test fires the registered
+-- listeners exactly as LuaEventManager would.
+tests["vanish_java_heavy_item_drop_guarded_survives"] = function()
+    if not Assert.isTrue(#Events.onItemFall._listeners > 0, "guard listens on onItemFall") then return false end
+    return inReloadWorld(function(w)
+        local c = cart()
+        holdCart(w.player, c)
+        w.player:dropHeavyItems()
+        fireEvent("onItemFall", c)
+        local alive = survivorsAfterReload(c:getWorldItem():getSquare())
+        return Assert.notNil(alive[c:getID()], "death / fall / climb drop survives the reload")
+    end)
+end
+
+-- MP: the client's event precedes its drop packet, and the server's own drop
+-- (dropHeldItems) fires no event. Client: wait, then ask. Server: find, mark.
+tests["vanish_mp_fallen_cart_client_asks_after_a_tick"] = function()
+    return inWorld(function(w)
+        local c = cart()
+        local got = captureToServer(function()
+            local savedGetPlayer = getPlayer
+            getPlayer = function() return w.player end
+            FCG.onItemFall(c)
+            fireEvent("OnTick"); fireEvent("OnTick")
+            getPlayer = savedGetPlayer
+        end)
+        local m
+        for _, x in ipairs(got) do if x.command == "markFallenCart" then m = x end end
+        if not Assert.notNil(m, "markFallenCart sent after the tick") then return false end
+        return Assert.equal(m.args.cartId, c:getID(), "for this cart")
+    end, { client = true })
+end
+
+tests["vanish_mp_server_marks_the_fallen_cart"] = function()
+    return inReloadWorld(function(w)
+        local c = cart()
+        holdCart(w.player, c)
+        -- The server half of an MP death/fall/climb drop (IsoGameCharacter.dropHeldItems).
+        w.player:dropHeldItems(w.sq:getX(), w.sq:getY(), 0, true, false)
+        if not Assert.notNil(c:getWorldItem(), "server dropped it") then return false end
+        if not Assert.isTrue(FCG.handleMarkFallenCart(w.player, { cartId = c:getID() }), "found and marked") then return false end
+        local alive = survivorsAfterReload(c:getWorldItem():getSquare())
+        return Assert.notNil(alive[c:getID()], "and it survives the reload")
+    end)
+end
+
+tests["vanish_mp_server_retries_a_late_drop"] = function()
+    return inReloadWorld(function(w)
+        local c = cart()
+        holdCart(w.player, c)
+        -- Request arrives BEFORE the drop: nothing to find yet, so it queues.
+        if not Assert.isFalse(FCG.handleMarkFallenCart(w.player, { cartId = c:getID() }), "not there yet") then return false end
+        w.player:dropHeldItems(w.sq:getX(), w.sq:getY(), 0, true, false)
+        FCG._retryTick()
+        if not Assert.equal(FCG._pendingCount(), 0, "retry found it") then return false end
+        return Assert.isTrue(c:getWorldItem():isIgnoreRemoveSandbox(), "and marked it")
+    end)
+end
+
+-- An exception inside a cart's own load() throws away the cart AND everything
+-- in it (InventoryItem.loadItem catches it and returns nil,
+-- InventoryItem.java:1902-1906; the square then drops the world object).
+-- So whatever SaucedCarts puts in a cart must survive a real save/load.
+tests["vanish_loaded_cart_round_trips_with_everything_aboard"] = function()
+    return inWorld(function(w)
+        World.setWorldHours(1000)
+        local c = cart()
+        SaucedCarts.applyMultipliers(c)
+        w.sq:AddWorldInventoryItem(c, 0.5, 0.5, 0)
+        c:getWorldItem():setIgnoreRemoveSandbox(true)
+        -- a corpse (byteData), a duffel holding an apple (nested containers)
+        local corpse = PZEngine.newCorpse(World.groundAt(w.sq, 1, 0), true):becomeCorpseItem(false)
+        c:getItemContainer():AddItem(corpse)
+        local bag = PZEngine.instanceItem("Base.Bag_DuffelBag")
+        bag:getItemContainer():AddItem(PZEngine.instanceItem("Base.Apple"))
+        c:getItemContainer():AddItem(bag)
+        local md = c:getModData()
+        md.SaucedCarts_distancePushed = 42.5
+        local fresh = assert(PZEngine.reloadSquare(w.sq))
+        local back
+        local objs = fresh:getWorldObjects()
+        for i = 0, objs:size() - 1 do
+            if objs:get(i):getItem():getID() == c:getID() then back = objs:get(i):getItem() end
+        end
+        if not Assert.notNil(back, "the loaded cart came back") then return false end
+        local items, gotCorpse, gotBag = back:getItemContainer():getItems(), nil, nil
+        for i = 0, items:size() - 1 do
+            local it = items:get(i)
+            if it:getFullType() == "Base.CorpseMale" then gotCorpse = it end
+            if it:getFullType() == "Base.Bag_DuffelBag" then gotBag = it end
+        end
+        if not Assert.notNil(gotCorpse, "the corpse is still aboard") then return false end
+        if not Assert.notNil(gotCorpse:loadCorpseFromByteData(nil), "and its body data still loads") then return false end
+        if not Assert.notNil(gotBag, "the duffel is still aboard") then return false end
+        if not Assert.equal(gotBag:getItemContainer():getItems():size(), 1, "with the apple in it") then return false end
+        return Assert.equal(back:getModData().SaucedCarts_distancePushed, 42.5, "and the cart's own state")
+    end, { realClock = true })
+end
+
 tests["world_weight_reduction_option_accepts_100"] = function()
     if not PZEngine.sandboxSet then return true end
     local kept = PZEngine.sandboxSet("SaucedCarts.WeightReduction", 100)

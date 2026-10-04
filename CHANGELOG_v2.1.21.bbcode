@@ -6,6 +6,9 @@ The game has a cleanup setting that sweeps away items lying on the ground after 
 [b]Corpse loading in multiplayer is properly wired up now.[/b]
 This is the opt-in corpse feature, still off by default. Loading a body into a cart used to run down its own private code path, separate from every other way items move into a cart, which meant it quietly missed things the normal path handles: the cart's appearance did not refresh when you loaded a body (a background repair sweep was fixing it about fifteen seconds later, which is why it looked laggy rather than broken), items inside bags inside the cart did not sync correctly, and the cart never got marked as in-use for the cleanup problem above. Corpse loading now goes through the same well-tested path as everything else, so it inherits all of that automatically.
 
+[b]A cart dropped when you die, fall or climb no longer vanishes later.[/b]
+When you die, take a bad fall, or climb through a window with a cart in your hands, the game itself drops the cart, and it did so without marking it as yours. On servers that clean up items left on the ground, that cart could disappear the next time the area loaded. It is now marked like every other cart you put down.
+
 [b]Corpses dragged out of a cart onto the ground can be picked up again.[/b]
 A body taken out of a cart this way appeared on the ground but could not be grabbed or interacted with, because it was placed with its old position from wherever it first died. It now goes through the game's own corpse placement, so it lands exactly where you dropped it, for you and everyone else on the server. A broken cart spilling a corpse had the same problem and is fixed too. Thanks to the commenter who reproduced this on a dedicated server and sent the fix.
 

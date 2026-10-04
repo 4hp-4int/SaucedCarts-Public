@@ -87,6 +87,42 @@ The unload side is deliberately NOT converged. Vanilla `ISGrabCorpseItem:complet
 drop branch means "take it out and PUT IT DOWN". Different operations, not
 duplicates.
 
+### Carts the engine drops itself: death, falls, climbs
+
+The world-cleanup exemption audit had covered every drop SaucedCarts performs
+and every vanilla Lua drop it wraps. One layer down, Java's own
+`IsoGameCharacter.dropHeavyItems` treats ANY `InventoryContainer` as heavy and
+puts it down with a bare `AddWorldInventoryItem`, no exemption
+(IsoGameCharacter.java:14950). It runs on player death (`IsoPlayer.OnDeath` ->
+`dropHandItems`), on a fall heavier than a light one, a sprint-vault fall, a
+fence trip, and climbing through a window/frame, a sheet rope or over a wall
+(the right-click climb menu queues vanilla actions that bypass the contextual
+climb block). In MP the server's half (`dropHeldItems`) fires no Lua event at
+all. Result: "I died / fell, came back for my cart, it was gone" on any server
+whose cleanup can match carts.
+
+New `FallenCartGuard`: the engine fires `onItemFall(item)` on the machine that
+runs the drop (LuaEventManager.java:828). In SP the cart is already in the world
+and is marked on the spot. On an MP client the event precedes the drop packet,
+so the client waits a tick and asks the server, which finds the cart beside the
+player (falling through to the floor below if need be) and marks it, retrying
+briefly if the drop lands late. Our object only, no admin config touched.
+
+Found by an engine sweep for every path that can delete or fail to persist an
+item, and reproduced offline through a REAL chunk reload (pz-test-kit
+`PZEngine.reloadSquare`: vanilla's own save/load, cleanup filter included). The
+same harness now proves every way a cart reaches the ground survives a reload
+under a cart-eating config -- found-and-used, force-dropped, instant-dropped,
+vanilla drop action, broken-cart spill, engine heavy drop SP and MP -- and that
+a cart carrying a corpse, a bag of items and its own state round-trips intact.
+
+Not SaucedCarts', recorded for triage: a vehicle that errors while loading is
+deleted with everything in it (VehiclesDB2.java:553-556), and a vehicle mod
+update that renames a part drops that part's container (VehicleParts.java
+:300-318) -- the likeliest explanation for the old "cart in a vehicle vanished"
+report. And any item whose mod is missing for even one session is marked
+removed in the world dictionary and deleted at the next save.
+
 ### Corpses dragged out of a cart were placed somewhere else
 
 Reported, reproduced and fixed on a dedicated server by a commenter: a corpse
