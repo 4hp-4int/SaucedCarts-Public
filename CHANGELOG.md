@@ -297,52 +297,53 @@ switch. The cart's own weight is always paid. 100% is the floor vanilla's
 formula allows — a truly weightless pushed cart would need a different
 mechanism entirely.
 
-### A cart that broke as you dropped it could stay on the server's books
+### "Stayed on the server's books" -- investigated, not a mod bug; the fix that wasn't
 
 Player report (MP): "I unequipped it and dropped it completely out of my
 inventory. A few minutes later the server still seemed to think I was carrying
 it. The weight kept increasing over time, causing Pain, Muscle Strain and
 increasingly severe Weight moodles. God Mode didn't fix it."
 
-**The escalation is vanilla's, and it means only ONE stale reference is needed.**
-Above `HEAVY_LOAD` level 2, `BodyDamage.java:2313-2326` deals health damage and
-calls `addBackMuscleStrain`. `BodyDamage.java:2070-2082` then recomputes
-`setMaxWeight(maxWeightBase * weightMod - numStrengthReducers)`, where
-`numStrengthReducers` climbs with the `INJURED` moodle (+1/+2/+3 at levels
-2/3/4). So over-encumbrance causes injury, injury shrinks carrying capacity, and
-the same carried weight reads as heavier next cycle. Nothing has to accumulate
-for the moodles to worsen indefinitely, and God Mode does not help because it
-suppresses the damage without removing the item or clearing the moodles.
+An earlier commit in this cycle (c360e04) "fixed" this by delegating a breaking
+drop from the MP client to the server, inside `ISDropWorldItemAction.complete`.
+That branch never runs: a replicating timed action finishes with
+`act.perform(); if (!GameClient.client) act.complete();`
+(IsoGameCharacter.java:9764), so an MP client runs `perform()` only and the
+server runs `complete()`. The premise -- the client removing the cart and the
+server refusing the delete -- describes a path the game does not execute. It is
+removed, with the four offline tests built on it.
 
-**Our part was a single stale reference.**
-`ISDropWorldItemAction.complete` defines `complete`, so it replicates and its
-body runs on the player's client too. Its cart-break branch did
-`inventory:Remove(item)` plus `sendRemoveItemFromContainer` — which from a
-client is `SyncItemDelete`, `requiredCapability = Capability.EditItem`, admin
-only (`SyncItemDeletePacket.java:8`, verified on 42.20.4). The server refuses
-it, so the client loses the cart locally while the server goes on counting its
-weight. The unequip path had already solved this in v2.1.19 by delegating to
-`requestInstantDrop` (`ContainerRestrictions:270`); the drop path was missed.
+Then reproduced properly, live on the dedi with two clients and a cart rigged
+on the server to break on its next wear application: drag-to-floor, the V
+hotkey and right-click Unequip ALL go through `requestInstantDrop`, which is
+server-authoritative. The server broke the cart, removed it from the player's
+inventory (carried weight fell by exactly the cart's 2.40), told the client,
+and the spilled corpse appeared identically on both clients. No path left a
+cart on the server's books.
 
-The fix mirrors it, with two constraints. It **projects** rather than applies:
-`applyAccumulatedDamage` writes the new condition *and* resets
-`distancePushed` to the remainder, so a client running it would send an
-already-spent distance and the server would reach a different verdict. New pure
-helper `SaucedCarts.Durability.projectCondition(cart)` — the same projection
-`AnimationSync.handleInstantDrop` already did inline, now shared. And it is
-**scoped to the break case**: a normal drop still falls through to vanilla's own
-replicated `complete()`, which syncs correctly unaided.
+The report's symptoms fit vanilla's over-encumbrance spiral with nothing still
+carried: above `HEAVY_LOAD` level 2, `BodyDamage.java:2313-2326` deals damage
+and back strain, and `BodyDamage.java:2070-2082` lowers max weight as the
+INJURED moodle climbs, so "the weight kept increasing" is carrying capacity
+shrinking. God Mode stops new damage but not the existing injury's effect on
+capacity. A loaded cart can start that spiral while pushed -- the cart's own
+weight always counts and the contents still cost 5% at the default -- and the
+injury outlasts the drop. (During the repro the test character was at 8.64 /
+8.0 holding a cart.)
 
-Only the break path was affected, so a cart had to be at or near zero condition
-as it was put down. Carts already stuck this way are recoverable — the server
-still holds the cart, so a full relog surfaces it in the inventory again and a
-clean drop sticks.
+### Push distance reaches the server when it is needed, not every 10 tiles
 
-Tests written before the fix and confirmed to fail against the old code
-(`OfflineDropActionTests.lua`, which previously only exercised `isValid`): no
-local `Remove` on an MP client, no admin-only delete packet, delegation
-actually sent, and a singleplayer precision test that the local path still
-works where there is no server to delegate to.
+The client measures how far a cart is pushed; wear is applied from that when the
+cart leaves the hands. MP sent `syncCartDistance` every 10 tiles pushed -- a
+command every few seconds per pushing player, each one a banner on servers with
+a command logger -- for a number the server reads only at that moment. Now:
+`requestInstantDrop` (every live UI path) already carries the distance, and for
+the server's copy of a vanilla drop/unequip the client sends it once, when the
+action is created (`Durability.flushDistanceToServer` behind wrappers on
+`ISUnequipAction.new` / `ISDropWorldItemAction.new`), which is before the action
+itself is queued and sent. Verified live: zero distance commands while pushing.
+Trade-off, accepted: a player who disconnects mid-push loses that session's
+wear (previously at most 10 tiles), i.e. a little free durability.
 
 ### Technical
 

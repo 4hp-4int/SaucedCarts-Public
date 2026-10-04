@@ -151,14 +151,20 @@ tests["world_transfer_drop_to_ground_is_exempt"] = function()
     end)
 end
 
--- ── 2.1.21: a cart that breaks as you drop it ─────────────────────────────
--- ISDropWorldItemAction defines complete(), so it replicates and its body runs
--- on the MP client too. The old cart-break branch removed the cart locally and
--- sent sendRemoveItemFromContainer -- from a client that is SyncItemDelete,
--- admin-only (SyncItemDeletePacket.java:8), refused by the server, which kept
--- counting the cart's weight. The fix delegates the break to the server via
--- requestInstantDrop. Vanilla's real ISDropWorldItemAction here, SaucedCarts'
--- hook on top, the server's real handler on the same real player afterwards.
+-- ── A cart that breaks as it leaves the hands ─────────────────────────────
+-- The MP split, as the engine runs it: a replicating timed action finishes
+-- with `act.perform(); if (!GameClient.client) act.complete();`
+-- (IsoGameCharacter.java:9764). So on an MP client a drop runs perform() ONLY
+-- and the server runs complete(), with its own copy of the cart. Every
+-- client-side "delegate the break" branch inside complete() was therefore dead
+-- in MP (removed: it was the 2.1.21 "stayed on the server's books" fix, whose
+-- premise -- the client removing the cart -- the game never executes). The
+-- live UI paths (drag to floor, V, right-click Unequip) all go through
+-- requestInstantDrop instead; verified on the dedi 2026-10-04 with a cart
+-- rigged to break: the server broke it, took it off the books, the spilled
+-- corpse landed interactable on both clients.
+--
+-- Vanilla's real ISDropWorldItemAction here, SaucedCarts' hook on top.
 
 local dropHookReady = false
 local function installDropHook()
@@ -197,28 +203,50 @@ local function captureToServer(fn)
     return got
 end
 
-tests["world_break_on_drop_client_delegates_and_keeps_the_books"] = function()
+tests["world_break_on_drop_mp_client_perform_changes_nothing"] = function()
     installDropHook()
     return inWorld(function(w)
         local c = wornOutCart()
         holdCart(w.player, c)
-        local sentToServer = captureToServer(function()
-            ISDropWorldItemAction:new(w.player, c, w.sq, 0.5, 0.5, 0, 0, false):complete()
-        end)
-        if not Assert.isTrue(w.player:getInventory():contains(c),
-            "the client did not remove the cart locally") then return false end
-        for _, s in ipairs(w.sent) do
-            if not Assert.isFalse(s:find("^remove") ~= nil,
-                "no admin-only delete sent from the client (" .. s .. ")") then return false end
+        local action = ISDropWorldItemAction:new(w.player, c, w.sq, 0.5, 0.5, 0, 0, false)
+        -- perform() ends in ISBaseTimedAction.perform, which reports to the
+        -- character's action queue and the action log -- bookkeeping that
+        -- exists when the action runs through the real queue. Stand-ins for
+        -- this one call; the assertions are about the cart.
+        local savedQ, savedLog = ISTimedActionQueue, ISLogSystem
+        ISTimedActionQueue = { getTimedActionQueue = function()
+            return { queue = {}, onCompleted = function() end } end }
+        ISLogSystem = { logAction = function() end }
+        local ok, err = pcall(function() action:perform() end)   -- all an MP client runs
+        ISTimedActionQueue, ISLogSystem = savedQ, savedLog
+        if not Assert.isTrue(ok, "perform ran (" .. tostring(err) .. ")") then return false end
+        if not Assert.isTrue(w.player:getInventory():contains(c), "the client did not remove the cart") then return false end
+        if not Assert.isNil(c:getWorldItem(), "nor drop it") then return false end
+        for _, sent in ipairs(w.sent) do
+            if not Assert.isFalse(sent:find("^remove") ~= nil, "no delete sent from the client (" .. sent .. ")") then return false end
         end
-        local req
-        for _, m in ipairs(sentToServer) do if m.command == "requestInstantDrop" then req = m end end
-        if not Assert.notNil(req, "the break was delegated to the server") then return false end
-        if not Assert.equal(req.args.cartId, c:getID(), "for this cart") then return false end
-        return Assert.equal(req.args.distancePushed, 5000, "with the UNSPENT distance (projected, not applied)")
+        return Assert.equal(c:getCondition(), 1, "and applied no wear: the server decides")
     end, { client = true })
 end
 
+tests["world_break_on_drop_server_complete_takes_it_off_the_books"] = function()
+    installDropHook()
+    return inWorld(function(w)
+        local c = wornOutCart()
+        local apple = PZEngine.instanceItem("Base.Apple")
+        c:getInventory():AddItem(apple)
+        holdCart(w.player, c)
+        ISDropWorldItemAction:new(w.player, c, w.sq, 0.5, 0.5, 0, 0, false):complete()
+        if not Assert.isFalse(w.player:getInventory():contains(c), "cart off the server's books") then return false end
+        if not Assert.isNil(c:getWorldItem(), "a broken cart does not land as a cart") then return false end
+        if not Assert.notNil(apple:getWorldItem(), "its contents spill") then return false end
+        local removed = false
+        for _, s2 in ipairs(w.sent) do if s2 == "remove SaucedCarts.ShoppingCart" then removed = true end end
+        return Assert.isTrue(removed, "and the server told the client")
+    end)
+end
+
+-- The path the live UI actually takes (drag to floor, V, right-click Unequip).
 tests["world_break_on_drop_server_takes_it_off_the_books"] = function()
     installDropHook()
     local handler = SaucedCarts.Network._getServerHandler("requestInstantDrop")
@@ -250,6 +278,81 @@ tests["world_healthy_drop_still_lands_and_is_exempt"] = function()
         local wi = c:getWorldItem()
         if not Assert.notNil(wi, "on the ground") then return false end
         return Assert.isTrue(wi:isIgnoreRemoveSandbox(), "exempt, as vanilla's drop marks it")
+    end)
+end
+
+-- ── Distance reaches the server when a cart leaves the hands ──────────────
+-- In MP the drop/unequip that applies wear is the server's copy of a vanilla
+-- action (complete() runs only where !GameClient.client), reading the
+-- server's modData. The client sends its measured distance once, when the
+-- action is CREATED -- before it is queued and sent -- instead of every 10
+-- tiles while pushing. Real vanilla ISUnequipAction / ISDropWorldItemAction.
+
+local function installUnequipHook()
+    -- Vanilla's ISUnequipAction:new asks ISWearClothing.isStopOnWalk(item).
+    if not ISWearClothing then
+        assert(PZEngine.loadVanilla("shared/TimedActions/ISWearClothing"))
+    end
+    -- ...and, on a client, getPlayerHotbar (a UI global the harness lacks).
+    -- nil = "not from the hotbar", which is true of a cart in the hands.
+    getPlayerHotbar = getPlayerHotbar or function() return nil end
+    require "SaucedCarts/ContainerRestrictions"
+    SaucedCarts.ContainerRestrictions.initUnequipHook()
+end
+
+local function sentDistance(sentToServer)
+    for _, m in ipairs(sentToServer) do
+        if m.command == "syncCartDistance" then return m end
+    end
+end
+
+tests["world_distance_sent_once_when_an_unequip_is_created"] = function()
+    installDropHook(); installUnequipHook()
+    return inWorld(function(w)
+        local c = cart()
+        holdCart(w.player, c)
+        c:getModData().SaucedCarts_distancePushed = 37.5
+        local got = captureToServer(function() ISUnequipAction:new(w.player, c, 50) end)
+        local m = sentDistance(got)
+        if not Assert.notNil(m, "syncCartDistance sent") then return false end
+        if not Assert.equal(m.args.cartId, c:getID(), "for this cart") then return false end
+        if not Assert.equal(m.args.distancePushed, 37.5, "with the measured distance") then return false end
+        return Assert.equal(#got, 1, "exactly one command")
+    end, { client = true })
+end
+
+tests["world_distance_sent_once_when_a_drop_is_created"] = function()
+    installDropHook()
+    return inWorld(function(w)
+        local c = cart()
+        holdCart(w.player, c)
+        c:getModData().SaucedCarts_distancePushed = 12
+        local got = captureToServer(function()
+            ISDropWorldItemAction:new(w.player, c, w.sq, 0.5, 0.5, 0, 0, false)
+        end)
+        local m = sentDistance(got)
+        if not Assert.notNil(m, "syncCartDistance sent") then return false end
+        return Assert.equal(m.args.distancePushed, 12, "with the measured distance")
+    end, { client = true })
+end
+
+tests["world_distance_not_sent_for_other_items_or_by_the_server"] = function()
+    installDropHook(); installUnequipHook()
+    local onClient = inWorld(function(w)
+        local axe = PZEngine.instanceItem("Base.Axe")
+        w.player:getInventory():AddItem(axe)
+        w.player:setPrimaryHandItem(axe)
+        local got = captureToServer(function() ISUnequipAction:new(w.player, axe, 50) end)
+        return Assert.isNil(sentDistance(got), "a non-cart sends nothing")
+    end, { client = true })
+    if not onClient then return false end
+    return inWorld(function(w)
+        local c = cart()
+        holdCart(w.player, c)
+        c:getModData().SaucedCarts_distancePushed = 99
+        -- The server rebuilds the replicated action through the same new().
+        local got = captureToServer(function() ISUnequipAction:new(w.player, c, 50) end)
+        return Assert.isNil(sentDistance(got), "the server's rebuild of the action sends nothing")
     end)
 end
 

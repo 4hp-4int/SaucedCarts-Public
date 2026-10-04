@@ -207,6 +207,30 @@ end
 
 local unequipHookInitialized = false
 
+
+--- Client: when a drop or unequip of a cart is CREATED, send the server the
+--- pushed distance its copy of the action will apply wear from (see
+--- Durability.flushDistanceToServer). Created comes before queued and sent,
+--- so the command is ahead of the action on the wire. Server-side new() calls
+--- (NetTimedAction rebuilding the action) are no-ops: flush is client-only.
+local function wrapNewWithDistanceFlush(actionClass, label)
+    if not actionClass or actionClass._SaucedCarts_distanceFlush then return end
+    local originalNew = actionClass.new
+    if not originalNew then return end
+    actionClass._SaucedCarts_distanceFlush = true
+    actionClass.new = function(self, character, item, ...)
+        pcall(function()
+            if item and SaucedCarts.safeIsCart(item) and SaucedCarts.Durability
+                and SaucedCarts.Durability.flushDistanceToServer then
+                if SaucedCarts.Durability.flushDistanceToServer(character, item) then
+                    SaucedCarts.debug("distance flushed to server on " .. label)
+                end
+            end
+        end)
+        return originalNew(self, character, item, ...)
+    end
+end
+
 local function initUnequipHook()
     if unequipHookInitialized then
         SaucedCarts.debug("Unequip hook already initialized, skipping")
@@ -399,6 +423,7 @@ local function initUnequipHook()
         return originalComplete(self)
     end
 
+    wrapNewWithDistanceFlush(ISUnequipAction, "unequip")
     unequipHookInitialized = true
     SaucedCarts.debug("Unequip hook initialized")
 end
@@ -472,53 +497,6 @@ local function initDropActionHook()
         end)
 
         if isCart then
-            -- MP CLIENT + THIS DROP WOULD BREAK THE CART -> delegate, mutate nothing.
-            --
-            -- complete() replicates (the class defines it), so this body runs on
-            -- the player's client too. The break branch below removes the cart
-            -- from the inventory and calls sendRemoveItemFromContainer — which
-            -- from a client is SyncItemDelete, requiredCapability =
-            -- Capability.EditItem, admin only (SyncItemDeletePacket.java:8,
-            -- verified 42.20.4). The server refuses it, so the client loses the
-            -- cart locally while the SERVER GOES ON COUNTING ITS WEIGHT.
-            --
-            -- That single stale reference is enough to produce the whole
-            -- reported spiral, because the escalation is vanilla's: past
-            -- HEAVY_LOAD level 2, BodyDamage:2313-2326 adds back muscle strain
-            -- and health damage, and BodyDamage:2070-2082 shrinks maxWeight as
-            -- the INJURED moodle climbs — so the same carried weight reads as
-            -- heavier each cycle. God Mode does not help: it stops the damage
-            -- without removing the item.
-            --
-            -- Projected, not applied: applyAccumulatedDamage would write the new
-            -- condition and reset distancePushed to the remainder, and the server
-            -- handler needs that un-reset value to reach the same verdict.
-            -- Non-breaking drops deliberately fall through to vanilla's own
-            -- replicated complete(), which syncs correctly on its own.
-            if isClient() and self.character and self.character.getOnlineID
-                and self.character:getOnlineID() then
-                local wouldBreak = false
-                pcall(function()
-                    wouldBreak = SaucedCarts.Durability.projectCondition(self.item) <= 0
-                end)
-                if wouldBreak then
-                    pcall(function()
-                        local md = self.item:getModData()
-                        if SaucedCarts.Network and SaucedCarts.Network.sendToServer then
-                            SaucedCarts.Network.sendToServer(self.character,
-                                "requestInstantDrop", {
-                                    cartId = self.item:getID(),
-                                    distancePushed = (md and md.SaucedCarts_distancePushed) or 0,
-                                })
-                        end
-                        SaucedCarts.clearCartPose(self.character)
-                    end)
-                    SaucedCarts.debug("Drop would break cart - delegated to server (MP-safe)")
-                    pcall(function() ISBaseTimedAction.perform(self) end)
-                    return
-                end
-            end
-
             -- Wrap durability logic in pcall - never break vanilla drop
             local cartBroke = false
             pcall(function()
@@ -598,6 +576,7 @@ local function initDropActionHook()
         return result
     end
 
+    wrapNewWithDistanceFlush(ISDropWorldItemAction, "drop")
     dropActionHookInitialized = true
     SaucedCarts.debug("Drop action hook initialized")
 end
@@ -691,6 +670,7 @@ SaucedCarts.ContainerRestrictions = ContainerRestrictions
 
 -- Test hooks (exposed for pz-test-kit — not part of the public API).
 SaucedCarts.ContainerRestrictions.initDropActionHook = initDropActionHook
+SaucedCarts.ContainerRestrictions.initUnequipHook = initUnequipHook
 
 SaucedCarts.debug("ContainerRestrictions module loaded")
 

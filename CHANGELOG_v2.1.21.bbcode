@@ -24,12 +24,11 @@ If you would rather a loaded cart cost you nothing to push, you can set it there
 
 Worth explaining what this setting does, because it catches people out: it reduces the weight of what is [i]inside[/i] the cart, not the weight of the cart itself. At the default of 95, a cart holding fifty kilos of loot costs you about two and a half kilos for the load, plus about two and a half for the cart. Turning it up to 100 removes the first number. The second one stays no matter what you set — you are still holding onto the thing.
 
-[b]A worn-out cart could vanish from your hands but stay on the server's books.[/b]
-On a multiplayer server, if a cart was worn down to breaking point at the moment you put it down, your own game removed it but the server never got the message — so it carried on counting the cart's weight against you. Because you could no longer see it, there was nothing to drop, and nothing looked wrong.
+[b]Pushing a cart no longer chatters to the server.[/b]
+In multiplayer the game used to tell the server how far you had pushed every few steps. It now sends that once, when you put the cart down, which is the only time the server needs it.
 
-That is worse than it sounds, because of how the game handles being overloaded. Once the weight moodle gets severe enough, the game starts hurting you and straining your back, and being injured lowers how much you can carry — which makes the overloading worse, which injures you more. It spirals on its own, and God Mode does not stop it, because it prevents the damage without removing what is weighing you down.
-
-Only carts that were at or near breaking point when dropped were affected. If this has happened to you, the cart is not lost: the server still has it, so fully quitting to the main menu and rejoining should put it back in your inventory, and dropping it again will stick.
+[b]About "the server still thinks I'm carrying it".[/b]
+We looked into a report of a cart that kept weighing on a player after they dropped it, and tested every way of putting a cart down on a live server, including carts breaking as they are dropped. In every case the cart left the player's inventory on the server too. What the report describes matches the game's own overload effect: carrying too much hurts you, and being hurt lowers how much you can carry, so you can stay weighed down for a while after you drop the load. A heavily loaded cart can start this, because the cart itself always counts toward your weight and the contents still count for a little.
 
 [h1]Compatibility[/h1]
 [list]

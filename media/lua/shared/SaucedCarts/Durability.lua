@@ -134,29 +134,6 @@ function SaucedCarts.Durability.applyAccumulatedDamage(cart, player)
     return cart:getCondition()
 end
 
---- What the cart's condition WOULD be if accumulated damage were applied now.
---- Pure: mutates nothing.
----
---- Needed because applyAccumulatedDamage has side effects a client must not
---- perform in MP — it writes the new condition AND resets
---- SaucedCarts_distancePushed to the remainder. A client that wants to know
---- "would this drop break the cart?" has to ask without spending the distance,
---- because the server-side handler needs the un-reset value to reach the same
---- answer. Same projection AnimationSync.handleInstantDrop does before
---- deciding broke-vs-survived.
----@param cart InventoryItem
----@return number projected condition after pending damage (0 = would break)
-function SaucedCarts.Durability.projectCondition(cart)
-    if not cart or not cart.getCondition then return 0 end
-    local current = cart:getCondition() or 0
-    local md = cart.getModData and cart:getModData()
-    local distance = (md and md.SaucedCarts_distancePushed) or 0
-    if distance <= 0 then return current end
-    local damage = math.floor(distance / TILES_PER_DAMAGE)
-    local projected = current - damage
-    return projected > 0 and projected or 0
-end
-
 --- Reset the threshold marker on a cart. Called by the repair flow so
 --- the player gets fresh warnings the next time the cart starts taking
 --- damage.
@@ -281,6 +258,35 @@ end
 ---@return number
 function SaucedCarts.Durability.getTilesPerDamage()
     return TILES_PER_DAMAGE
+end
+
+--- Hand the server this client's pushed distance for a cart, once.
+---
+--- Wear is applied when a cart leaves the hands, and in MP the drop/unequip
+--- that applies it is the SERVER's copy of a vanilla timed action: complete()
+--- runs only where !GameClient.client (IsoGameCharacter.java:9764) and reads
+--- the server's modData. The client is the one that measured the push, so it
+--- sends the number at the moment that matters -- when the drop or unequip is
+--- created, which is before the action itself reaches the server -- instead of
+--- every 10 tiles while pushing. requestInstantDrop and the unequip command
+--- already carry the distance in their own args.
+---
+--- No-op off an MP client, for non-carts, and when nothing was pushed.
+---@param player IsoPlayer
+---@param cart InventoryItem
+---@return boolean sent
+function SaucedCarts.Durability.flushDistanceToServer(player, cart)
+    if not (isClient and isClient()) then return false end
+    if not player or not cart or not SaucedCarts.safeIsCart(cart) then return false end
+    if not (SaucedCarts.Network and SaucedCarts.Network.sendToServer) then return false end
+    local md = cart:getModData()
+    local distance = md and md.SaucedCarts_distancePushed or 0
+    if type(distance) ~= "number" or distance <= 0 then return false end
+    SaucedCarts.Network.sendToServer(player, "syncCartDistance", {
+        cartId = cart:getID(),
+        distancePushed = distance,
+    })
+    return true
 end
 
 SaucedCarts.debug("Durability loaded")

@@ -68,10 +68,11 @@ local UPGRADE_RECOVERY_INTERVAL = SaucedCarts.Config.UPGRADE_RECOVERY_INTERVAL
 -- Stores last known position {x, y} while holding cart
 local playerLastPos = {}
 
--- Distance sync tracking for MP (per player)
--- Stores last distancePushed value that was synced to server
-local playerLastSyncedDistance = {}
-local DISTANCE_SYNC_THRESHOLD = SaucedCarts.Config.DISTANCE_SYNC_THRESHOLD or 10
+-- Distance reaches the server when it is needed -- when a drop or unequip is
+-- created (Durability.flushDistanceToServer) or inside requestInstantDrop --
+-- not on a timer while pushing. The old every-10-tiles syncCartDistance was
+-- one command per few seconds per pushing player, for a number the server
+-- only reads when the cart leaves the hands.
 
 -- Timed-action tracking for pose restore (per player). True while the player
 -- had a timed action running last frame; the action-finished EDGE triggers the
@@ -204,7 +205,6 @@ local function onPlayerUpdate(player)
 
         -- Clear distance tracking (position no longer relevant)
         playerLastPos[playerKey] = nil
-        playerLastSyncedDistance[playerKey] = nil
         playerWasInAction[playerKey] = nil
 
         playerCartState[playerKey] = nil  -- Use nil for consistency (both nil and false are falsy)
@@ -280,19 +280,6 @@ local function onPlayerUpdate(player)
                     modData.SaucedCarts_moveEventCounter = 0
                 else
                     modData.SaucedCarts_moveEventCounter = moveEventCounter
-                end
-
-                -- Periodic distance sync to server (MP only)
-                if isClient() then
-                    local currentDistance = modData.SaucedCarts_distancePushed or 0
-                    local lastSynced = playerLastSyncedDistance[playerKey] or 0
-                    if currentDistance - lastSynced >= DISTANCE_SYNC_THRESHOLD then
-                        SaucedCarts.Network.sendToServer(player, "syncCartDistance", {
-                            cartId = primary:getID(),
-                            distancePushed = currentDistance,
-                        })
-                        playerLastSyncedDistance[playerKey] = currentDistance
-                    end
                 end
             end
 
@@ -418,7 +405,6 @@ local function onPlayerDeath(player)
     -- Clear orchestrator state
     playerCartState[playerKey] = nil
     playerLastPos[playerKey] = nil
-    playerLastSyncedDistance[playerKey] = nil
     playerFrameCounter[playerKey] = nil
     upgradeRecoveryCounter[playerKey] = nil
     playerWasInAction[playerKey] = nil
@@ -444,7 +430,6 @@ local function onGameEnd()
     playerFrameCounter = {}
     upgradeRecoveryCounter = {}
     playerLastPos = {}
-    playerLastSyncedDistance = {}
     playerWasInAction = {}
     playerSeeded = {}
 
